@@ -580,3 +580,70 @@ Per the final-attempt instruction, no further implementation loop will be
 started. It may be programmed once for controlled functional diagnosis of the
 high-water behavior; any recurrent overflow/artifact ends the attempt and
 triggers a detailed handoff.
+
+## Final functional diagnosis: high-water candidate rejected
+
+The functional-test-only image was programmed once with its matching LTX. The
+first ILA capture:
+
+```text
+captures\usb0_v19\
+  ila_status_chord_rowrun_final_20260728_213230.csv
+```
+
+reported no sticky integrity alarm, but the six FIFO peaks were already
+840--888 entries. The first USB stress sample was mostly black, containing
+only small live-image patches:
+
+```text
+captures\usb0_v19\temporal_stress_admission_18000_20260728\
+  sample_000000.jpg
+```
+
+The same condition persisted through frame 1,800. New horizontal green bands
+were captured at frames 1,846 and 1,847. The final ILA capture:
+
+```text
+captures\usb0_v19\
+  ila_status_chord_rowrun_final_20260728_213539.csv
+```
+
+still reported:
+
+```text
+capture overflow=0
+output FIFO overflow=0
+output bank conflict=0
+```
+
+but the FIFO peaks were 1,856--1,968/2,048. During all 2,048 samples:
+
+```text
+copy_active=1
+scan_active=1
+copy_px_valid=0
+v19_frame_done=0
+```
+
+The renderer debug word decodes to:
+
+```text
+state=1
+pano_y=51
+pano_x=0
+line-cache rows min/max=111
+required source row=180
+```
+
+Only 72 source-replay reads retired in the window while 281 writes retired.
+The green band is therefore the output pixel-FIFO underflow diagnostic, not the
+capture-overflow overlay. Camera write pressure is starving source replay; the
+renderer cannot reach its first required content row and produces no output
+pixels.
+
+Per the user's stop instruction, the stress process was terminated and no
+further RTL/build loop was started. The full next-model handoff is:
+
+```text
+docs/CODEX_HANDOFF_V19_FINAL_ATTEMPT_20260728.md
+```
