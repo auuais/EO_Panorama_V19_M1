@@ -224,3 +224,41 @@ without enabling XPM advanced-feature bit 10. This is an instrumentation-only
 defect: the authoritative overflow signals and the video data path are working.
 The next checkpoint enables that counter feature so FIFO service margin can be
 quantified; it does not change scheduling or stored video data.
+
+## Rejected FIFO-occupancy telemetry checkpoint
+
+XPM advanced-feature bit 10 was enabled in a telemetry-only checkpoint so the
+six UI-domain `rd_data_count` values could be measured. Its marker/startup/FIFO
+telemetry unit test passed, and a fresh non-incremental Vivado 2025.2 build
+completed bitstream generation. The routed design did not meet setup timing:
+
+| Check | Result |
+|---|---:|
+| Synthesis | 0 errors, 0 critical warnings |
+| Route/DRC, excluding timing signoff | 0 errors |
+| Routed WNS | -0.192 ns |
+| Routed TNS | -0.192 ns |
+| Setup failing endpoints | 1 |
+| Routed WHS | +0.010 ns |
+| Routed THS | 0.000 ns |
+| Routed WPWS | +0.006 ns |
+| Routed TPWS | 0.000 ns |
+| Unrouted/partially routed nets | 0 / 0 |
+| FIFO CDC bus-skew constraints | 24/24 met |
+| Minimum bus-skew slack | +3.656 ns |
+
+Rejected bitstream metadata:
+
+- Size: 21,229,375 bytes
+- Generated: 2026-07-28 19:19:22 KST
+- SHA-256:
+  `3716815F9D5C28F33DE315AEC2BFF02D1997950F2E5D504D7C216F37EE5D08FE`
+
+This image was **not programmed**. Enabling occupancy count changed the XPM
+FIFO implementation enough to perturb placement and create one setup
+violation. It provides no functional improvement to the already accepted data
+path. The timing-clean capture-QoS checkpoint
+`F13DCFA14EABCFE9C55D0E902345B596899999F3A5D54DF918BC94E4DE41AAA4`
+remains the hardware-validated release: two 2,048-sample ILA captures were
+alarm-free and its 180-frame moving-scene USB capture contained neither the
+horizontal noisy-line artifact nor the mid-frame temporal split.
