@@ -39,6 +39,8 @@ ip/ddr4_sub64/*
 Thumbs.db
 .DS_Store
 .claude/
+__pycache__/
+*.py[cod]
 *.baseline_*
 # Keep the recreatable debug ILA IP source (regenerated via
 # scripts/codex_add_ila.tcl + scripts/codex_widen_ila.tcl), mirroring the

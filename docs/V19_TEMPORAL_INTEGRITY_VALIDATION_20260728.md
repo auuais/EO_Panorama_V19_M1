@@ -426,3 +426,20 @@ middle, and final retained frames found:
 The scene contained only minor motion during this pass, so this result is an
 immediate functional checkpoint rather than the final moving-scene or
 long-duration signoff.
+
+## Continuous temporal-integrity verifier
+
+`scripts/codex_usb3_temporal_stress.py` provides a low-overhead long-duration
+USB check. Unlike the diagnostic color/statistics collector, it sustains the
+requested grabber rate while it:
+
+- excludes the intentional padding edges around active rows 51--428 and
+  531--908;
+- learns the normal per-row horizontal-edge profile;
+- detects a newly introduced wide horizontal epoch boundary;
+- detects isolated full-width temporal row corruption;
+- saves periodic reference frames and only the first anomalous full frames.
+
+A 180-frame smoke run sustained 30.11 captured frames/s and reported zero
+temporal-row events and zero new horizontal-boundary events. Repeated
+USB-delivered frames are counted separately and are not treated as corruption.
