@@ -84,6 +84,26 @@ module tb_EoV19FrameSetManager;
         end
     endtask
 
+    task publish_one;
+        input [2:0] cam;
+        input [15:0] epoch;
+        input [1:0] bank;
+        begin
+            @(negedge clk);
+            desc_valid = 6'd0;
+            case (cam)
+                0: begin desc_valid[0]=1'b1; desc_bank0=bank; desc_epoch0=epoch; end
+                1: begin desc_valid[1]=1'b1; desc_bank1=bank; desc_epoch1=epoch; end
+                2: begin desc_valid[2]=1'b1; desc_bank2=bank; desc_epoch2=epoch; end
+                3: begin desc_valid[3]=1'b1; desc_bank3=bank; desc_epoch3=epoch; end
+                4: begin desc_valid[4]=1'b1; desc_bank4=bank; desc_epoch4=epoch; end
+                default: begin desc_valid[5]=1'b1; desc_bank5=bank; desc_epoch5=epoch; end
+            endcase
+            @(negedge clk);
+            desc_valid = 6'd0;
+        end
+    endtask
+
     integer init_seen;
     integer release_pulses;
     initial begin
@@ -147,7 +167,33 @@ module tb_EoV19FrameSetManager;
         if (collision_seen)
             $fatal(1, "unexpected descriptor collision");
 
-        $display("PASS: common-epoch banks are leased, held, and released atomically");
+        // Camera 0 skipped epoch 31 while every other camera completed it.
+        // Epoch 30 is now provably stale and must be returned so camera 0 can
+        // publish 31; otherwise four such skips would deadlock every ring.
+        publish_one(0, 16'd30, 0);
+        publish_one(1, 16'd31, 0);
+        publish_one(2, 16'd31, 0);
+        publish_one(3, 16'd31, 0);
+        publish_one(4, 16'd31, 0);
+        publish_one(5, 16'd31, 0);
+        release_pulses=0;
+        repeat (30) begin
+            @(posedge clk);
+            if (free_valid[0] && free_bank0 == 0)
+                release_pulses=release_pulses+1;
+        end
+        if (release_pulses != 1)
+            $fatal(1, "stale epoch 30 was not reclaimed exactly once");
+        if (valid_map[3:0] != 4'd0)
+            $fatal(1, "camera 0 stale descriptor remained valid: %h", valid_map);
+
+        publish_one(0, 16'd31, 1);
+        wait_lease(16'd31);
+        if (lease_bank0 != 1 || lease_bank1 != 0 || lease_bank2 != 0 ||
+            lease_bank3 != 0 || lease_bank4 != 0 || lease_bank5 != 0)
+            $fatal(1, "wrong banks after skipped-epoch recovery");
+
+        $display("PASS: leases are atomic and skipped epochs cannot deadlock the rings");
         $finish;
     end
 endmodule

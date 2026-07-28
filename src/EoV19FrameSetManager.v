@@ -67,6 +67,7 @@ module EoV19FrameSetManager #(
     localparam [3:0] ST_ACQUIRE    = 4'd3;
     localparam [3:0] ST_WAIT       = 4'd4;
     localparam [3:0] ST_RELEASE    = 4'd5;
+    localparam [3:0] ST_RECLAIM    = 4'd6;
 
     reg [3:0] state;
     reg [1:0] bank_index;
@@ -202,6 +203,28 @@ module EoV19FrameSetManager #(
         end
     endfunction
 
+    // Oldest completed descriptor in one camera ring.  Callers only use the
+    // result when at least one valid bit is set.
+    function [EPOCH_W-1:0] oldest_epoch4;
+        input [3:0] valid;
+        input [EPOCH_W-1:0] e0;
+        input [EPOCH_W-1:0] e1;
+        input [EPOCH_W-1:0] e2;
+        input [EPOCH_W-1:0] e3;
+        reg [EPOCH_W-1:0] value;
+        begin
+            if (valid[0])      value = e0;
+            else if (valid[1]) value = e1;
+            else if (valid[2]) value = e2;
+            else               value = e3;
+            if (valid[0] && epoch_newer(value, e0)) value = e0;
+            if (valid[1] && epoch_newer(value, e1)) value = e1;
+            if (valid[2] && epoch_newer(value, e2)) value = e2;
+            if (valid[3] && epoch_newer(value, e3)) value = e3;
+            oldest_epoch4 = value;
+        end
+    endfunction
+
     wire candidate_common = valid0[bank_index] &&
                             epoch_present1(candidate_epoch) &&
                             epoch_present2(candidate_epoch) &&
@@ -226,6 +249,53 @@ module EoV19FrameSetManager #(
     wire release_ready = ((release_mask & ~free_ready) == 6'd0);
     wire all_rings_full = &valid0 && &valid1 && &valid2 &&
                           &valid3 && &valid4 && &valid5;
+    wire all_rings_nonempty = (|valid0) && (|valid1) && (|valid2) &&
+                              (|valid3) && (|valid4) && (|valid5);
+
+    wire [EPOCH_W-1:0] oldest0 = oldest_epoch4(
+        valid0, epoch0[0], epoch0[1], epoch0[2], epoch0[3]);
+    wire [EPOCH_W-1:0] oldest1 = oldest_epoch4(
+        valid1, epoch1[0], epoch1[1], epoch1[2], epoch1[3]);
+    wire [EPOCH_W-1:0] oldest2 = oldest_epoch4(
+        valid2, epoch2[0], epoch2[1], epoch2[2], epoch2[3]);
+    wire [EPOCH_W-1:0] oldest3 = oldest_epoch4(
+        valid3, epoch3[0], epoch3[1], epoch3[2], epoch3[3]);
+    wire [EPOCH_W-1:0] oldest4 = oldest_epoch4(
+        valid4, epoch4[0], epoch4[1], epoch4[2], epoch4[3]);
+    wire [EPOCH_W-1:0] oldest5 = oldest_epoch4(
+        valid5, epoch5[0], epoch5[1], epoch5[2], epoch5[3]);
+    wire [EPOCH_W-1:0] oldest01 =
+        epoch_newer(oldest1, oldest0) ? oldest1 : oldest0;
+    wire [EPOCH_W-1:0] oldest23 =
+        epoch_newer(oldest3, oldest2) ? oldest3 : oldest2;
+    wire [EPOCH_W-1:0] oldest45 =
+        epoch_newer(oldest5, oldest4) ? oldest5 : oldest4;
+    wire [EPOCH_W-1:0] oldest0123 =
+        epoch_newer(oldest23, oldest01) ? oldest23 : oldest01;
+    wire [EPOCH_W-1:0] reclaim_frontier =
+        epoch_newer(oldest45, oldest0123) ? oldest45 : oldest0123;
+
+    // If no common set exists and every camera has completed at least one
+    // frame, an epoch older than the newest per-camera oldest epoch can never
+    // become common: the camera which established that frontier has already
+    // advanced past it.  Returning only those provably stale banks prevents a
+    // skipped camera frame from filling the four rings and deadlocking the
+    // ownership protocol.
+    wire stale0 = valid0[bank_index] &&
+                  epoch_newer(reclaim_frontier, epoch0[bank_index]);
+    wire stale1 = valid1[bank_index] &&
+                  epoch_newer(reclaim_frontier, epoch1[bank_index]);
+    wire stale2 = valid2[bank_index] &&
+                  epoch_newer(reclaim_frontier, epoch2[bank_index]);
+    wire stale3 = valid3[bank_index] &&
+                  epoch_newer(reclaim_frontier, epoch3[bank_index]);
+    wire stale4 = valid4[bank_index] &&
+                  epoch_newer(reclaim_frontier, epoch4[bank_index]);
+    wire stale5 = valid5[bank_index] &&
+                  epoch_newer(reclaim_frontier, epoch5[bank_index]);
+    wire [5:0] stale_mask = {stale5, stale4, stale3,
+                             stale2, stale1, stale0};
+    wire stale_ready = ((stale_mask & ~free_ready) == 6'd0);
 
     assign descriptor_valid_map = {valid5, valid4, valid3,
                                    valid2, valid1, valid0};
@@ -351,7 +421,12 @@ module EoV19FrameSetManager #(
                     end else begin
                         if (all_rings_full)
                             rings_full_no_common_seen <= 1'b1;
-                        state <= ST_FIND_RESET;
+                        if (all_rings_nonempty) begin
+                            bank_index <= 2'd0;
+                            state <= ST_RECLAIM;
+                        end else begin
+                            state <= ST_FIND_RESET;
+                        end
                     end
                 end
 
@@ -378,6 +453,31 @@ module EoV19FrameSetManager #(
                         if (release5) valid5[bank_index] <= 1'b0;
                         if (bank_index == 2'd3) begin
                             lease_valid <= 1'b0;
+                            bank_index <= 2'd0;
+                            state <= ST_FIND_RESET;
+                        end else begin
+                            bank_index <= bank_index + 2'd1;
+                        end
+                    end
+                end
+
+                ST_RECLAIM: begin
+                    // Unlike normal post-consumer release, this path has no
+                    // lease.  It returns only descriptors that are strictly
+                    // older than the progress frontier, retaining every epoch
+                    // which could still match a future camera completion.
+                    if ((stale_mask == 6'd0) || stale_ready) begin
+                        free_valid <= stale_mask;
+                        free_bank0 <= bank_index; free_bank1 <= bank_index;
+                        free_bank2 <= bank_index; free_bank3 <= bank_index;
+                        free_bank4 <= bank_index; free_bank5 <= bank_index;
+                        if (stale0) valid0[bank_index] <= 1'b0;
+                        if (stale1) valid1[bank_index] <= 1'b0;
+                        if (stale2) valid2[bank_index] <= 1'b0;
+                        if (stale3) valid3[bank_index] <= 1'b0;
+                        if (stale4) valid4[bank_index] <= 1'b0;
+                        if (stale5) valid5[bank_index] <= 1'b0;
+                        if (bank_index == 2'd3) begin
                             bank_index <= 2'd0;
                             state <= ST_FIND_RESET;
                         end else begin
