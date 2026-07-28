@@ -180,7 +180,9 @@ module EoV19DdrCamWriter #(
         .READ_DATA_WIDTH     (FIFO_W),
         .READ_MODE           ("fwft"),
         .SIM_ASSERT_CHK      (0),
-        .USE_ADV_FEATURES    ("0101"),
+        // overflow + underflow + rd_data_count.  Bit 10 must be set for the
+        // UI-domain FIFO occupancy telemetry used by the hardware ILA.
+        .USE_ADV_FEATURES    ("0501"),
         .WAKEUP_TIME         (0),
         .WR_DATA_COUNT_WIDTH (11),
         .WRITE_DATA_WIDTH    (FIFO_W),
