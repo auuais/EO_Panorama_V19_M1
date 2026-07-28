@@ -174,3 +174,53 @@ Generated bitstream:
   `F13DCFA14EABCFE9C55D0E902345B596899999F3A5D54DF918BC94E4DE41AAA4`
 
 Hardware programming and ILA/visual signoff remain pending.
+
+## Hardware pass 2: capture-QoS checkpoint
+
+The capture-QoS bitstream was programmed with its matching LTX. Two independent
+ILA captures were taken after DDR calibration, including a sustained check
+several minutes after programming:
+
+```text
+captures\usb0_v19\
+  ila_status_chord_rowrun_final_20260728_181905.csv
+captures\usb0_v19\
+  ila_status_chord_rowrun_final_20260728_182205.csv
+```
+
+Both captures show:
+
+```text
+running=1
+v19_replay_banks_ready=1
+copy_active=1
+scan_active=1
+dbg_beat_overflow=0
+dbg_capture_overflow_seen=0
+dbg_bank_conflict_seen=0
+dbg_output_fifo_overflow_seen=0
+```
+
+Every signal above retained the stated value for all 2,048 samples of the
+sustained capture. This proves that the normal-operation camera-ingress
+overflow seen in hardware pass 1 is removed by the capture-priority and
+zero-bubble handoff.
+
+A 180-frame USB-grabber sequence was then captured:
+
+```text
+captures\usb0_v19\capture_qos_pass1_20260728
+```
+
+- 180/180 frames contained real video; no uniform diagnostic frame occurred.
+- Early and late frames were visually inspected, including person/hand motion.
+- The previously observed noisy horizontal lines and mid-frame horizontal
+  split were not present.
+- The accepted optical/calibration seam mismatch remains and is outside this
+  temporal-integrity fix.
+
+The new FIFO peak telemetry reads zero because `rd_data_count` was connected
+without enabling XPM advanced-feature bit 10. This is an instrumentation-only
+defect: the authoritative overflow signals and the video data path are working.
+The next checkpoint enables that counter feature so FIFO service margin can be
+quantified; it does not change scheduling or stored video data.
