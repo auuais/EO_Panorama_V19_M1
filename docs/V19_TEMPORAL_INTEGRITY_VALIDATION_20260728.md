@@ -525,3 +525,58 @@ The new high-water test fills a small FIFO exactly to its pressure threshold,
 attempts another frame without draining, and proves that only the first frame's
 eight payload beats and one bank-0 marker exist. It also proves that the hard
 overflow alarm remains clear.
+
+## High-water candidate build: functional-test-only timing miss
+
+A fresh non-incremental Vivado 2025.2 run completed synthesis,
+implementation, routing, DRC, and bitstream generation. Exact routed signoff
+found one setup violation:
+
+| Check | Result |
+|---|---:|
+| Synthesis | 0 errors, 0 critical warnings |
+| Route/bitstream errors | 0 |
+| Routed WNS | -0.060 ns |
+| Routed TNS | -0.060 ns |
+| Setup failing endpoints | 1 |
+| Routed WHS | +0.010 ns |
+| Routed THS | 0.000 ns |
+| Routed WPWS | +0.099 ns |
+| Routed TPWS | 0.000 ns |
+| Unrouted/partially routed nets | 0 / 0 |
+| FIFO CDC bus-skew constraints | 24/24 met |
+| Minimum bus-skew slack | +3.296 ns |
+
+The sole failing path is internal to the generated MIG/XIPHY:
+
+```text
+From: ...u_ddr_mc_wr_bit/dReg_reg[1]/C
+To:   ...u_xiphy_bitslice_upper/xiphy_rxtx_bitslice/D[1]
+Path: mmcm_clkout0 -> pll_clk[0]_DIV
+```
+
+It has 3.345 ns data-path delay, of which 3.266 ns is route delay. The one
+critical warning is the vectorless `report_power` high-fanout-reset activity
+warning; it is unrelated to DRC or implementation correctness.
+
+Post-place utilization:
+
+| Resource | Used | Available | Utilization |
+|---|---:|---:|---:|
+| CLB LUTs | 34,238 | 522,720 | 6.55% |
+| CLB registers | 47,930 | 1,045,440 | 4.58% |
+| Block RAM tiles | 628 | 984 | 63.82% |
+| URAM | 0 | 128 | 0.00% |
+
+Generated functional-diagnostic bitstream:
+
+- Size: 21,248,555 bytes
+- Generated: 2026-07-28 21:28:19 KST
+- SHA-256:
+  `E84D64452B549589428BADC986B84BBAAE9A9E27064DAE6CABF51D3B15C7666A`
+
+This image is not timing-signoff quality and cannot be promoted as a release.
+Per the final-attempt instruction, no further implementation loop will be
+started. It may be programmed once for controlled functional diagnosis of the
+high-water behavior; any recurrent overflow/artifact ends the attempt and
+triggers a detailed handoff.
