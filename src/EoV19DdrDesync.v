@@ -26,6 +26,7 @@ module EoV19DdrCamWriter #(
     output reg         bank_valid_ui,
     output reg         valid_bank_ui,
     output reg         fifo_overflow_seen_ui,
+    output wire [10:0] fifo_level_ui,
     output wire [10:0] dbg_row_ui
 );
     localparam integer FIFO_W = 413;
@@ -205,7 +206,7 @@ module EoV19DdrCamWriter #(
         .underflow     (),
         .rd_rst_busy   (),
         .data_valid    (),
-        .rd_data_count (),
+        .rd_data_count (fifo_level_ui),
         .almost_empty  (),
         .prog_empty    (),
         .injectsbiterr (1'b0),

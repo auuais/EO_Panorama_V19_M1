@@ -765,8 +765,12 @@ module PanoramaBase_DdrBlackFrame(
     wire        v19_cap3_bank, v19_cap4_bank, v19_cap5_bank;
     wire        v19_cap0_overflow, v19_cap1_overflow, v19_cap2_overflow;
     wire        v19_cap3_overflow, v19_cap4_overflow, v19_cap5_overflow;
+    wire [10:0] v19_cap0_level, v19_cap1_level, v19_cap2_level;
+    wire [10:0] v19_cap3_level, v19_cap4_level, v19_cap5_level;
     wire [10:0] v19_cap0_row, v19_cap1_row, v19_cap2_row;
     wire [10:0] v19_cap3_row, v19_cap4_row, v19_cap5_row;
+    reg  [10:0] v19_cap0_peak, v19_cap1_peak, v19_cap2_peak;
+    reg  [10:0] v19_cap3_peak, v19_cap4_peak, v19_cap5_peak;
     reg  [2:0]  v19_cap_rr;
     reg         v19_cap_sel_valid;
     reg  [2:0]  v19_cap_sel;
@@ -777,8 +781,24 @@ module PanoramaBase_DdrBlackFrame(
     reg         v19_cap_marker_pop_pending;
     reg         eo_frames_ready_seen;
     always @(posedge c0_ddr4_ui_clk) begin
-        if (ui_rst) eo_frames_ready_seen <= 1'b0;
-        else if (eo_frames_valid) eo_frames_ready_seen <= 1'b1;
+        if (ui_rst) begin
+            eo_frames_ready_seen <= 1'b0;
+            v19_cap0_peak <= 11'd0;
+            v19_cap1_peak <= 11'd0;
+            v19_cap2_peak <= 11'd0;
+            v19_cap3_peak <= 11'd0;
+            v19_cap4_peak <= 11'd0;
+            v19_cap5_peak <= 11'd0;
+        end else begin
+            if (eo_frames_valid)
+                eo_frames_ready_seen <= 1'b1;
+            if (v19_cap0_level > v19_cap0_peak) v19_cap0_peak <= v19_cap0_level;
+            if (v19_cap1_level > v19_cap1_peak) v19_cap1_peak <= v19_cap1_level;
+            if (v19_cap2_level > v19_cap2_peak) v19_cap2_peak <= v19_cap2_level;
+            if (v19_cap3_level > v19_cap3_peak) v19_cap3_peak <= v19_cap3_level;
+            if (v19_cap4_level > v19_cap4_peak) v19_cap4_peak <= v19_cap4_level;
+            if (v19_cap5_level > v19_cap5_peak) v19_cap5_peak <= v19_cap5_level;
+        end
     end
 
     always @* begin
@@ -854,6 +874,18 @@ module PanoramaBase_DdrBlackFrame(
     (* mark_debug = "true", dont_touch = "true" *) wire [63:0] v19_dbg_rows_word1;
     (* mark_debug = "true", dont_touch = "true" *) wire [63:0] v19_dbg_rows_word2;
     (* mark_debug = "true", dont_touch = "true" *) wire [63:0] v19_replay_dbg_word;
+    // Capture-service telemetry.  Each peak is reported in four-entry units,
+    // so all six 0..1023-entry FIFO peaks plus the individual sticky overflow
+    // causes fit in one existing 64-bit ILA probe without growing the core.
+    // [63:60] signature 4'hC, [59:54] overflow cam5..cam0,
+    // [53:45] cam5 peak/4 ... [8:0] cam0 peak/4.
+    wire [63:0] v19_capture_dbg =
+        {4'hC,
+         v19_cap5_overflow, v19_cap4_overflow, v19_cap3_overflow,
+         v19_cap2_overflow, v19_cap1_overflow, v19_cap0_overflow,
+         v19_cap5_peak[10:2], v19_cap4_peak[10:2],
+         v19_cap3_peak[10:2], v19_cap2_peak[10:2],
+         v19_cap1_peak[10:2], v19_cap0_peak[10:2]};
     (* mark_debug = "true", dont_touch = "true" *) wire        v19_content_row51 =
         (SRC_SEL == SRC_V19) &&
         v19_dbg_bus[49] &&                // renderer start_copy/copy_active
@@ -1080,37 +1112,43 @@ module PanoramaBase_DdrBlackFrame(
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap0_pop), .fifo_empty(v19_cap0_empty),
             .fifo_addr(v19_cap0_addr), .fifo_data(v19_cap0_data), .fifo_is_marker(v19_cap0_marker),
             .fifo_marker_bank(v19_cap0_marker_bank), .bank_valid_ui(v19_cap0_bank_valid),
-            .valid_bank_ui(v19_cap0_bank), .fifo_overflow_seen_ui(v19_cap0_overflow), .dbg_row_ui(v19_cap0_row));
+            .valid_bank_ui(v19_cap0_bank), .fifo_overflow_seen_ui(v19_cap0_overflow),
+            .fifo_level_ui(v19_cap0_level), .dbg_row_ui(v19_cap0_row));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 1))) u_v19_cap1 (
             .rst_n(rst_n), .capture_enable(running), .cam_clk(eo1_wr_clk), .cam_hsync(eo1_wr_hsync), .cam_vsync(eo1_wr_vsync), .cam_pixel(eo1_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap1_pop), .fifo_empty(v19_cap1_empty),
             .fifo_addr(v19_cap1_addr), .fifo_data(v19_cap1_data), .fifo_is_marker(v19_cap1_marker),
             .fifo_marker_bank(v19_cap1_marker_bank), .bank_valid_ui(v19_cap1_bank_valid),
-            .valid_bank_ui(v19_cap1_bank), .fifo_overflow_seen_ui(v19_cap1_overflow), .dbg_row_ui(v19_cap1_row));
+            .valid_bank_ui(v19_cap1_bank), .fifo_overflow_seen_ui(v19_cap1_overflow),
+            .fifo_level_ui(v19_cap1_level), .dbg_row_ui(v19_cap1_row));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 2))) u_v19_cap2 (
             .rst_n(rst_n), .capture_enable(running), .cam_clk(eo2_wr_clk), .cam_hsync(eo2_wr_hsync), .cam_vsync(eo2_wr_vsync), .cam_pixel(eo2_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap2_pop), .fifo_empty(v19_cap2_empty),
             .fifo_addr(v19_cap2_addr), .fifo_data(v19_cap2_data), .fifo_is_marker(v19_cap2_marker),
             .fifo_marker_bank(v19_cap2_marker_bank), .bank_valid_ui(v19_cap2_bank_valid),
-            .valid_bank_ui(v19_cap2_bank), .fifo_overflow_seen_ui(v19_cap2_overflow), .dbg_row_ui(v19_cap2_row));
+            .valid_bank_ui(v19_cap2_bank), .fifo_overflow_seen_ui(v19_cap2_overflow),
+            .fifo_level_ui(v19_cap2_level), .dbg_row_ui(v19_cap2_row));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 3))) u_v19_cap3 (
             .rst_n(rst_n), .capture_enable(running), .cam_clk(eo3_wr_clk), .cam_hsync(eo3_wr_hsync), .cam_vsync(eo3_wr_vsync), .cam_pixel(eo3_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap3_pop), .fifo_empty(v19_cap3_empty),
             .fifo_addr(v19_cap3_addr), .fifo_data(v19_cap3_data), .fifo_is_marker(v19_cap3_marker),
             .fifo_marker_bank(v19_cap3_marker_bank), .bank_valid_ui(v19_cap3_bank_valid),
-            .valid_bank_ui(v19_cap3_bank), .fifo_overflow_seen_ui(v19_cap3_overflow), .dbg_row_ui(v19_cap3_row));
+            .valid_bank_ui(v19_cap3_bank), .fifo_overflow_seen_ui(v19_cap3_overflow),
+            .fifo_level_ui(v19_cap3_level), .dbg_row_ui(v19_cap3_row));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 4))) u_v19_cap4 (
             .rst_n(rst_n), .capture_enable(running), .cam_clk(eo4_wr_clk), .cam_hsync(eo4_wr_hsync), .cam_vsync(eo4_wr_vsync), .cam_pixel(eo4_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap4_pop), .fifo_empty(v19_cap4_empty),
             .fifo_addr(v19_cap4_addr), .fifo_data(v19_cap4_data), .fifo_is_marker(v19_cap4_marker),
             .fifo_marker_bank(v19_cap4_marker_bank), .bank_valid_ui(v19_cap4_bank_valid),
-            .valid_bank_ui(v19_cap4_bank), .fifo_overflow_seen_ui(v19_cap4_overflow), .dbg_row_ui(v19_cap4_row));
+            .valid_bank_ui(v19_cap4_bank), .fifo_overflow_seen_ui(v19_cap4_overflow),
+            .fifo_level_ui(v19_cap4_level), .dbg_row_ui(v19_cap4_row));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 5))) u_v19_cap5 (
             .rst_n(rst_n), .capture_enable(running), .cam_clk(eo5_wr_clk), .cam_hsync(eo5_wr_hsync), .cam_vsync(eo5_wr_vsync), .cam_pixel(eo5_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap5_pop), .fifo_empty(v19_cap5_empty),
             .fifo_addr(v19_cap5_addr), .fifo_data(v19_cap5_data), .fifo_is_marker(v19_cap5_marker),
             .fifo_marker_bank(v19_cap5_marker_bank), .bank_valid_ui(v19_cap5_bank_valid),
-            .valid_bank_ui(v19_cap5_bank), .fifo_overflow_seen_ui(v19_cap5_overflow), .dbg_row_ui(v19_cap5_row));
+            .valid_bank_ui(v19_cap5_bank), .fifo_overflow_seen_ui(v19_cap5_overflow),
+            .fifo_level_ui(v19_cap5_level), .dbg_row_ui(v19_cap5_row));
 
         EoV19DdrReplay #(
             .CAM0_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 0)),
@@ -2394,29 +2432,18 @@ module PanoramaBase_DdrBlackFrame(
                     end
                 end
 
-                if (!issue_busy) begin
-                    if (scan_want) begin
-                        // The HD-SDI scan-out is real-time.  V19 source-row
-                        // replay returns are already disambiguated from scan
-                        // returns by rd_tag_mem (RD_TAG_SCAN vs RD_TAG_V19_SRC),
-                        // so there is no need to globally suppress scan reads
-                        // while a V19 copy is active.  Suppressing them starved
-                        // pix_fifo and produced the display-side magenta
-                        // underflow diagnostic even after the renderer itself
-                        // was producing valid panorama pixels.
-                        cmd_pend         <= 1'b1;
-                        cmd_is_rd        <= 1'b1;
-                        cmd_is_keepalive <= 1'b0;
-                        cmd_is_src_read  <= 1'b0;
-                        cmd_addr_q       <= rd_addr;
-                    end else if (capture_write_want) begin
-                        // Camera capture is real-time and has only a bounded
-                        // async FIFO.  Service it ahead of replay/output
-                        // background traffic (scan-out remains highest
-                        // priority).  An in-band frame marker consumes no DDR
-                        // command: popping it publishes the completed bank in
-                        // EoV19DdrCamWriter only after all earlier payload
-                        // writes have retired.
+                // A retired camera write can hand this held-command slot
+                // directly to the next request.  The previous implementation
+                // forced one idle ui_clk cycle after every capture beat even
+                // when both MIG write channels accepted together.  Camera
+                // FIFO traffic is safe for this handoff because its FIFO head
+                // was popped when the retiring request was launched; all
+                // read/output address state remains stable when selected here.
+                if (!issue_busy || (write_retiring && cmd_write_capture)) begin
+                    if (capture_write_want) begin
+                        // Input data cannot be replayed if dropped, whereas
+                        // display scan-out has a 7,800-pixel prefetch cushion.
+                        // Service bounded camera CDC FIFOs first.
                         case (v19_cap_sel)
                             3'd0: v19_cap0_pop <= 1'b1;
                             3'd1: v19_cap1_pop <= 1'b1;
@@ -2440,6 +2467,20 @@ module PanoramaBase_DdrBlackFrame(
                             w_cmd_done       <= 1'b0;
                             w_wdf_done       <= 1'b0;
                         end
+                    end else if (scan_want) begin
+                        // The HD-SDI scan-out is real-time.  V19 source-row
+                        // replay returns are already disambiguated from scan
+                        // returns by rd_tag_mem (RD_TAG_SCAN vs RD_TAG_V19_SRC),
+                        // so there is no need to globally suppress scan reads
+                        // while a V19 copy is active.  Suppressing them starved
+                        // pix_fifo and produced the display-side magenta
+                        // underflow diagnostic even after the renderer itself
+                        // was producing valid panorama pixels.
+                        cmd_pend         <= 1'b1;
+                        cmd_is_rd        <= 1'b1;
+                        cmd_is_keepalive <= 1'b0;
+                        cmd_is_src_read  <= 1'b0;
+                        cmd_addr_q       <= rd_addr;
                     end else if (v19_src_read_want) begin
                         cmd_pend         <= 1'b1;
                         cmd_is_rd        <= 1'b1;
@@ -2574,7 +2615,7 @@ module PanoramaBase_DdrBlackFrame(
         .probe20 (v19_dbg_bus),
         .probe21 ((SRC_SEL == SRC_V19) ? v19_replay_dbg_word : c0_ddr4_app_rd_data[63:0]),
         .probe22 ((SRC_SEL == SRC_V19) ? v19_dbg_rows_word0_strobe : dbg_bus[127:64]),
-        .probe23 ((SRC_SEL == SRC_V19) ? v19_dbg_rows_word1_strobe : dbg_bus[191:128]),
+        .probe23 ((SRC_SEL == SRC_V19) ? v19_capture_dbg : dbg_bus[191:128]),
         .probe24 ((SRC_SEL == SRC_V19) ? v19_dbg_rows_word2_strobe : dbg_bus[255:192]),
         // V19 DDR replay bring-up visibility: distinguish "source read not
         // requested", "request not accepted", and "return misclassified".

@@ -94,3 +94,55 @@ fix. Hardware signoff requires:
 4. Confirm that localized noisy horizontal lines and mid-frame temporal splits
    are absent. Optical seam mismatch is evaluated separately.
 
+## Hardware pass 1: remaining capture-service overflow
+
+The timing-clean startup-gated bitstream was programmed and captured with the
+matching LTX. The DDR backend, camera-bank readiness, replay, output copy, and
+scan path were active. The output-bank-conflict and output-FIFO-overflow sticky
+causes remained clear, but the camera-capture-overflow sticky cause asserted:
+
+```text
+running=1
+v19_replay_banks_ready=1
+copy_active=1
+scan_active=1
+dbg_bank_conflict_seen=0
+dbg_output_fifo_overflow_seen=0
+dbg_capture_overflow_seen=1
+```
+
+Hardware capture:
+
+```text
+captures\usb0_v19\
+  ila_status_chord_rowrun_final_20260728_172328.csv
+```
+
+The 2,048-cycle ILA traffic window contained:
+
+| Signal/event | Cycles |
+|---|---:|
+| DDR command pending | 1,387 |
+| DDR write-data pending | 1,082 |
+| Accepted write transaction | 274 |
+| Accepted read transaction | 87 |
+| Avoidable launcher-idle cycles | 522 |
+| `app_rdy=1` | 879 |
+| `app_wdf_rdy=1` | 2,048 |
+
+This isolates the remaining failure to camera-ingress DDR service under normal
+traffic. It is not a calibration-startup overflow, output-bank collision, or
+renderer geometry failure.
+
+The next RTL checkpoint therefore:
+
+- gives bounded camera capture FIFOs priority over display scan; the display
+  path already has a 7,800-pixel prefetch cushion;
+- allows a retiring camera write to hand the held MIG command slot directly to
+  the next request, removing the forced idle cycle between camera writes; and
+- reports the individual six overflow causes and per-camera peak FIFO
+  occupancies through the existing 64-bit ILA probe.
+
+The camera-writer marker/capture-enable test still passes after these changes.
+Full implementation and hardware validation of this service-throughput
+checkpoint are pending.
