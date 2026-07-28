@@ -379,3 +379,50 @@ This build is the first timing-clean candidate that combines the capture-QoS
 fix with deeper six-camera ingress buffering, measurable peak occupancy, and
 atomic rejection of incomplete camera frames. Hardware programming and
 sustained ILA/USB validation are the next signoff stage.
+
+## Immediate hardware validation of the atomic candidate
+
+The timing-clean image above was programmed with its matching
+`debug_nets.ltx`. DDR4 calibration completed and the panorama datapath entered
+normal operation. The first post-program ILA capture is:
+
+```text
+captures\usb0_v19\
+  ila_status_chord_rowrun_final_20260728_202553.csv
+```
+
+Across the 2,048-sample capture:
+
+```text
+running=1
+v19_replay_banks_ready=1
+copy_active/scan_active both observed
+dbg_beat_overflow=0
+dbg_capture_overflow_seen=0
+dbg_bank_conflict_seen=0
+dbg_output_fifo_overflow_seen=0
+v19_capture_dbg=0xc000201008040201
+```
+
+The capture debug word reports zero sticky camera-overflow bits. Each of the six
+peak-occupancy fields is `1`, corresponding to approximately 8 entries out of
+the new 2,048-entry FIFO. This immediate sample therefore has about 99.6%
+unused per-camera ingress capacity.
+
+A 180-frame USB-grabber pass was saved locally under:
+
+```text
+captures\usb0_v19\capture_atomic_drop_pass1_20260728
+```
+
+All 180 captures were real panorama frames. Visual inspection of the first,
+middle, and final retained frames found:
+
+- no noisy horizontal line;
+- no mid-frame horizontal temporal split;
+- no color/pixel corruption attributable to the transport path;
+- only the already accepted optical/calibration seam mismatch.
+
+The scene contained only minor motion during this pass, so this result is an
+immediate functional checkpoint rather than the final moving-scene or
+long-duration signoff.
