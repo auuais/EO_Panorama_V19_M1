@@ -21,6 +21,7 @@ module tb_EoV19AffineQ16;
     wire dbg_seen_done;
     wire source_need_valid;
     wire [10:0] source_need_row;
+    wire [10:0] source_start_row;
     wire [63:0] dbg_rows_word0;
     wire [63:0] dbg_rows_word1;
     wire [63:0] dbg_rows_word2;
@@ -41,7 +42,8 @@ module tb_EoV19AffineQ16;
         .dbg_rows_min(dbg_rows_min), .dbg_row_target(dbg_row_target),
         .dbg_rows_peak(dbg_rows_peak), .dbg_seen_out(dbg_seen_out),
         .dbg_seen_done(dbg_seen_done), .source_need_valid(source_need_valid),
-        .source_need_row(source_need_row), .dbg_rows_word0(dbg_rows_word0),
+        .source_need_row(source_need_row), .source_start_row(source_start_row),
+        .dbg_rows_word0(dbg_rows_word0),
         .dbg_rows_word1(dbg_rows_word1), .dbg_rows_word2(dbg_rows_word2)
     );
 

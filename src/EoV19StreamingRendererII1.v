@@ -128,16 +128,20 @@ module EoV19StreamingRendererII1 #(
     // exact row pacing.
     wire start_rows_aligned = (dbg_rows_min >= first_need_row) &&
                               (dbg_rows_max <= first_start_row + 11'd63);
-    wire sel_hit_a = (ca[4]==0) ? (hit00 & hit01) :
-                     (ca[4]==1) ? (hit10 & hit11) :
-                     (ca[4]==2) ? (hit20 & hit21) :
-                     (ca[4]==3) ? (hit30 & hit31) :
-                     (ca[4]==4) ? (hit40 & hit41) : (hit50 & hit51);
-    wire sel_hit_b = (cb[4]==0) ? (hit00 & hit01) :
-                     (cb[4]==1) ? (hit10 & hit11) :
-                     (cb[4]==2) ? (hit20 & hit21) :
-                     (cb[4]==3) ? (hit30 & hit31) :
-                     (cb[4]==4) ? (hit40 & hit41) : (hit50 & hit51);
+    // The cache registers its row-tag hit one clock after the stage-3 read
+    // address is launched.  At that point the matching token is in stage 5,
+    // not stage 4.  Select with ca/cb[5], then register the result alongside
+    // the token before stage 6 consumes the returned BRAM pixels.
+    wire sel_hit_a = (ca[5]==0) ? (hit00 & hit01) :
+                     (ca[5]==1) ? (hit10 & hit11) :
+                     (ca[5]==2) ? (hit20 & hit21) :
+                     (ca[5]==3) ? (hit30 & hit31) :
+                     (ca[5]==4) ? (hit40 & hit41) : (hit50 & hit51);
+    wire sel_hit_b = (cb[5]==0) ? (hit00 & hit01) :
+                     (cb[5]==1) ? (hit10 & hit11) :
+                     (cb[5]==2) ? (hit20 & hit21) :
+                     (cb[5]==3) ? (hit30 & hit31) :
+                     (cb[5]==4) ? (hit40 & hit41) : (hit50 & hit51);
 
     initial begin
         $readmemh("../../assets/rowruns/eo_v19_render_row_max_y0.mem", row_max_y0);
@@ -241,6 +245,7 @@ module EoV19StreamingRendererII1 #(
     reg [7:0] miss_count;
     reg [0:10] xpar;
     reg [15:0] p00_q,p01_q,p10_q,p11_q,p20_q,p21_q,p30_q,p31_q,p40_q,p41_q,p50_q,p51_q;
+    reg hit_a6, hit_b6;
     reg [32:0] ia_y_acc8,ia_c_acc8,ib_y_acc8,ib_c_acc8;
     reg [15:0] out_px10;
     reg [10:0] rows_peak;
@@ -284,6 +289,7 @@ module EoV19StreamingRendererII1 #(
             pano_y<=0; pano_x<=0; sy<=0; state<=2'd0; started_for_copy<=0; small_raster<=0; qy_limit<=11'd1078;
             row_black<=1'b0; pass_epoch0<=0; pass_epoch1<=0; pass_epoch2<=0; pass_epoch3<=0; pass_epoch4<=0; pass_epoch5<=0;
             miss_count<=0;
+            hit_a6<=1'b0; hit_b6<=1'b0;
             px_valid<=0; px_data<=`EO_V19_BLACK_PIXEL; frame_done<=0; run_addr_a<=0; run_addr_b<=0;
             v<=0; black<=0; blend<=0; last<=0; rows_peak<=0; seen_out<=0; seen_done<=0;
             p00_q<=`EO_V19_BLACK_PIXEL;p01_q<=`EO_V19_BLACK_PIXEL;p10_q<=`EO_V19_BLACK_PIXEL;p11_q<=`EO_V19_BLACK_PIXEL;p20_q<=`EO_V19_BLACK_PIXEL;p21_q<=`EO_V19_BLACK_PIXEL;p30_q<=`EO_V19_BLACK_PIXEL;p31_q<=`EO_V19_BLACK_PIXEL;p40_q<=`EO_V19_BLACK_PIXEL;p41_q<=`EO_V19_BLACK_PIXEL;p50_q<=`EO_V19_BLACK_PIXEL;p51_q<=`EO_V19_BLACK_PIXEL;
@@ -300,6 +306,7 @@ module EoV19StreamingRendererII1 #(
             pano_y<=0; pano_x<=0; sy<=0; state<=2'd0; started_for_copy<=0; small_raster<=0; qy_limit<=11'd1078;
             row_black<=1'b0; pass_epoch0<=0; pass_epoch1<=0; pass_epoch2<=0; pass_epoch3<=0; pass_epoch4<=0; pass_epoch5<=0;
             miss_count<=0;
+            hit_a6<=1'b0; hit_b6<=1'b0;
             px_valid<=0; px_data<=`EO_V19_BLACK_PIXEL; frame_done<=0; run_addr_a<=0; run_addr_b<=0;
             v<=0; black<=0; blend<=0; last<=0; rows_peak<=0; seen_out<=0; seen_done<=0;
             p00_q<=`EO_V19_BLACK_PIXEL;p01_q<=`EO_V19_BLACK_PIXEL;p10_q<=`EO_V19_BLACK_PIXEL;p11_q<=`EO_V19_BLACK_PIXEL;p20_q<=`EO_V19_BLACK_PIXEL;p21_q<=`EO_V19_BLACK_PIXEL;p30_q<=`EO_V19_BLACK_PIXEL;p31_q<=`EO_V19_BLACK_PIXEL;p40_q<=`EO_V19_BLACK_PIXEL;p41_q<=`EO_V19_BLACK_PIXEL;p50_q<=`EO_V19_BLACK_PIXEL;p51_q<=`EO_V19_BLACK_PIXEL;
@@ -344,16 +351,19 @@ module EoV19StreamingRendererII1 #(
                     rd_y50_r<=((ca[3]==5)?qy(cya[3]):qy(cyb[3])); rd_y51_r<=((ca[3]==5)?qy(cya[3]):qy(cyb[3]))+1;
                     ay[4]<=alpha_y[apos[3]]; ac[4]<=alpha_c[(apos[3]>47)?23:(apos[3]>>1)];
                 end
+                if(v[5]) begin
+                    hit_a6 <= sel_hit_a;
+                    hit_b6 <= sel_hit_b;
+                end
                 if(v[6]) begin
                     case(ca[6]) 0:begin ra0[7]<=p00_q[15:8];ra1[7]<=p01_q[15:8];rc0[7]<=p00_q[7:0];rc1[7]<=p01_q[7:0];end 1:begin ra0[7]<=p10_q[15:8];ra1[7]<=p11_q[15:8];rc0[7]<=p10_q[7:0];rc1[7]<=p11_q[7:0];end 2:begin ra0[7]<=p20_q[15:8];ra1[7]<=p21_q[15:8];rc0[7]<=p20_q[7:0];rc1[7]<=p21_q[7:0];end 3:begin ra0[7]<=p30_q[15:8];ra1[7]<=p31_q[15:8];rc0[7]<=p30_q[7:0];rc1[7]<=p31_q[7:0];end 4:begin ra0[7]<=p40_q[15:8];ra1[7]<=p41_q[15:8];rc0[7]<=p40_q[7:0];rc1[7]<=p41_q[7:0];end default:begin ra0[7]<=p50_q[15:8];ra1[7]<=p51_q[15:8];rc0[7]<=p50_q[7:0];rc1[7]<=p51_q[7:0];end endcase
                     case(cb[6]) 0:begin rb0[7]<=p00_q[15:8];rb1[7]<=p01_q[15:8];rbc0[7]<=p00_q[7:0];rbc1[7]<=p01_q[7:0];end 1:begin rb0[7]<=p10_q[15:8];rb1[7]<=p11_q[15:8];rbc0[7]<=p10_q[7:0];rbc1[7]<=p11_q[7:0];end 2:begin rb0[7]<=p20_q[15:8];rb1[7]<=p21_q[15:8];rbc0[7]<=p20_q[7:0];rbc1[7]<=p21_q[7:0];end 3:begin rb0[7]<=p30_q[15:8];rb1[7]<=p31_q[15:8];rbc0[7]<=p30_q[7:0];rbc1[7]<=p31_q[7:0];end 4:begin rb0[7]<=p40_q[15:8];rb1[7]<=p41_q[15:8];rbc0[7]<=p40_q[7:0];rbc1[7]<=p41_q[7:0];end default:begin rb0[7]<=p50_q[15:8];rb1[7]<=p51_q[15:8];rbc0[7]<=p50_q[7:0];rbc1[7]<=p51_q[7:0];end endcase
-                    // Diagnostic: retain the token's row-black decision here.
-                    // The epoch/tag checks remain available on sel_hit_a/b,
-                    // but bypassing their output substitution for this build
-                    // distinguishes a read-latency alignment issue from a
-                    // DDR/output fault.  The final acceptance build must
-                    // restore black-on-miss once the hit pipeline is aligned.
-                    black[7] <= black[6];
+                    // Never render data from a stale or overwritten cache
+                    // slot.  The hit bits above are aligned to this token and
+                    // require both vertical-interpolation rows; camera B is
+                    // required only in an actual seam/blend run.
+                    black[7] <= black[6] || !hit_a6 ||
+                                (blend[6] && !hit_b6);
                 end
                 if(v[7]) begin ia_y_acc8<=weighted_acc33(ra0[7],ra1[7],fra[7]); ia_c_acc8<=weighted_acc33(rc0[7],rc1[7],fra[7]); ib_y_acc8<=weighted_acc33(rb0[7],rb1[7],frb[7]); ib_c_acc8<=weighted_acc33(rbc0[7],rbc1[7],frb[7]); end
                 if(v[8]) begin ia_y[9]<=ia_y_acc8[23:16]; ia_c[9]<=ia_c_acc8[23:16]; ib_y[9]<=ib_y_acc8[23:16]; ib_c[9]<=ib_c_acc8[23:16]; end
