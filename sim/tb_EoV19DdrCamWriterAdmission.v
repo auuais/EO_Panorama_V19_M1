@@ -16,14 +16,26 @@ module tb_EoV19DdrCamWriterAdmission;
 
     reg cam_hsync = 1'b0;
     reg cam_vsync = 1'b0;
+    reg trigger_ref = 1'b0;
     reg [19:0] cam_pixel = 20'h20400;
     reg fifo_rd_en = 1'b0;
+    reg free_bank_valid_ui = 1'b0;
+    reg [1:0] free_bank_ui = 2'd0;
+    wire free_bank_ready_ui;
     wire fifo_empty;
     wire fifo_is_marker;
-    wire fifo_marker_bank;
-    wire bank_valid_ui;
-    wire valid_bank_ui;
+    wire [1:0] fifo_marker_bank;
+    wire [15:0] fifo_marker_epoch;
+    wire desc_valid_ui;
+    wire [1:0] desc_bank_ui;
+    wire [15:0] desc_epoch_ui;
+    reg desc_seen = 1'b0;
     wire overflow_seen;
+
+    always @(posedge ui_clk) begin
+        if (ui_rst) desc_seen <= 1'b0;
+        else if (desc_valid_ui) desc_seen <= 1'b1;
+    end
 
     EoV19DdrCamWriter #(
         .CAM_BASE_ADDR(29'h0010000),
@@ -32,6 +44,7 @@ module tb_EoV19DdrCamWriterAdmission;
     ) dut (
         .rst_n(rst_n),
         .capture_enable(capture_enable),
+        .trigger_ref(trigger_ref),
         .cam_clk(cam_clk),
         .cam_hsync(cam_hsync),
         .cam_vsync(cam_vsync),
@@ -44,8 +57,13 @@ module tb_EoV19DdrCamWriterAdmission;
         .fifo_data(),
         .fifo_is_marker(fifo_is_marker),
         .fifo_marker_bank(fifo_marker_bank),
-        .bank_valid_ui(bank_valid_ui),
-        .valid_bank_ui(valid_bank_ui),
+        .fifo_marker_epoch(fifo_marker_epoch),
+        .free_bank_valid_ui(free_bank_valid_ui),
+        .free_bank_ui(free_bank_ui),
+        .free_bank_ready_ui(free_bank_ready_ui),
+        .desc_valid_ui(desc_valid_ui),
+        .desc_bank_ui(desc_bank_ui),
+        .desc_epoch_ui(desc_epoch_ui),
         .fifo_overflow_seen_ui(overflow_seen),
         .fifo_level_ui(),
         .dbg_row_ui()
@@ -61,12 +79,30 @@ module tb_EoV19DdrCamWriterAdmission;
     task frame_edge;
         begin
             @(negedge cam_clk);
+            trigger_ref = 1'b1;
+            repeat (3) cam_cycle();
+            @(negedge cam_clk);
+            trigger_ref = 1'b0;
+            repeat (4) cam_cycle();
+            @(negedge cam_clk);
             cam_hsync = 1'b0;
             cam_vsync = 1'b1;
             repeat (3) cam_cycle();
             @(negedge cam_clk);
             cam_vsync = 1'b0;
             cam_cycle();
+        end
+    endtask
+
+    task push_free_bank;
+        input [1:0] bank;
+        begin
+            while (!free_bank_ready_ui) @(posedge ui_clk);
+            @(negedge ui_clk);
+            free_bank_ui = bank;
+            free_bank_valid_ui = 1'b1;
+            @(negedge ui_clk);
+            free_bank_valid_ui = 1'b0;
         end
     endtask
 
@@ -95,6 +131,9 @@ module tb_EoV19DdrCamWriterAdmission;
         ui_rst = 1'b0;
         capture_enable = 1'b1;
         repeat (4) cam_cycle();
+        push_free_bank(2'd0);
+        push_free_bank(2'd1);
+        repeat (8) cam_cycle();
 
         // Bank 0 reaches the high-water threshold without reaching full.
         frame_edge();
@@ -116,7 +155,7 @@ module tb_EoV19DdrCamWriterAdmission;
         while (!fifo_empty) begin
             if (fifo_is_marker) begin
                 markers = markers + 1;
-                if (fifo_marker_bank !== 1'b0)
+                if (fifo_marker_bank !== 2'd0)
                     $fatal(1, "first admitted frame identified the wrong bank");
             end else begin
                 payloads = payloads + 1;
@@ -131,7 +170,7 @@ module tb_EoV19DdrCamWriterAdmission;
         if (payloads != 8 || markers != 1)
             $fatal(1, "skipped frame leaked into FIFO: payloads=%0d markers=%0d",
                    payloads, markers);
-        if (!bank_valid_ui || valid_bank_ui !== 1'b0)
+        if (!desc_seen || desc_bank_ui !== 2'd0)
             $fatal(1, "the last complete admitted frame was not published");
 
         $display("PASS: high-water pressure skips a whole frame before FIFO full");

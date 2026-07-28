@@ -26,12 +26,12 @@ module tb_EoV19DdrReplayBeatTiming;
         .clk(clk),
         .ui_rst(ui_rst),
         .run_enable(run_enable),
-        .bank_valid0(1'b1), .bank_valid1(1'b1), .bank_valid2(1'b1),
-        .bank_valid3(1'b1), .bank_valid4(1'b1), .bank_valid5(1'b1),
-        .bank0(1'b0), .bank1(1'b0), .bank2(1'b0),
-        .bank3(1'b0), .bank4(1'b0), .bank5(1'b0),
+        .lease_valid(1'b1),
+        .bank0(2'd0), .bank1(2'd1), .bank2(2'd2),
+        .bank3(2'd3), .bank4(2'd1), .bank5(2'd2),
         .source_need_valid(1'b1),
-        .source_need_row(11'd1),
+        .source_need_row(11'd124),
+        .source_start_row(11'd124),
         .rd_req_valid(rd_req_valid),
         .rd_req_addr(rd_req_addr),
         .rd_req_ready(1'b1),
@@ -65,6 +65,28 @@ module tb_EoV19DdrReplayBeatTiming;
         run_enable <= 1'b1;
     end
 
+    integer request_count = 0;
+    reg [28:0] expected_addr;
+    always @(posedge clk) begin
+        if (!ui_rst && rd_req_valid) begin
+            case (request_count)
+                0: expected_addr = 29'd119040;
+                1: expected_addr = 29'd1155840;
+                2: expected_addr = 29'd2192640;
+                3: expected_addr = 29'd3229440;
+                4: expected_addr = 29'd1155840;
+                default: expected_addr = 29'd2192640;
+            endcase
+            if (rd_req_addr !== expected_addr) begin
+                $display("FAIL: request %0d expected address %0d got %0d",
+                         request_count, expected_addr, rd_req_addr);
+                $finish;
+            end
+            if (request_count < 6)
+                request_count <= request_count + 1;
+        end
+    end
+
     // Return one known beat on the cycle after every accepted source request.
     always @(posedge clk) begin
         if (ui_rst) begin
@@ -87,7 +109,11 @@ module tb_EoV19DdrReplayBeatTiming;
                 $display("FAIL: hsync remained high after pixel 15");
                 $finish;
             end
-            $display("PASS: replay emitted pixels 0..15 exactly once with no trailing zero");
+            if (request_count < 6) begin
+                $display("FAIL: only %0d camera requests were observed", request_count);
+                $finish;
+            end
+            $display("PASS: replay used leased banks at row 124 and emitted pixels 0..15 exactly once");
             $finish;
         end
         if (replay_hsync0) begin

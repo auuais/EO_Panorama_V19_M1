@@ -14,6 +14,7 @@ module EoV19LineCache #(
     input  wire wr_hsync,
     input  wire wr_vsync,
     input  wire wr_frame_reset,
+    input  wire [10:0] wr_start_row,
     input  wire [19:0] wr_pixel,
     input  wire rd_clk,
     input  wire [10:0] rd_x,
@@ -64,7 +65,9 @@ module EoV19LineCache #(
             wr_vsync_d <= wr_vsync;
             if (wr_frame_restart) begin
                 field_height_wr <= wr_y;
-                wr_x <= 0; wr_y <= 0; wr_slot <= 0;
+                wr_x <= 0;
+                wr_y <= wr_start_row;
+                wr_slot <= wr_start_row[SLOT_W-1:0];
                 frame_tog <= ~frame_tog;
                 wr_epoch <= wr_epoch + 1'b1;
             end else if (wr_active) begin

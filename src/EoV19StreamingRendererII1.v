@@ -27,6 +27,7 @@ module EoV19StreamingRendererII1 #(
     output wire dbg_seen_out, output wire dbg_seen_done,
     output wire source_need_valid,
     output wire [10:0] source_need_row,
+    output wire [10:0] source_start_row,
     output wire [63:0] dbg_rows_word0,
     output wire [63:0] dbg_rows_word1,
     output wire [63:0] dbg_rows_word2
@@ -41,12 +42,29 @@ module EoV19StreamingRendererII1 #(
     wire [10:0] height0,height1,height2,height3,height4,height5;
     wire [1:0] epoch0,epoch1,epoch2,epoch3,epoch4,epoch5;
     wire hit00,hit01,hit10,hit11,hit20,hit21,hit30,hit31,hit40,hit41,hit50,hit51;
-    EoV19LineCache u_lc0(.rst_n(rst_n),.wr_clk(cam0_clk),.wr_hsync(cam0_hsync),.wr_vsync(cam0_vsync),.wr_frame_reset(source_frame_reset),.wr_pixel(cam0_pixel),.rd_clk(clk),.rd_x(rd_x0),.rd_y0(rd_y00),.rd_y1(rd_y01),.rd_pixel_y0(p00),.rd_pixel_y1(p01),.captured_rows(rows0),.frame_toggle(),.field_height(height0),.current_epoch(epoch0),.rd_hit_y0(hit00),.rd_hit_y1(hit01));
-    EoV19LineCache u_lc1(.rst_n(rst_n),.wr_clk(cam1_clk),.wr_hsync(cam1_hsync),.wr_vsync(cam1_vsync),.wr_frame_reset(source_frame_reset),.wr_pixel(cam1_pixel),.rd_clk(clk),.rd_x(rd_x1),.rd_y0(rd_y10),.rd_y1(rd_y11),.rd_pixel_y0(p10),.rd_pixel_y1(p11),.captured_rows(rows1),.frame_toggle(),.field_height(height1),.current_epoch(epoch1),.rd_hit_y0(hit10),.rd_hit_y1(hit11));
-    EoV19LineCache u_lc2(.rst_n(rst_n),.wr_clk(cam2_clk),.wr_hsync(cam2_hsync),.wr_vsync(cam2_vsync),.wr_frame_reset(source_frame_reset),.wr_pixel(cam2_pixel),.rd_clk(clk),.rd_x(rd_x2),.rd_y0(rd_y20),.rd_y1(rd_y21),.rd_pixel_y0(p20),.rd_pixel_y1(p21),.captured_rows(rows2),.frame_toggle(),.field_height(height2),.current_epoch(epoch2),.rd_hit_y0(hit20),.rd_hit_y1(hit21));
-    EoV19LineCache u_lc3(.rst_n(rst_n),.wr_clk(cam3_clk),.wr_hsync(cam3_hsync),.wr_vsync(cam3_vsync),.wr_frame_reset(source_frame_reset),.wr_pixel(cam3_pixel),.rd_clk(clk),.rd_x(rd_x3),.rd_y0(rd_y30),.rd_y1(rd_y31),.rd_pixel_y0(p30),.rd_pixel_y1(p31),.captured_rows(rows3),.frame_toggle(),.field_height(height3),.current_epoch(epoch3),.rd_hit_y0(hit30),.rd_hit_y1(hit31));
-    EoV19LineCache u_lc4(.rst_n(rst_n),.wr_clk(cam4_clk),.wr_hsync(cam4_hsync),.wr_vsync(cam4_vsync),.wr_frame_reset(source_frame_reset),.wr_pixel(cam4_pixel),.rd_clk(clk),.rd_x(rd_x4),.rd_y0(rd_y40),.rd_y1(rd_y41),.rd_pixel_y0(p40),.rd_pixel_y1(p41),.captured_rows(rows4),.frame_toggle(),.field_height(height4),.current_epoch(epoch4),.rd_hit_y0(hit40),.rd_hit_y1(hit41));
-    EoV19LineCache u_lc5(.rst_n(rst_n),.wr_clk(cam5_clk),.wr_hsync(cam5_hsync),.wr_vsync(cam5_vsync),.wr_frame_reset(source_frame_reset),.wr_pixel(cam5_pixel),.rd_clk(clk),.rd_x(rd_x5),.rd_y0(rd_y50),.rd_y1(rd_y51),.rd_pixel_y0(p50),.rd_pixel_y1(p51),.captured_rows(rows5),.frame_toggle(),.field_height(height5),.current_epoch(epoch5),.rd_hit_y0(hit50),.rd_hit_y1(hit51));
+    reg [1:0] state;
+    reg [8:0] pano_y;
+    reg [11:0] pano_x;
+    reg [8:0] sy;
+    reg started_for_copy, small_raster;
+    reg [10:0] qy_limit;
+    reg [10:0] row_max_y0 [0:`EO_V19_PER_CAM_H-1];
+    reg [10:0] row_min_y0 [0:`EO_V19_PER_CAM_H-1];
+    reg [15:0] alpha_y [0:48];
+    reg [15:0] alpha_c [0:23];
+    reg [1:0] pass_epoch0,pass_epoch1,pass_epoch2;
+    reg [1:0] pass_epoch3,pass_epoch4,pass_epoch5;
+    reg [2:0] ca[0:10],cb[0:10];
+    reg [10:0] rd_x0_r,rd_x1_r,rd_x2_r,rd_x3_r,rd_x4_r,rd_x5_r;
+    reg [10:0] rd_y00_r,rd_y01_r,rd_y10_r,rd_y11_r;
+    reg [10:0] rd_y20_r,rd_y21_r,rd_y30_r,rd_y31_r;
+    reg [10:0] rd_y40_r,rd_y41_r,rd_y50_r,rd_y51_r;
+    EoV19LineCache u_lc0(.rst_n(rst_n),.wr_clk(cam0_clk),.wr_hsync(cam0_hsync),.wr_vsync(cam0_vsync),.wr_frame_reset(source_frame_reset),.wr_start_row(source_start_row),.wr_pixel(cam0_pixel),.rd_clk(clk),.rd_x(rd_x0),.rd_y0(rd_y00),.rd_y1(rd_y01),.rd_pixel_y0(p00),.rd_pixel_y1(p01),.captured_rows(rows0),.frame_toggle(),.field_height(height0),.current_epoch(epoch0),.rd_hit_y0(hit00),.rd_hit_y1(hit01));
+    EoV19LineCache u_lc1(.rst_n(rst_n),.wr_clk(cam1_clk),.wr_hsync(cam1_hsync),.wr_vsync(cam1_vsync),.wr_frame_reset(source_frame_reset),.wr_start_row(source_start_row),.wr_pixel(cam1_pixel),.rd_clk(clk),.rd_x(rd_x1),.rd_y0(rd_y10),.rd_y1(rd_y11),.rd_pixel_y0(p10),.rd_pixel_y1(p11),.captured_rows(rows1),.frame_toggle(),.field_height(height1),.current_epoch(epoch1),.rd_hit_y0(hit10),.rd_hit_y1(hit11));
+    EoV19LineCache u_lc2(.rst_n(rst_n),.wr_clk(cam2_clk),.wr_hsync(cam2_hsync),.wr_vsync(cam2_vsync),.wr_frame_reset(source_frame_reset),.wr_start_row(source_start_row),.wr_pixel(cam2_pixel),.rd_clk(clk),.rd_x(rd_x2),.rd_y0(rd_y20),.rd_y1(rd_y21),.rd_pixel_y0(p20),.rd_pixel_y1(p21),.captured_rows(rows2),.frame_toggle(),.field_height(height2),.current_epoch(epoch2),.rd_hit_y0(hit20),.rd_hit_y1(hit21));
+    EoV19LineCache u_lc3(.rst_n(rst_n),.wr_clk(cam3_clk),.wr_hsync(cam3_hsync),.wr_vsync(cam3_vsync),.wr_frame_reset(source_frame_reset),.wr_start_row(source_start_row),.wr_pixel(cam3_pixel),.rd_clk(clk),.rd_x(rd_x3),.rd_y0(rd_y30),.rd_y1(rd_y31),.rd_pixel_y0(p30),.rd_pixel_y1(p31),.captured_rows(rows3),.frame_toggle(),.field_height(height3),.current_epoch(epoch3),.rd_hit_y0(hit30),.rd_hit_y1(hit31));
+    EoV19LineCache u_lc4(.rst_n(rst_n),.wr_clk(cam4_clk),.wr_hsync(cam4_hsync),.wr_vsync(cam4_vsync),.wr_frame_reset(source_frame_reset),.wr_start_row(source_start_row),.wr_pixel(cam4_pixel),.rd_clk(clk),.rd_x(rd_x4),.rd_y0(rd_y40),.rd_y1(rd_y41),.rd_pixel_y0(p40),.rd_pixel_y1(p41),.captured_rows(rows4),.frame_toggle(),.field_height(height4),.current_epoch(epoch4),.rd_hit_y0(hit40),.rd_hit_y1(hit41));
+    EoV19LineCache u_lc5(.rst_n(rst_n),.wr_clk(cam5_clk),.wr_hsync(cam5_hsync),.wr_vsync(cam5_vsync),.wr_frame_reset(source_frame_reset),.wr_start_row(source_start_row),.wr_pixel(cam5_pixel),.rd_clk(clk),.rd_x(rd_x5),.rd_y0(rd_y50),.rd_y1(rd_y51),.rd_pixel_y0(p50),.rd_pixel_y1(p51),.captured_rows(rows5),.frame_toggle(),.field_height(height5),.current_epoch(epoch5),.rd_hit_y0(hit50),.rd_hit_y1(hit51));
 
     assign frames_valid = (rows0 >= 11'd126) && (rows1 >= 11'd126) &&
                           (rows2 >= 11'd126) && (rows3 >= 11'd126) &&
@@ -66,6 +84,7 @@ module EoV19StreamingRendererII1 #(
     wire [10:0] gate_min_row = scale_row(row_min_y0[map_row_index]);
     wire [10:0] gate_need_row = gate_max_row + 11'd2;
     wire [10:0] first_need_row = scale_row(row_max_y0[0]) + 11'd2;
+    wire [10:0] first_start_row = scale_row(row_min_y0[0]);
     // A cache of 64 rows leaves 60 rows between the oldest required line and
     // the write pointer.  The lower bound waits for y1; the overrun bound
     // turns an unrecoverable lag into a labelled black row instead of torn
@@ -107,7 +126,8 @@ module EoV19StreamingRendererII1 #(
     // have observed the new replay frame and are still near the top of that
     // frame; after start, per-row gate_lower_ok/gate_overrun controls the
     // exact row pacing.
-    wire start_rows_aligned = (dbg_rows_min != 11'd0) && (dbg_rows_max < 11'd96);
+    wire start_rows_aligned = (dbg_rows_min >= first_need_row) &&
+                              (dbg_rows_max <= first_start_row + 11'd63);
     wire sel_hit_a = (ca[4]==0) ? (hit00 & hit01) :
                      (ca[4]==1) ? (hit10 & hit11) :
                      (ca[4]==2) ? (hit20 & hit21) :
@@ -119,10 +139,6 @@ module EoV19StreamingRendererII1 #(
                      (cb[4]==3) ? (hit30 & hit31) :
                      (cb[4]==4) ? (hit40 & hit41) : (hit50 & hit51);
 
-    reg [10:0] row_max_y0 [0:`EO_V19_PER_CAM_H-1];
-    reg [10:0] row_min_y0 [0:`EO_V19_PER_CAM_H-1];
-    reg [15:0] alpha_y [0:48];
-    reg [15:0] alpha_c [0:23];
     initial begin
         $readmemh("../../assets/rowruns/eo_v19_render_row_max_y0.mem", row_max_y0);
         $readmemh("../../assets/rowruns/eo_v19_render_row_min_y0.mem", row_min_y0);
@@ -212,7 +228,7 @@ module EoV19StreamingRendererII1 #(
     function [15:0] qf; input signed [47:0] c; reg signed [47:0] s; begin s=small_raster ? ((c>>>3)+(c>>>5)+(c>>>7)) : c; if(s<0 || s>(qy_limit<<<16))qf=0; else qf=s[15:0]; end endfunction
 
     reg [10:0] v,black,blend,last;
-    reg [2:0] ca[0:10],cb[0:10]; reg [6:0] apos[0:10];
+    reg [6:0] apos[0:10];
     reg [11:0] lxa[0:10],lxb[0:10]; reg [15:0] fra[0:10],frb[0:10],ay[0:10],ac[0:10];
     reg signed [31:0] ax0a[0:10],ay0a[0:10],ax0b[0:10],ay0b[0:10];
     reg signed [15:0] daxa[0:10],daya[0:10],daxb[0:10],dayb[0:10],offa[0:10],offb[0:10];
@@ -220,10 +236,8 @@ module EoV19StreamingRendererII1 #(
     reg [10:0] sxa[0:10],sya[0:10],sxb[0:10],syb[0:10];
     reg [7:0] ra0[0:10],ra1[0:10],rc0[0:10],rc1[0:10],rb0[0:10],rb1[0:10],rbc0[0:10],rbc1[0:10];
     reg [7:0] ia_y[0:10],ia_c[0:10],ib_y[0:10],ib_c[0:10];
-    reg [1:0] state; reg [8:0] pano_y; reg [11:0] pano_x; reg [8:0] sy;
-    reg started_for_copy, small_raster; reg [10:0] qy_limit; integer i;
+    integer i;
     reg row_black;
-    reg [1:0] pass_epoch0,pass_epoch1,pass_epoch2,pass_epoch3,pass_epoch4,pass_epoch5;
     reg [7:0] miss_count;
     reg [0:10] xpar;
     reg [15:0] p00_q,p01_q,p10_q,p11_q,p20_q,p21_q,p30_q,p31_q,p40_q,p41_q,p50_q,p51_q;
@@ -243,6 +257,7 @@ module EoV19StreamingRendererII1 #(
     assign source_need_row = (!started_for_copy || (pano_y < CONTENT_Y0)) ? first_need_row :
                              (pano_y <= CONTENT_Y1) ? gate_need_row :
                              11'd0;
+    assign source_start_row = first_start_row;
 
     assign dbg_state=state; assign dbg_pano_y=pano_y; assign dbg_pano_x=pano_x;
     assign dbg_start_copy=start_copy; assign dbg_px_ready=px_ready;
@@ -398,8 +413,6 @@ module EoV19StreamingRendererII1 #(
     end
 
     // The read addresses are registers driven by the cache-read stage.
-    reg [10:0] rd_x0_r,rd_x1_r,rd_x2_r,rd_x3_r,rd_x4_r,rd_x5_r;
-    reg [10:0] rd_y00_r,rd_y01_r,rd_y10_r,rd_y11_r,rd_y20_r,rd_y21_r,rd_y30_r,rd_y31_r,rd_y40_r,rd_y41_r,rd_y50_r,rd_y51_r;
     assign rd_x0=rd_x0_r;assign rd_x1=rd_x1_r;assign rd_x2=rd_x2_r;assign rd_x3=rd_x3_r;assign rd_x4=rd_x4_r;assign rd_x5=rd_x5_r;
     assign rd_y00=rd_y00_r;assign rd_y01=rd_y01_r;assign rd_y10=rd_y10_r;assign rd_y11=rd_y11_r;assign rd_y20=rd_y20_r;assign rd_y21=rd_y21_r;assign rd_y30=rd_y30_r;assign rd_y31=rd_y31_r;assign rd_y40=rd_y40_r;assign rd_y41=rd_y41_r;assign rd_y50=rd_y50_r;assign rd_y51=rd_y51_r;
 endmodule

@@ -18,14 +18,26 @@ module tb_EoV19DdrCamWriterDrop;
 
     reg cam_hsync = 1'b0;
     reg cam_vsync = 1'b0;
+    reg trigger_ref = 1'b0;
     reg [19:0] cam_pixel = 20'h20400;
     reg fifo_rd_en = 1'b0;
+    reg free_bank_valid_ui = 1'b0;
+    reg [1:0] free_bank_ui = 2'd0;
+    wire free_bank_ready_ui;
     wire fifo_empty;
     wire fifo_is_marker;
-    wire fifo_marker_bank;
-    wire bank_valid_ui;
-    wire valid_bank_ui;
+    wire [1:0] fifo_marker_bank;
+    wire [15:0] fifo_marker_epoch;
+    wire desc_valid_ui;
+    wire [1:0] desc_bank_ui;
+    wire [15:0] desc_epoch_ui;
+    reg desc_seen = 1'b0;
     wire overflow_seen;
+
+    always @(posedge ui_clk) begin
+        if (ui_rst) desc_seen <= 1'b0;
+        else if (desc_valid_ui) desc_seen <= 1'b1;
+    end
 
     EoV19DdrCamWriter #(
         .CAM_BASE_ADDR(29'h0010000),
@@ -33,6 +45,7 @@ module tb_EoV19DdrCamWriterDrop;
     ) dut (
         .rst_n(rst_n),
         .capture_enable(capture_enable),
+        .trigger_ref(trigger_ref),
         .cam_clk(cam_clk),
         .cam_hsync(cam_hsync),
         .cam_vsync(cam_vsync),
@@ -45,8 +58,13 @@ module tb_EoV19DdrCamWriterDrop;
         .fifo_data(),
         .fifo_is_marker(fifo_is_marker),
         .fifo_marker_bank(fifo_marker_bank),
-        .bank_valid_ui(bank_valid_ui),
-        .valid_bank_ui(valid_bank_ui),
+        .fifo_marker_epoch(fifo_marker_epoch),
+        .free_bank_valid_ui(free_bank_valid_ui),
+        .free_bank_ui(free_bank_ui),
+        .free_bank_ready_ui(free_bank_ready_ui),
+        .desc_valid_ui(desc_valid_ui),
+        .desc_bank_ui(desc_bank_ui),
+        .desc_epoch_ui(desc_epoch_ui),
         .fifo_overflow_seen_ui(overflow_seen),
         .fifo_level_ui(),
         .dbg_row_ui()
@@ -62,12 +80,30 @@ module tb_EoV19DdrCamWriterDrop;
     task frame_edge;
         begin
             @(negedge cam_clk);
+            trigger_ref = 1'b1;
+            repeat (3) cam_cycle();
+            @(negedge cam_clk);
+            trigger_ref = 1'b0;
+            repeat (4) cam_cycle();
+            @(negedge cam_clk);
             cam_hsync = 1'b0;
             cam_vsync = 1'b1;
             repeat (3) cam_cycle();
             @(negedge cam_clk);
             cam_vsync = 1'b0;
             cam_cycle();
+        end
+    endtask
+
+    task push_free_bank;
+        input [1:0] bank;
+        begin
+            while (!free_bank_ready_ui) @(posedge ui_clk);
+            @(negedge ui_clk);
+            free_bank_ui = bank;
+            free_bank_valid_ui = 1'b1;
+            @(negedge ui_clk);
+            free_bank_valid_ui = 1'b0;
         end
     endtask
 
@@ -95,6 +131,8 @@ module tb_EoV19DdrCamWriterDrop;
         ui_rst = 1'b0;
         capture_enable = 1'b1;
         repeat (4) cam_cycle();
+        push_free_bank(2'd0);
+        repeat (8) cam_cycle();
 
         // Arm bank 0, then exceed the deliberately tiny test FIFO.  The
         // overflowed frame must never produce a completion marker.
@@ -105,7 +143,7 @@ module tb_EoV19DdrCamWriterDrop;
         repeat (8) @(posedge ui_clk);
         if (!overflow_seen)
             $fatal(1, "overflow was not reported");
-        if (bank_valid_ui)
+        if (desc_seen)
             $fatal(1, "overflowed partial frame was published");
 
         // Drain every queued partial payload and prove that no marker was
@@ -140,16 +178,16 @@ module tb_EoV19DdrCamWriterDrop;
         @(negedge ui_clk);
         fifo_rd_en = 1'b0;
         wait (!fifo_empty && fifo_is_marker);
-        if (fifo_marker_bank !== 1'b0)
+        if (fifo_marker_bank !== 2'd0)
             $fatal(1, "retry switched banks after partial-frame discard");
-        if (bank_valid_ui)
+        if (desc_seen)
             $fatal(1, "replacement bank published before marker retirement");
         @(negedge ui_clk);
         fifo_rd_en = 1'b1;
         @(negedge ui_clk);
         fifo_rd_en = 1'b0;
         repeat (4) @(posedge ui_clk);
-        if (!bank_valid_ui || valid_bank_ui !== 1'b0)
+        if (!desc_seen || desc_bank_ui !== 2'd0)
             $fatal(1, "complete replacement bank was not published");
 
         $display("PASS: overflow discards the whole bank and retries atomically");
