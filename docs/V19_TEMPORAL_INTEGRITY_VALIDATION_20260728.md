@@ -333,3 +333,49 @@ The second test forces a 16-entry test FIFO past full, proves that all retained
 entries are payload (no marker), drains the partial transaction, and confirms
 that the complete replacement is published as bank 0 only after marker
 retirement.
+
+## Timing-clean atomic overflow-containment build
+
+A fresh non-incremental Vivado 2025.2 synthesis, implementation, and bitstream
+run completed for the transactional writer candidate. The implementation meets
+all routed timing checks:
+
+| Check | Result |
+|---|---:|
+| Synthesis | 0 errors, 0 critical warnings |
+| Implementation | 0 errors, 0 critical warnings |
+| Routed WNS | +0.086 ns |
+| Routed TNS | 0.000 ns |
+| Routed WHS | +0.010 ns |
+| Routed THS | 0.000 ns |
+| Routed WPWS | +0.099 ns |
+| Routed TPWS | 0.000 ns |
+| Unrouted/partially routed nets | 0 / 0 |
+| FIFO CDC bus-skew constraints | 24/24 met |
+| Minimum bus-skew slack | +3.361 ns |
+
+Post-place utilization:
+
+| Resource | Used | Available | Utilization |
+|---|---:|---:|---:|
+| CLB LUTs | 34,987 | 522,720 | 6.69% |
+| CLB registers | 47,883 | 1,045,440 | 4.58% |
+| Block RAM tiles | 628 | 984 | 63.82% |
+| URAM | 0 | 320 | 0.00% |
+
+Generated bitstream:
+
+```text
+EO_Panorama_V19_M1.runs\impl_1\
+  KintexTop_EO_IR_HD_SDI_panorama_base.bit
+```
+
+- Size: 21,177,455 bytes
+- Generated: 2026-07-28 20:20:23 KST
+- SHA-256:
+  `4063C4E6508DB2946B73EAE16CCA0DA340B4B332D9AA0C6BCA79FE3FC98F2F4F`
+
+This build is the first timing-clean candidate that combines the capture-QoS
+fix with deeper six-camera ingress buffering, measurable peak occupancy, and
+atomic rejection of incomplete camera frames. Hardware programming and
+sustained ILA/USB validation are the next signoff stage.
