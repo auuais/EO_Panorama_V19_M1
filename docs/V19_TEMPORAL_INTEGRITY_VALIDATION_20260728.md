@@ -146,3 +146,31 @@ The next RTL checkpoint therefore:
 The camera-writer marker/capture-enable test still passes after these changes.
 Full implementation and hardware validation of this service-throughput
 checkpoint are pending.
+
+## Capture-QoS implementation result
+
+The camera-priority, zero-bubble handoff, and per-camera FIFO telemetry
+checkpoint completed a fresh non-incremental Vivado 2025.2 build:
+
+| Check | Result |
+|---|---:|
+| Synthesis | 0 errors, 0 critical warnings |
+| Implementation/route | 0 errors, 0 critical warnings |
+| Routed WNS | +0.171 ns |
+| Routed TNS | 0.000 ns |
+| Routed WHS | +0.010 ns |
+| Routed THS | 0.000 ns |
+| Routed WPWS | +0.088 ns |
+| Routed TPWS | 0.000 ns |
+| Unrouted/partially routed nets | 0 / 0 |
+| Bus-skew constraints | 18/18 met |
+| Minimum bus-skew slack | +3.654 ns |
+
+Generated bitstream:
+
+- Size: 20,474,459 bytes
+- Generated: 2026-07-28 18:15:59 KST
+- SHA-256:
+  `F13DCFA14EABCFE9C55D0E902345B596899999F3A5D54DF918BC94E4DE41AAA4`
+
+Hardware programming and ILA/visual signoff remain pending.
