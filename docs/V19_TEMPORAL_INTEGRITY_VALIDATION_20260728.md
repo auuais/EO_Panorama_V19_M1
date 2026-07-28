@@ -443,3 +443,55 @@ requested grabber rate while it:
 A 180-frame smoke run sustained 30.11 captured frames/s and reported zero
 temporal-row events and zero new horizontal-boundary events. Repeated
 USB-delivered frames are counted separately and are not treated as corruption.
+
+## Rejected sustained run: camera ingress still starves
+
+The atomic candidate was then subjected to an 18,000-frame requested stress
+capture at a measured 30 fps. The run was stopped early after a conclusive
+failure at USB frame 3,200, approximately 107 seconds after capture began:
+
+```text
+captures\usb0_v19\temporal_stress_18000_20260728\
+  anomaly_003200_boundary_y570.jpg
+```
+
+The saved raster transitions from live video into the full-width green alarm
+region during the frame. This color is not ambiguous memory corruption:
+`EoDdrRasterOut` deliberately replaces active video with its green
+`dbg_beat_overflow` diagnostic after that sticky alarm crosses into `rd_clk`.
+
+The immediate post-event ILA capture is:
+
+```text
+captures\usb0_v19\
+  ila_status_chord_rowrun_final_20260728_203513.csv
+```
+
+It reports:
+
+```text
+running=1
+v19_replay_banks_ready=1
+copy_active=1
+scan_active=1
+dbg_beat_overflow=1
+dbg_capture_overflow_seen=1
+dbg_bank_conflict_seen=0
+dbg_output_fifo_overflow_seen=0
+v19_capture_dbg=0xcfe0100804020100
+```
+
+Decoding the capture word gives overflow bits `6'h3f`; all six camera FIFOs
+overflowed. Every peak field is `256 * 8 = 2,048` entries, exactly the FIFO
+depth. During the sampled 2,048 UI clocks, the backend was still active and
+retired 271 writes and 92 reads, including 80 source-replay reads. Thus the
+failure is not a permanently wedged MIG command.
+
+This rejects FIFO enlargement as the root fix. It delays the event and the
+transactional writer prevents an incomplete source bank from being published,
+but a recurrent long-term camera-service starvation still reaches all six
+FIFOs. Because capture has unconditional highest arbitration priority, the
+resulting backlog also suppresses renderer/output progress until it drains.
+The next correction must bound service among camera writes, scan reads,
+source-replay reads, and output writes while preserving sufficient aggregate
+camera bandwidth.
