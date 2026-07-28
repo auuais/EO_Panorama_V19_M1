@@ -262,3 +262,38 @@ path. The timing-clean capture-QoS checkpoint
 remains the hardware-validated release: two 2,048-sample ILA captures were
 alarm-free and its 180-frame moving-scene USB capture contained neither the
 horizontal noisy-line artifact nor the mid-frame temporal split.
+
+## Long-run hardware check: capture overflow recurs
+
+A third ILA capture was taken approximately one hour after programming the
+timing-clean capture-QoS image:
+
+```text
+captures\usb0_v19\
+  ila_status_chord_rowrun_final_20260728_192145.csv
+```
+
+The active datapath remained healthy for all 2,048 samples:
+
+```text
+running=1
+v19_replay_banks_ready=1
+copy_active=1
+scan_active=1
+dbg_bank_conflict_seen=0
+dbg_output_fifo_overflow_seen=0
+```
+
+However, the sticky ingress alarms had asserted:
+
+```text
+dbg_beat_overflow=1
+dbg_capture_overflow_seen=1
+v19_capture_dbg=0xcfc0000000000000
+```
+
+The `v19_capture_dbg` overflow field is `6'h3f`, so every camera FIFO overflowed
+at least once during the long run. Therefore the capture-priority/zero-bubble
+checkpoint is a short-run visual improvement, not final sustained-operation
+signoff. The remaining defect is a cumulative or periodic camera-ingress DDR
+service deficit; output-bank ownership and the output FIFO remain exonerated.
