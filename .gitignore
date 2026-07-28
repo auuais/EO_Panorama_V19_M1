@@ -1,0 +1,68 @@
+# Vivado-generated state
+*.jou
+*.log
+*.str
+*.pb
+*.wdb
+*.tmp
+*.backup.*
+*.bit
+*.ltx
+*.mcs
+*.prm
+*.pid
+*.err
+
+# Build/output directories
+.Xil/
+.xsim*/
+*.cache/
+*.hw/
+*.sim/
+*.srcs/
+*.runs/
+*.ip_user_files/
+ip_build_tmp/
+ip_build_tmp2/
+timing_trials/
+tmp/
+
+# Keep only the recreatable DDR IP source
+ip/*
+!ip/ddr4_sub64/
+ip/ddr4_sub64/*
+!ip/ddr4_sub64/ddr4_sub64.xci
+!ip/ddr4_sub64/ddr4_sub64_board.xdc
+
+# OS/editor noise
+Thumbs.db
+.DS_Store
+.claude/
+*.baseline_*
+# Keep the recreatable debug ILA IP source (regenerated via
+# scripts/codex_add_ila.tcl + scripts/codex_widen_ila.tcl), mirroring the
+# DDR-IP convention above -- .xci only, not the generated products.
+!ip/dbg_ila_0/
+ip/dbg_ila_0/*
+!ip/dbg_ila_0/dbg_ila_0.xci
+!ip/dbg_ila_1/
+ip/dbg_ila_1/*
+!ip/dbg_ila_1/dbg_ila_1.xci
+
+# Raw ILA hardware capture dumps (large, regeneratable via
+# scripts/codex_ila_capture*.tcl); findings summarized in the plan doc.
+ila_capture_*.csv
+
+# Raw USB3 grabber frame captures (large PNGs, regeneratable via the
+# capture scripts referenced in the plan docs); findings/numbers summarized
+# in the plan doc, raw images kept local only.
+captures/
+
+# One-off generated netlist/debug helpers in the project root.
+tmp_*.v
+tmp_*.pid
+tmp_*.tcl
+iter_*_CongestedCLBsAndNets.txt
+dfx_runtime.txt
+clockInfo.txt
+xvlog.pb

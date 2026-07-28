@@ -1,0 +1,96 @@
+{
+  "schema": "eo-v19-startup-rowrun-artifacts-v1",
+  "mode": "0x03 EO panorama no stabilization",
+  "pixel_model": "live streaming pixels; generated files contain RowRun/control metadata only",
+  "rowrun_struct_bytes": 18,
+  "rowrun_struct_le": "uint16 sy, uint16 ox0, uint16 len, int32 ax0_q16, int32 ay0_q16, int16 dax_q12_4, int16 day_q12_4",
+  "index_struct_bytes": 8,
+  "index_struct_le": "uint32 rowrun_offset_entries, uint32 rowrun_count",
+  "geometry": {
+    "input_width": 1920,
+    "input_height": 1080,
+    "num_cams": 6,
+    "resized_w": 960,
+    "resized_h": 540,
+    "crop_w": 696,
+    "crop_h": 378,
+    "crop_x0": 132,
+    "crop_y0": 81,
+    "overlap_resized": 50,
+    "overlap_target": 49,
+    "target_w": 3840,
+    "target_h": 480,
+    "per_cam_w": [
+      680,
+      681,
+      681,
+      681,
+      681,
+      681
+    ],
+    "per_cam_w_max": 681,
+    "per_cam_h": 378,
+    "ypad": 51
+  },
+  "fixed_point": {
+    "base_maps": "Q16.16 int32 little-endian",
+    "rowrun_delta": "Q12.4 int16, promoted by << 12 to Q16.16",
+    "run_tolerance_q16": 256,
+    "no_stab_c15": 32767,
+    "no_stab_s15": 0,
+    "no_stab_y_shift_q16": 0
+  },
+  "counts": {
+    "index_entries": 6474,
+    "rowrun_entries": 1502118,
+    "rowrun_bytes": 27038124,
+    "row_ready_entries": 378,
+    "per_cam_rowruns": [
+      250068,
+      250410,
+      250410,
+      250410,
+      250410,
+      250410
+    ],
+    "peak_runs_per_y0": 628,
+    "peak_runs_key_cam_y0": [
+      0,
+      557
+    ],
+    "peak_schedule_bytes_per_cam_y0": 11304,
+    "invalid_ready_rows": 0
+  },
+  "files": {
+    "ini": "tmp\\golden_v19_mode03\\mode03_images_fixture.ini",
+    "runtime_dir": "C:\\SVNProjects\\IMU_Stabilize_v40\\x64\\Release",
+    "source_base_x": {
+      "path": "C:\\SVNProjects\\IMU_Stabilize_v40\\x64\\Release\\eo_base_x_q16.bin",
+      "sha256": "cd47d23af930c5394554d8ce56e701c01a195ae32aa7a70f040d224f2376a7c0"
+    },
+    "source_base_y": {
+      "path": "C:\\SVNProjects\\IMU_Stabilize_v40\\x64\\Release\\eo_base_y_q16.bin",
+      "sha256": "0f83235d6af7ef8aeafc60850075371f2cd141969341942c46b21048408f2399"
+    },
+    "alpha_y": {
+      "path": "C:\\SVNProjects\\IMU_Stabilize_v40\\x64\\Release\\eo_blend_alpha_y_q16_lut.bin",
+      "sha256": "74295c409e5d2a756b679826ae2a1a96c1d104f6c871d71b305414cb5b532da5"
+    },
+    "alpha_c": {
+      "path": "C:\\SVNProjects\\IMU_Stabilize_v40\\x64\\Release\\eo_blend_alpha_c_q16_lut.bin",
+      "sha256": "5d6a7b8e2237d53cb449a32927f99aaf4e4bf047bb84f93c56d7a9fa64592c30"
+    },
+    "rowrun_index": {
+      "path": "tmp\\v19_eo_pano_startup_rowruns_latest\\eo_v19_rowrun_index.bin",
+      "sha256": "ab2802b4fede7d4b74f3583b71963e97561573562f40f17b5bb6b21d6e4ae669"
+    },
+    "rowrun_data": {
+      "path": "tmp\\v19_eo_pano_startup_rowruns_latest\\eo_v19_rowrun_data.bin",
+      "sha256": "5b717955f269ef2f277f06d9c2fa75599d09595134097be6d6459393a87eee38"
+    },
+    "row_ready_max_y0": {
+      "path": "tmp\\v19_eo_pano_startup_rowruns_latest\\eo_v19_row_ready_max_y0.bin",
+      "sha256": "098a92532ff20c6650a1a45ee898523deccc0faa2fa154e09a778eb1f8637b90"
+    }
+  }
+}

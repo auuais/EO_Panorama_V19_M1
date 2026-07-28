@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Emit a compact map-derived RowRun ROM for the live V19 renderer.
+
+The complete software RowRun pool is intentionally kept in DDR/QSPI.  The
+first hardware renderer needs only the currently consumed destination-row
+spans, so this tool emits a bounded 64-pixel span table.  The records are
+derived directly from the regenerated Q16.16 base maps; they contain control
+coordinates only, never image pixels.
+"""
+from __future__ import annotations
+
+import argparse
+import struct
+from pathlib import Path
+
+W = 681
+H = 378
+N = 6
+SEG = 64
+SEGS = (W + SEG - 1) // SEG
+
+
+def q12_4(delta_q16: int) -> int:
+    if delta_q16 >= 0:
+        v = (delta_q16 + 2048) >> 12
+    else:
+        v = -((-delta_q16 + 2048) >> 12)
+    return max(-32768, min(32767, v))
+
+
+def div_round_signed(value: int, divisor: int) -> int:
+    """Round a signed integer quotient to nearest, away from zero on ties."""
+    if value >= 0:
+        return (value + divisor // 2) // divisor
+    return -((-value + divisor // 2) // divisor)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--runtime-dir", type=Path, default=Path("assets/maps"))
+    ap.add_argument("--out", type=Path, default=Path("assets/rowruns/eo_v19_render_runs.mem"))
+    ap.add_argument("--row-max-out", type=Path, default=Path("assets/rowruns/eo_v19_render_row_max_y0.mem"))
+    ap.add_argument("--row-min-out", type=Path, default=Path("assets/rowruns/eo_v19_render_row_min_y0.mem"))
+    args = ap.parse_args()
+    x_path = args.runtime_dir / "eo_base_x_q16.bin"
+    y_path = args.runtime_dir / "eo_base_y_q16.bin"
+    x = list(struct.unpack("<" + "i" * (x_path.stat().st_size // 4), x_path.read_bytes()))
+    y = list(struct.unpack("<" + "i" * (y_path.stat().st_size // 4), y_path.read_bytes()))
+    if len(x) != W * H or len(y) != W * H:
+        raise SystemExit(f"expected {W*H} map entries, got {len(x)} and {len(y)}")
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    row_max = []
+    row_min = []
+    with args.out.open("w", encoding="ascii", newline="\n") as f:
+        for sy in range(H):
+            row0 = sy * W
+            row_values = [v >> 16 for v in y[row0 : row0 + W]]
+            row_max.append(max(row_values))
+            row_min.append(min(row_values))
+            for _cam in range(N):
+                for seg in range(SEGS):
+                    ox0 = seg * SEG
+                    length = min(SEG, W - ox0)
+                    i0 = row0 + ox0
+                    i1 = i0 + length - 1
+                    ax0, ay0 = x[i0], y[i0]
+                    # Fit the affine RowRun across the complete segment.  Using
+                    # only the first two map samples lets local curvature error
+                    # accumulate for 63 pixels and then jump back to the exact
+                    # map at the next segment (up to ~19 px with this package).
+                    # The end-to-end chord keeps the same ROM size while
+                    # reducing the measured maximum error below 3.4 pixels.
+                    span = max(1, length - 1)
+                    dax_q16 = div_round_signed(x[i1] - ax0, span)
+                    day_q16 = div_round_signed(y[i1] - ay0, span)
+                    dax, day = q12_4(dax_q16), q12_4(day_q16)
+                    # Record layout is intentionally bit-addressable in RTL:
+                    # sy, ox0, len, ax0_q16, ay0_q16, dax_q12_4, day_q12_4.
+                    rec = struct.pack("<HHHiiHH", sy, ox0, length, ax0, ay0, dax & 0xffff, day & 0xffff)
+                    f.write(f"{int.from_bytes(rec, 'little'):036x}\n")
+    with args.row_max_out.open("w", encoding="ascii", newline="\n") as f:
+        for v in row_max:
+            f.write(f"{max(0, min(1078, v)):04x}\n")
+    with args.row_min_out.open("w", encoding="ascii", newline="\n") as f:
+        for v in row_min:
+            f.write(f"{max(0, min(1078, v)):04x}\n")
+    print({"records": H * N * SEGS, "segments_per_row": SEGS,
+           "max_row_y0": max(row_max), "min_row_y0": min(row_min)})
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
