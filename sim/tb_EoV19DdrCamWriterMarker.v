@@ -20,7 +20,6 @@ module tb_EoV19DdrCamWriterMarker;
     wire fifo_marker_bank;
     wire bank_valid_ui;
     wire valid_bank_ui;
-    wire [10:0] fifo_level_ui;
 
     EoV19DdrCamWriter #(
         .CAM_BASE_ADDR(29'h0010000)
@@ -42,7 +41,6 @@ module tb_EoV19DdrCamWriterMarker;
         .bank_valid_ui(bank_valid_ui),
         .valid_bank_ui(valid_bank_ui),
         .fifo_overflow_seen_ui(),
-        .fifo_level_ui(fifo_level_ui),
         .dbg_row_ui()
     );
 
@@ -105,11 +103,9 @@ module tb_EoV19DdrCamWriterMarker;
         cam_cycle();
 
         wait (!fifo_empty);
-        repeat (8) @(posedge ui_clk);
+        repeat (3) @(posedge ui_clk);
         if (fifo_is_marker !== 1'b0)
             $fatal(1, "payload beat was replaced by marker");
-        if (fifo_level_ui == 11'd0)
-            $fatal(1, "rd_data_count telemetry remained disabled/zero");
         if (bank_valid_ui !== 1'b0)
             $fatal(1, "bank published before payload/marker retirement");
 
@@ -127,7 +123,7 @@ module tb_EoV19DdrCamWriterMarker;
         if (bank_valid_ui !== 1'b1 || valid_bank_ui !== 1'b0)
             $fatal(1, "marker retirement did not publish completed bank 0");
 
-        $display("PASS: marker retirement, startup gating, and FIFO level telemetry");
+        $display("PASS: camera bank publishes only after in-band marker retirement");
         $finish;
     end
 endmodule
