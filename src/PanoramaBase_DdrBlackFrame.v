@@ -878,7 +878,7 @@ module PanoramaBase_DdrBlackFrame(
     // so all six 0..2048-entry FIFO peaks plus the individual sticky overflow
     // causes fit in one existing 64-bit ILA probe without growing the core.
     // [63:60] signature 4'hC, [59:54] overflow cam5..cam0,
-    // [53:45] cam5 peak/4 ... [8:0] cam0 peak/4.
+    // [53:45] cam5 peak/8 ... [8:0] cam0 peak/8.
     wire [63:0] v19_capture_dbg =
         {4'hC,
          v19_cap5_overflow, v19_cap4_overflow, v19_cap3_overflow,

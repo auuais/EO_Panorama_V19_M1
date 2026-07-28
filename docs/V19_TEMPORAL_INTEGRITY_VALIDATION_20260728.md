@@ -495,3 +495,33 @@ resulting backlog also suppresses renderer/output progress until it drains.
 The next correction must bound service among camera writes, scan reads,
 source-replay reads, and output writes while preserving sufficient aggregate
 camera bandwidth.
+
+## Frame-boundary high-water admission candidate
+
+The camera queues now apply latest-complete-frame semantics before hard full.
+Each 2,048-entry asynchronous FIFO asserts `prog_full` at 1,024 entries. At the
+next camera frame boundary, the writer:
+
+- publishes the just-completed bank only through its normal in-band marker;
+- does not admit the next frame while `prog_full` is asserted;
+- emits no payload or marker for the skipped frame;
+- does not advance the write-bank selector;
+- resumes with the same complete-bank transaction rules after the queue drains.
+
+This uses the remaining 1,024 entries as stall margin and converts persistent
+queue pressure into a repeated last-complete camera frame rather than an
+overflow, partial bank, or mid-raster alarm. The hard-full atomic-discard path
+remains as a final containment layer.
+
+XSim verification:
+
+```text
+PASS: camera bank publishes only after in-band marker retirement
+PASS: overflow discards the whole bank and retries atomically
+PASS: high-water pressure skips a whole frame before FIFO full
+```
+
+The new high-water test fills a small FIFO exactly to its pressure threshold,
+attempts another frame without draining, and proves that only the first frame's
+eight payload beats and one bank-0 marker exist. It also proves that the hard
+overflow alarm remains clear.

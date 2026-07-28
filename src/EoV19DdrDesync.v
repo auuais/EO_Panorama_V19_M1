@@ -10,7 +10,11 @@ module EoV19DdrCamWriter #(
     parameter [28:0] FRAME_STRIDE_ADDR = 29'd1036800,
     parameter [28:0] ROW_STRIDE_ADDR = 29'd960,
     parameter [28:0] BEAT_STRIDE_ADDR = 29'd8,
-    parameter integer FIFO_WRITE_DEPTH = 2048
+    parameter integer FIFO_WRITE_DEPTH = 2048,
+    // This is a latest-complete-frame video queue, not a lossless packet
+    // queue.  Stop admitting a new frame at a frame boundary when half the
+    // queue is occupied, leaving the other half as burst/stall margin.
+    parameter integer FIFO_PROG_FULL_THRESH = FIFO_WRITE_DEPTH / 2
 ) (
     input  wire        rst_n,
     input  wire        capture_enable,
@@ -57,6 +61,7 @@ module EoV19DdrCamWriter #(
     reg         fifo_wr_en;
     reg [FIFO_W-1:0] fifo_din;
     wire        fifo_full;
+    wire        fifo_prog_full;
     wire        fifo_overflow;
     wire [FIFO_COUNT_W-1:0] fifo_level_native;
     reg         fifo_overflow_seen_cam;
@@ -138,7 +143,10 @@ module EoV19DdrCamWriter #(
                                          ((~wr_bank) ? FRAME_STRIDE_ADDR : 29'd0);
                         beat_addr <= CAM_BASE_ADDR +
                                      ((~wr_bank) ? FRAME_STRIDE_ADDR : 29'd0);
-                        drop_frame <= 1'b0;
+                        // Admit the new frame only while the queue has ample
+                        // service margin.  A skipped frame emits neither
+                        // payload nor marker and does not advance wr_bank.
+                        drop_frame <= fifo_prog_full;
                     end else begin
                         // A frame without its completion marker must never be
                         // published.  Keep the same write bank and discard the
@@ -151,7 +159,7 @@ module EoV19DdrCamWriter #(
                     // unpublished.  Retry into the same bank only after the
                     // bounded queue has room; stale partial writes retire
                     // before this complete replacement frame.
-                    drop_frame <= fifo_full;
+                    drop_frame <= fifo_prog_full || fifo_full;
                     row_base_addr <= CAM_BASE_ADDR +
                                      (wr_bank ? FRAME_STRIDE_ADDR : 29'd0);
                     beat_addr <= CAM_BASE_ADDR +
@@ -160,7 +168,7 @@ module EoV19DdrCamWriter #(
                     frame_seen <= 1'b1;
                     row_base_addr <= CAM_BASE_ADDR + (wr_bank ? FRAME_STRIDE_ADDR : 29'd0);
                     beat_addr <= CAM_BASE_ADDR + (wr_bank ? FRAME_STRIDE_ADDR : 29'd0);
-                    drop_frame <= fifo_full;
+                    drop_frame <= fifo_prog_full || fifo_full;
                 end
                 row_y <= 11'd0;
                 pix_x <= 11'd0;
@@ -208,12 +216,12 @@ module EoV19DdrCamWriter #(
         .FIFO_WRITE_DEPTH    (FIFO_WRITE_DEPTH),
         .FULL_RESET_VALUE    (0),
         .PROG_EMPTY_THRESH   (8),
-        .PROG_FULL_THRESH    (10),
+        .PROG_FULL_THRESH    (FIFO_PROG_FULL_THRESH),
         .RD_DATA_COUNT_WIDTH (FIFO_COUNT_W),
         .READ_DATA_WIDTH     (FIFO_W),
         .READ_MODE           ("fwft"),
         .SIM_ASSERT_CHK      (0),
-        .USE_ADV_FEATURES    ("0501"),
+        .USE_ADV_FEATURES    ("0503"),
         .WAKEUP_TIME         (0),
         .WR_DATA_COUNT_WIDTH (FIFO_COUNT_W),
         .WRITE_DATA_WIDTH    (FIFO_W),
@@ -231,7 +239,7 @@ module EoV19DdrCamWriter #(
         .wr_ack        (),
         .wr_data_count (),
         .almost_full   (),
-        .prog_full     (),
+        .prog_full     (fifo_prog_full),
         .rd_clk        (ui_clk),
         .rd_en         (fifo_rd_en),
         .dout          (fifo_dout),
