@@ -1,3 +1,5 @@
+`timescale 1ns/1ps
+
 `include "EoV19PanoramaParams.vh"
 
 // Camera-side native-MIG beat writer for the V19 DDR de-skew path.
@@ -7,7 +9,8 @@ module EoV19DdrCamWriter #(
     parameter [28:0] CAM_BASE_ADDR = 29'd0,
     parameter [28:0] FRAME_STRIDE_ADDR = 29'd1036800,
     parameter [28:0] ROW_STRIDE_ADDR = 29'd960,
-    parameter [28:0] BEAT_STRIDE_ADDR = 29'd8
+    parameter [28:0] BEAT_STRIDE_ADDR = 29'd8,
+    parameter integer FIFO_WRITE_DEPTH = 2048
 ) (
     input  wire        rst_n,
     input  wire        capture_enable,
@@ -26,10 +29,14 @@ module EoV19DdrCamWriter #(
     output reg         bank_valid_ui,
     output reg         valid_bank_ui,
     output reg         fifo_overflow_seen_ui,
-    output wire [10:0] fifo_level_ui,
+    output wire [11:0] fifo_level_ui,
     output wire [10:0] dbg_row_ui
 );
-    localparam integer FIFO_W = 413;
+    // Only the 256 useful pixel bits plus address/marker metadata cross the
+    // camera CDC.  The 126-bit DDR guard region is reconstructed at the FIFO
+    // output instead of consuming queue memory.
+    localparam integer FIFO_W = 287;
+    localparam integer FIFO_COUNT_W = $clog2(FIFO_WRITE_DEPTH) + 1;
 
     wire [15:0] cam_packed = {cam_pixel[19:12], cam_pixel[9:2]};
     wire        cam_active = cam_hsync && !cam_vsync;
@@ -51,7 +58,9 @@ module EoV19DdrCamWriter #(
     reg [FIFO_W-1:0] fifo_din;
     wire        fifo_full;
     wire        fifo_overflow;
+    wire [FIFO_COUNT_W-1:0] fifo_level_native;
     reg         fifo_overflow_seen_cam;
+    reg         drop_frame;
     (* ASYNC_REG = "TRUE" *) reg capture_enable_meta;
     (* ASYNC_REG = "TRUE" *) reg capture_enable_cam;
 
@@ -108,13 +117,14 @@ module EoV19DdrCamWriter #(
             fifo_wr_en <= 1'b0;
             fifo_din <= {FIFO_W{1'b0}};
             fifo_overflow_seen_cam <= 1'b0;
+            drop_frame <= 1'b0;
         end else begin
             hsync_d <= cam_hsync;
             vsync_d <= cam_vsync;
             fifo_wr_en <= 1'b0;
 
             if (frame_start) begin
-                if (frame_seen) begin
+                if (frame_seen && !drop_frame) begin
                     // Queue an in-band completion marker behind every DDR
                     // payload beat of the completed frame.  The ui_clk side
                     // publishes this bank only when the marker reaches the
@@ -122,23 +132,42 @@ module EoV19DdrCamWriter #(
                     // proving all preceding camera writes have retired.
                     if (!fifo_full) begin
                         fifo_wr_en <= 1'b1;
-                        fifo_din <= {29'd0, 1'b1, wr_bank, 126'd0, 256'd0};
+                        fifo_din <= {29'd0, 1'b1, wr_bank, 256'd0};
+                        wr_bank <= ~wr_bank;
+                        row_base_addr <= CAM_BASE_ADDR +
+                                         ((~wr_bank) ? FRAME_STRIDE_ADDR : 29'd0);
+                        beat_addr <= CAM_BASE_ADDR +
+                                     ((~wr_bank) ? FRAME_STRIDE_ADDR : 29'd0);
+                        drop_frame <= 1'b0;
                     end else begin
+                        // A frame without its completion marker must never be
+                        // published.  Keep the same write bank and discard the
+                        // next frame while the queue drains.
                         fifo_overflow_seen_cam <= 1'b1;
+                        drop_frame <= 1'b1;
                     end
-                    wr_bank <= ~wr_bank;
-                    row_base_addr <= CAM_BASE_ADDR + ((~wr_bank) ? FRAME_STRIDE_ADDR : 29'd0);
-                    beat_addr <= CAM_BASE_ADDR + ((~wr_bank) ? FRAME_STRIDE_ADDR : 29'd0);
+                end else if (frame_seen) begin
+                    // The previous frame overflowed and is intentionally
+                    // unpublished.  Retry into the same bank only after the
+                    // bounded queue has room; stale partial writes retire
+                    // before this complete replacement frame.
+                    drop_frame <= fifo_full;
+                    row_base_addr <= CAM_BASE_ADDR +
+                                     (wr_bank ? FRAME_STRIDE_ADDR : 29'd0);
+                    beat_addr <= CAM_BASE_ADDR +
+                                 (wr_bank ? FRAME_STRIDE_ADDR : 29'd0);
                 end else begin
                     frame_seen <= 1'b1;
                     row_base_addr <= CAM_BASE_ADDR + (wr_bank ? FRAME_STRIDE_ADDR : 29'd0);
                     beat_addr <= CAM_BASE_ADDR + (wr_bank ? FRAME_STRIDE_ADDR : 29'd0);
+                    drop_frame <= fifo_full;
                 end
                 row_y <= 11'd0;
                 pix_x <= 11'd0;
                 pack_count <= 4'd0;
                 pack_buf <= 256'd0;
-            end else if (cam_active && (pix_x < `EO_V19_INPUT_W)) begin
+            end else if (!drop_frame && cam_active &&
+                         (pix_x < `EO_V19_INPUT_W)) begin
                 pack_buf <= pack_buf_next;
                 pix_x <= pix_x + 11'd1;
                 if (pack_count == 4'd15) begin
@@ -146,9 +175,13 @@ module EoV19DdrCamWriter #(
                     pack_buf <= 256'd0;
                     if (!fifo_full) begin
                         fifo_wr_en <= 1'b1;
-                        fifo_din <= {beat_addr, 1'b0, 1'b0, 126'd0, pack_buf_next};
+                        fifo_din <= {beat_addr, 1'b0, 1'b0, pack_buf_next};
                     end else begin
+                        // Do not publish a bank containing a missing beat.
+                        // Suppress the rest of this frame and retry the same
+                        // bank from row zero at a later frame boundary.
                         fifo_overflow_seen_cam <= 1'b1;
+                        drop_frame <= 1'b1;
                     end
                     beat_addr <= beat_addr + BEAT_STRIDE_ADDR;
                 end else begin
@@ -170,19 +203,19 @@ module EoV19DdrCamWriter #(
     xpm_fifo_async #(
         .DOUT_RESET_VALUE    ("0"),
         .ECC_MODE            ("no_ecc"),
-        .FIFO_MEMORY_TYPE    ("auto"),
+        .FIFO_MEMORY_TYPE    ("block"),
         .FIFO_READ_LATENCY   (0),
-        .FIFO_WRITE_DEPTH    (1024),
+        .FIFO_WRITE_DEPTH    (FIFO_WRITE_DEPTH),
         .FULL_RESET_VALUE    (0),
         .PROG_EMPTY_THRESH   (8),
-        .PROG_FULL_THRESH    (960),
-        .RD_DATA_COUNT_WIDTH (11),
+        .PROG_FULL_THRESH    (10),
+        .RD_DATA_COUNT_WIDTH (FIFO_COUNT_W),
         .READ_DATA_WIDTH     (FIFO_W),
         .READ_MODE           ("fwft"),
         .SIM_ASSERT_CHK      (0),
-        .USE_ADV_FEATURES    ("0101"),
+        .USE_ADV_FEATURES    ("0501"),
         .WAKEUP_TIME         (0),
-        .WR_DATA_COUNT_WIDTH (11),
+        .WR_DATA_COUNT_WIDTH (FIFO_COUNT_W),
         .WRITE_DATA_WIDTH    (FIFO_W),
         .CDC_SYNC_STAGES     (2),
         .RELATED_CLOCKS      (0)
@@ -206,7 +239,7 @@ module EoV19DdrCamWriter #(
         .underflow     (),
         .rd_rst_busy   (),
         .data_valid    (),
-        .rd_data_count (fifo_level_ui),
+        .rd_data_count (fifo_level_native),
         .almost_empty  (),
         .prog_empty    (),
         .injectsbiterr (1'b0),
@@ -214,9 +247,11 @@ module EoV19DdrCamWriter #(
     );
 
     assign fifo_addr = fifo_dout[FIFO_W-1 -: 29];
-    assign fifo_data = fifo_dout[383:0];
-    assign fifo_is_marker = fifo_dout[383];
-    assign fifo_marker_bank = fifo_dout[382];
+    assign fifo_is_marker = fifo_dout[257];
+    assign fifo_marker_bank = fifo_dout[256];
+    assign fifo_data = {fifo_is_marker, fifo_marker_bank,
+                        126'd0, fifo_dout[255:0]};
+    assign fifo_level_ui = {{(12-FIFO_COUNT_W){1'b0}}, fifo_level_native};
 
     reg [10:0] row_meta, row_sync;
     reg overflow_meta;

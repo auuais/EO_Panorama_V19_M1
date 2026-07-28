@@ -1,6 +1,11 @@
 `timescale 1ns/1ps
 
 module tb_EoV19DdrCamWriterMarker;
+    initial begin
+        #1000000;
+        $fatal(1, "marker test timeout");
+    end
+
     reg rst_n = 1'b0;
     reg ui_rst = 1'b1;
     reg capture_enable = 1'b0;

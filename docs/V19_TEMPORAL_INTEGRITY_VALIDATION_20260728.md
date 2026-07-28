@@ -297,3 +297,39 @@ at least once during the long run. Therefore the capture-priority/zero-bubble
 checkpoint is a short-run visual improvement, not final sustained-operation
 signoff. The remaining defect is a cumulative or periodic camera-ingress DDR
 service deficit; output-bank ownership and the output FIFO remain exonerated.
+
+## Atomic overflow-containment candidate
+
+The long-run capture window still retires 254 camera writes in 2,048 UI clocks,
+which is faster than the aggregate average camera arrival rate. The remaining
+failure is therefore burst/rare-stall tolerance, not a permanent DDR bandwidth
+deficit.
+
+The next RTL candidate makes camera-frame publication transactional even under
+that exceptional condition:
+
+- each camera FIFO grows from 1,024 to 2,048 entries;
+- the CDC payload is reduced from 413 to 287 stored bits by reconstructing the
+  unused 126-bit DDR guard field after the FIFO;
+- UI-domain occupancy count is enabled and peak depth is exported through the
+  existing ILA probe in eight-entry units;
+- if any payload beat or completion marker encounters a full FIFO, the writer
+  suppresses the rest of that frame and emits no completion marker;
+- the write-bank selector is not advanced after a dropped frame; queued partial
+  writes retire, then a later complete frame overwrites the same bank from row
+  zero before it can be published.
+
+Thus even an extreme stall may repeat the last complete displayed frame, but it
+cannot expose a partially updated source bank to the panorama renderer.
+
+XSim verification:
+
+```text
+PASS: camera bank publishes only after in-band marker retirement
+PASS: overflow discards the whole bank and retries atomically
+```
+
+The second test forces a 16-entry test FIFO past full, proves that all retained
+entries are payload (no marker), drains the partial transaction, and confirms
+that the complete replacement is published as bank 0 only after marker
+retirement.

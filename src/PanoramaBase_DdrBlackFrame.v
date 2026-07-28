@@ -765,12 +765,12 @@ module PanoramaBase_DdrBlackFrame(
     wire        v19_cap3_bank, v19_cap4_bank, v19_cap5_bank;
     wire        v19_cap0_overflow, v19_cap1_overflow, v19_cap2_overflow;
     wire        v19_cap3_overflow, v19_cap4_overflow, v19_cap5_overflow;
-    wire [10:0] v19_cap0_level, v19_cap1_level, v19_cap2_level;
-    wire [10:0] v19_cap3_level, v19_cap4_level, v19_cap5_level;
+    wire [11:0] v19_cap0_level, v19_cap1_level, v19_cap2_level;
+    wire [11:0] v19_cap3_level, v19_cap4_level, v19_cap5_level;
     wire [10:0] v19_cap0_row, v19_cap1_row, v19_cap2_row;
     wire [10:0] v19_cap3_row, v19_cap4_row, v19_cap5_row;
-    reg  [10:0] v19_cap0_peak, v19_cap1_peak, v19_cap2_peak;
-    reg  [10:0] v19_cap3_peak, v19_cap4_peak, v19_cap5_peak;
+    reg  [11:0] v19_cap0_peak, v19_cap1_peak, v19_cap2_peak;
+    reg  [11:0] v19_cap3_peak, v19_cap4_peak, v19_cap5_peak;
     reg  [2:0]  v19_cap_rr;
     reg         v19_cap_sel_valid;
     reg  [2:0]  v19_cap_sel;
@@ -783,12 +783,12 @@ module PanoramaBase_DdrBlackFrame(
     always @(posedge c0_ddr4_ui_clk) begin
         if (ui_rst) begin
             eo_frames_ready_seen <= 1'b0;
-            v19_cap0_peak <= 11'd0;
-            v19_cap1_peak <= 11'd0;
-            v19_cap2_peak <= 11'd0;
-            v19_cap3_peak <= 11'd0;
-            v19_cap4_peak <= 11'd0;
-            v19_cap5_peak <= 11'd0;
+            v19_cap0_peak <= 12'd0;
+            v19_cap1_peak <= 12'd0;
+            v19_cap2_peak <= 12'd0;
+            v19_cap3_peak <= 12'd0;
+            v19_cap4_peak <= 12'd0;
+            v19_cap5_peak <= 12'd0;
         end else begin
             if (eo_frames_valid)
                 eo_frames_ready_seen <= 1'b1;
@@ -874,8 +874,8 @@ module PanoramaBase_DdrBlackFrame(
     (* mark_debug = "true", dont_touch = "true" *) wire [63:0] v19_dbg_rows_word1;
     (* mark_debug = "true", dont_touch = "true" *) wire [63:0] v19_dbg_rows_word2;
     (* mark_debug = "true", dont_touch = "true" *) wire [63:0] v19_replay_dbg_word;
-    // Capture-service telemetry.  Each peak is reported in four-entry units,
-    // so all six 0..1023-entry FIFO peaks plus the individual sticky overflow
+    // Capture-service telemetry.  Each peak is reported in eight-entry units,
+    // so all six 0..2048-entry FIFO peaks plus the individual sticky overflow
     // causes fit in one existing 64-bit ILA probe without growing the core.
     // [63:60] signature 4'hC, [59:54] overflow cam5..cam0,
     // [53:45] cam5 peak/4 ... [8:0] cam0 peak/4.
@@ -883,9 +883,9 @@ module PanoramaBase_DdrBlackFrame(
         {4'hC,
          v19_cap5_overflow, v19_cap4_overflow, v19_cap3_overflow,
          v19_cap2_overflow, v19_cap1_overflow, v19_cap0_overflow,
-         v19_cap5_peak[10:2], v19_cap4_peak[10:2],
-         v19_cap3_peak[10:2], v19_cap2_peak[10:2],
-         v19_cap1_peak[10:2], v19_cap0_peak[10:2]};
+         v19_cap5_peak[11:3], v19_cap4_peak[11:3],
+         v19_cap3_peak[11:3], v19_cap2_peak[11:3],
+         v19_cap1_peak[11:3], v19_cap0_peak[11:3]};
     (* mark_debug = "true", dont_touch = "true" *) wire        v19_content_row51 =
         (SRC_SEL == SRC_V19) &&
         v19_dbg_bus[49] &&                // renderer start_copy/copy_active

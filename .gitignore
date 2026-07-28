@@ -16,6 +16,7 @@
 # Build/output directories
 .Xil/
 .xsim*/
+xsim.dir/
 *.cache/
 *.hw/
 *.sim/
