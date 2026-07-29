@@ -1,5 +1,5 @@
 set root [file normalize [file join [file dirname [info script]] ..]]
-set ltxfile [file join $root timing_trials v19_route_AggressiveExplore.ltx]
+set ltxfile [file join $root EO_Panorama_V19_M1.runs impl_1 KintexTop_EO_IR_HD_SDI_panorama_base.ltx]
 set stamp [clock format [clock seconds] -format "%Y%m%d_%H%M%S"]
 set outcsv [file join $root captures usb0_v19 "ila_v19_src_rd_valid_timing_clean_$stamp.csv"]
 file mkdir [file dirname $outcsv]
