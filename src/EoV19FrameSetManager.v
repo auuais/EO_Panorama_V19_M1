@@ -59,29 +59,43 @@ module EoV19FrameSetManager #(
     output wire [23:0]            descriptor_valid_map,
     output wire [3:0]             dbg_state
 );
-    localparam [4:0] ST_INIT          = 5'd0;
-    localparam [4:0] ST_FIND_RESET    = 5'd1;
-    localparam [4:0] ST_FIND_LOAD     = 5'd2;
-    localparam [4:0] ST_FIND_CAM1     = 5'd3;
-    localparam [4:0] ST_FIND_CAM2     = 5'd4;
-    localparam [4:0] ST_FIND_CAM3     = 5'd5;
-    localparam [4:0] ST_FIND_CAM4     = 5'd6;
-    localparam [4:0] ST_FIND_CAM5     = 5'd7;
-    localparam [4:0] ST_FIND_DONE     = 5'd8;
-    localparam [4:0] ST_ACQUIRE       = 5'd9;
-    localparam [4:0] ST_WAIT          = 5'd10;
-    localparam [4:0] ST_RELEASE_PREP  = 5'd11;
-    localparam [4:0] ST_RELEASE_SEND  = 5'd12;
-    localparam [4:0] ST_FRONTIER_INIT = 5'd13;
-    localparam [4:0] ST_FRONTIER_CAM1 = 5'd14;
-    localparam [4:0] ST_FRONTIER_CAM2 = 5'd15;
-    localparam [4:0] ST_FRONTIER_CAM3 = 5'd16;
-    localparam [4:0] ST_FRONTIER_CAM4 = 5'd17;
-    localparam [4:0] ST_FRONTIER_CAM5 = 5'd18;
-    localparam [4:0] ST_RECLAIM_PREP  = 5'd19;
-    localparam [4:0] ST_RECLAIM_SEND  = 5'd20;
+    localparam [5:0] ST_INIT          = 6'd0;
+    localparam [5:0] ST_FIND_RESET    = 6'd1;
+    localparam [5:0] ST_FIND_LOAD     = 6'd2;
+    localparam [5:0] ST_FIND_CAM1     = 6'd3;
+    localparam [5:0] ST_FIND_CAM2     = 6'd4;
+    localparam [5:0] ST_FIND_CAM3     = 6'd5;
+    localparam [5:0] ST_FIND_CAM4     = 6'd6;
+    localparam [5:0] ST_FIND_CAM5     = 6'd7;
+    localparam [5:0] ST_FIND_DONE     = 6'd8;
+    localparam [5:0] ST_ACQUIRE       = 6'd9;
+    localparam [5:0] ST_WAIT          = 6'd10;
+    localparam [5:0] ST_RELEASE_PREP  = 6'd11;
+    localparam [5:0] ST_RELEASE_CAM0  = 6'd12;
+    localparam [5:0] ST_RELEASE_CAM1  = 6'd13;
+    localparam [5:0] ST_RELEASE_CAM2  = 6'd14;
+    localparam [5:0] ST_RELEASE_CAM3  = 6'd15;
+    localparam [5:0] ST_RELEASE_CAM4  = 6'd16;
+    localparam [5:0] ST_RELEASE_CAM5  = 6'd17;
+    localparam [5:0] ST_RELEASE_SEND  = 6'd18;
+    localparam [5:0] ST_FRONTIER_INIT = 6'd19;
+    localparam [5:0] ST_FRONTIER_CAM0 = 6'd20;
+    localparam [5:0] ST_FRONTIER_CAM1 = 6'd21;
+    localparam [5:0] ST_FRONTIER_CAM2 = 6'd22;
+    localparam [5:0] ST_FRONTIER_CAM3 = 6'd23;
+    localparam [5:0] ST_FRONTIER_CAM4 = 6'd24;
+    localparam [5:0] ST_FRONTIER_CAM5 = 6'd25;
+    localparam [5:0] ST_FRONTIER_MERGE = 6'd26;
+    localparam [5:0] ST_RECLAIM_PREP  = 6'd27;
+    localparam [5:0] ST_RECLAIM_CAM0  = 6'd28;
+    localparam [5:0] ST_RECLAIM_CAM1  = 6'd29;
+    localparam [5:0] ST_RECLAIM_CAM2  = 6'd30;
+    localparam [5:0] ST_RECLAIM_CAM3  = 6'd31;
+    localparam [5:0] ST_RECLAIM_CAM4  = 6'd32;
+    localparam [5:0] ST_RECLAIM_CAM5  = 6'd33;
+    localparam [5:0] ST_RECLAIM_SEND  = 6'd34;
 
-    reg [4:0] state;
+    reg [5:0] state;
     reg [1:0] bank_index;
 
     reg [3:0] valid0, valid1, valid2, valid3, valid4, valid5;
@@ -111,6 +125,10 @@ module EoV19FrameSetManager #(
     reg [1:0]              find_bank5;
 
     reg [EPOCH_W-1:0]      reclaim_frontier;
+    reg                    reclaim_frontier_valid;
+    reg [2:0]              frontier_next_cam;
+    reg                    cam_oldest_valid;
+    reg [EPOCH_W-1:0]      cam_oldest_epoch;
     reg [5:0]              release_mask_r;
     reg [5:0]              stale_mask_r;
 
@@ -263,7 +281,25 @@ module EoV19FrameSetManager #(
 
     assign descriptor_valid_map = {valid5, valid4, valid3,
                                    valid2, valid1, valid0};
-    assign dbg_state = (state > 5'd15) ? 4'hf : state[3:0];
+    assign dbg_state = (state > 6'd15) ? 4'hf : state[3:0];
+
+    task scan_frontier_bank;
+        input valid_bit;
+        input [EPOCH_W-1:0] epoch_value;
+        begin
+            if (valid_bit &&
+                (!cam_oldest_valid || epoch_newer(cam_oldest_epoch, epoch_value))) begin
+                cam_oldest_valid <= 1'b1;
+                cam_oldest_epoch <= epoch_value;
+            end
+            if (bank_index == 2'd3) begin
+                bank_index <= 2'd0;
+                state <= ST_FRONTIER_MERGE;
+            end else begin
+                bank_index <= bank_index + 2'd1;
+            end
+        end
+    endtask
 
     integer i;
     always @(posedge clk) begin
@@ -284,6 +320,10 @@ module EoV19FrameSetManager #(
             find_bank3 <= 2'd0; find_bank4 <= 2'd0; find_bank5 <= 2'd0;
 
             reclaim_frontier <= {EPOCH_W{1'b0}};
+            reclaim_frontier_valid <= 1'b0;
+            frontier_next_cam <= 3'd0;
+            cam_oldest_valid <= 1'b0;
+            cam_oldest_epoch <= {EPOCH_W{1'b0}};
             release_mask_r <= 6'd0;
             stale_mask_r <= 6'd0;
 
@@ -458,16 +498,41 @@ module EoV19FrameSetManager #(
                 end
 
                 ST_RELEASE_PREP: begin
+                    release_mask_r <= 6'd0;
+                    state <= ST_RELEASE_CAM0;
+                end
+
+                ST_RELEASE_CAM0: begin
                     release_mask_r[0] <= valid0[bank_index] &&
                                          epoch_not_newer(epoch0[bank_index], lease_epoch);
+                    state <= ST_RELEASE_CAM1;
+                end
+
+                ST_RELEASE_CAM1: begin
                     release_mask_r[1] <= valid1[bank_index] &&
                                          epoch_not_newer(epoch1[bank_index], lease_epoch);
+                    state <= ST_RELEASE_CAM2;
+                end
+
+                ST_RELEASE_CAM2: begin
                     release_mask_r[2] <= valid2[bank_index] &&
                                          epoch_not_newer(epoch2[bank_index], lease_epoch);
+                    state <= ST_RELEASE_CAM3;
+                end
+
+                ST_RELEASE_CAM3: begin
                     release_mask_r[3] <= valid3[bank_index] &&
                                          epoch_not_newer(epoch3[bank_index], lease_epoch);
+                    state <= ST_RELEASE_CAM4;
+                end
+
+                ST_RELEASE_CAM4: begin
                     release_mask_r[4] <= valid4[bank_index] &&
                                          epoch_not_newer(epoch4[bank_index], lease_epoch);
+                    state <= ST_RELEASE_CAM5;
+                end
+
+                ST_RELEASE_CAM5: begin
                     release_mask_r[5] <= valid5[bank_index] &&
                                          epoch_not_newer(epoch5[bank_index], lease_epoch);
                     state <= ST_RELEASE_SEND;
@@ -497,73 +562,106 @@ module EoV19FrameSetManager #(
                 end
 
                 ST_FRONTIER_INIT: begin
-                    reclaim_frontier <= oldest_epoch4(
-                        valid0, epoch0[0], epoch0[1], epoch0[2], epoch0[3]);
-                    state <= ST_FRONTIER_CAM1;
+                    reclaim_frontier <= {EPOCH_W{1'b0}};
+                    reclaim_frontier_valid <= 1'b0;
+                    cam_oldest_valid <= 1'b0;
+                    cam_oldest_epoch <= {EPOCH_W{1'b0}};
+                    bank_index <= 2'd0;
+                    frontier_next_cam <= 3'd1;
+                    state <= ST_FRONTIER_CAM0;
+                end
+
+                ST_FRONTIER_CAM0: begin
+                    frontier_next_cam <= 3'd1;
+                    scan_frontier_bank(valid0[bank_index], epoch0[bank_index]);
                 end
 
                 ST_FRONTIER_CAM1: begin
-                    if (epoch_newer(oldest_epoch4(valid1, epoch1[0], epoch1[1],
-                                                  epoch1[2], epoch1[3]),
-                                    reclaim_frontier))
-                        reclaim_frontier <= oldest_epoch4(
-                            valid1, epoch1[0], epoch1[1], epoch1[2], epoch1[3]);
-                    state <= ST_FRONTIER_CAM2;
+                    frontier_next_cam <= 3'd2;
+                    scan_frontier_bank(valid1[bank_index], epoch1[bank_index]);
                 end
 
                 ST_FRONTIER_CAM2: begin
-                    if (epoch_newer(oldest_epoch4(valid2, epoch2[0], epoch2[1],
-                                                  epoch2[2], epoch2[3]),
-                                    reclaim_frontier))
-                        reclaim_frontier <= oldest_epoch4(
-                            valid2, epoch2[0], epoch2[1], epoch2[2], epoch2[3]);
-                    state <= ST_FRONTIER_CAM3;
+                    frontier_next_cam <= 3'd3;
+                    scan_frontier_bank(valid2[bank_index], epoch2[bank_index]);
                 end
 
                 ST_FRONTIER_CAM3: begin
-                    if (epoch_newer(oldest_epoch4(valid3, epoch3[0], epoch3[1],
-                                                  epoch3[2], epoch3[3]),
-                                    reclaim_frontier))
-                        reclaim_frontier <= oldest_epoch4(
-                            valid3, epoch3[0], epoch3[1], epoch3[2], epoch3[3]);
-                    state <= ST_FRONTIER_CAM4;
+                    frontier_next_cam <= 3'd4;
+                    scan_frontier_bank(valid3[bank_index], epoch3[bank_index]);
                 end
 
                 ST_FRONTIER_CAM4: begin
-                    if (epoch_newer(oldest_epoch4(valid4, epoch4[0], epoch4[1],
-                                                  epoch4[2], epoch4[3]),
-                                    reclaim_frontier))
-                        reclaim_frontier <= oldest_epoch4(
-                            valid4, epoch4[0], epoch4[1], epoch4[2], epoch4[3]);
-                    state <= ST_FRONTIER_CAM5;
+                    frontier_next_cam <= 3'd5;
+                    scan_frontier_bank(valid4[bank_index], epoch4[bank_index]);
                 end
 
                 ST_FRONTIER_CAM5: begin
-                    if (epoch_newer(oldest_epoch4(valid5, epoch5[0], epoch5[1],
-                                                  epoch5[2], epoch5[3]),
-                                    reclaim_frontier))
-                        reclaim_frontier <= oldest_epoch4(
-                            valid5, epoch5[0], epoch5[1], epoch5[2], epoch5[3]);
+                    frontier_next_cam <= 3'd6;
+                    scan_frontier_bank(valid5[bank_index], epoch5[bank_index]);
+                end
+
+                ST_FRONTIER_MERGE: begin
+                    if (cam_oldest_valid &&
+                        (!reclaim_frontier_valid ||
+                         epoch_newer(cam_oldest_epoch, reclaim_frontier))) begin
+                        reclaim_frontier <= cam_oldest_epoch;
+                        reclaim_frontier_valid <= 1'b1;
+                    end
+                    cam_oldest_valid <= 1'b0;
+                    cam_oldest_epoch <= {EPOCH_W{1'b0}};
                     bank_index <= 2'd0;
-                    state <= ST_RECLAIM_PREP;
+                    case (frontier_next_cam)
+                        3'd1: state <= ST_FRONTIER_CAM1;
+                        3'd2: state <= ST_FRONTIER_CAM2;
+                        3'd3: state <= ST_FRONTIER_CAM3;
+                        3'd4: state <= ST_FRONTIER_CAM4;
+                        3'd5: state <= ST_FRONTIER_CAM5;
+                        default: state <= ST_RECLAIM_PREP;
+                    endcase
                 end
 
                 ST_RECLAIM_PREP: begin
+                    stale_mask_r <= 6'd0;
+                    state <= ST_RECLAIM_CAM0;
+                end
+
+                ST_RECLAIM_CAM0: begin
                     stale_mask_r[0] <= valid0[bank_index] &&
                                        epoch_newer(reclaim_frontier,
                                                    epoch0[bank_index]);
+                    state <= ST_RECLAIM_CAM1;
+                end
+
+                ST_RECLAIM_CAM1: begin
                     stale_mask_r[1] <= valid1[bank_index] &&
                                        epoch_newer(reclaim_frontier,
                                                    epoch1[bank_index]);
+                    state <= ST_RECLAIM_CAM2;
+                end
+
+                ST_RECLAIM_CAM2: begin
                     stale_mask_r[2] <= valid2[bank_index] &&
                                        epoch_newer(reclaim_frontier,
                                                    epoch2[bank_index]);
+                    state <= ST_RECLAIM_CAM3;
+                end
+
+                ST_RECLAIM_CAM3: begin
                     stale_mask_r[3] <= valid3[bank_index] &&
                                        epoch_newer(reclaim_frontier,
                                                    epoch3[bank_index]);
+                    state <= ST_RECLAIM_CAM4;
+                end
+
+                ST_RECLAIM_CAM4: begin
                     stale_mask_r[4] <= valid4[bank_index] &&
                                        epoch_newer(reclaim_frontier,
                                                    epoch4[bank_index]);
+                    state <= ST_RECLAIM_CAM5;
+                end
+
+                ST_RECLAIM_CAM5: begin
                     stale_mask_r[5] <= valid5[bank_index] &&
                                        epoch_newer(reclaim_frontier,
                                                    epoch5[bank_index]);

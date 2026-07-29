@@ -73,7 +73,7 @@ module tb_EoV19FrameSetManager;
         integer timeout;
         begin
             timeout=0;
-            while (!lease_valid && timeout < 80) begin
+            while (!lease_valid && timeout < 220) begin
                 @(posedge clk);
                 timeout=timeout+1;
             end
@@ -177,7 +177,7 @@ module tb_EoV19FrameSetManager;
         publish_one(4, 16'd31, 0);
         publish_one(5, 16'd31, 0);
         release_pulses=0;
-        repeat (30) begin
+        repeat (160) begin
             @(posedge clk);
             if (free_valid[0] && free_bank0 == 0)
                 release_pulses=release_pulses+1;
