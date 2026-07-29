@@ -74,10 +74,24 @@ module EoV19StreamingRendererII1 #(
     assign dbg_rows_min = mn2(mn2(mn2(rows0,rows1),mn2(rows2,rows3)),mn2(rows4,rows5));
     wire [10:0] dbg_rows_max = mx2(mx2(mx2(rows0,rows1),mx2(rows2,rows3)),mx2(rows4,rows5));
 
+    // Reduced-raster (1/6 bring-up scale) fallback.  The EO BT.1120 link has
+    // been verified as 1080p progressive, so this path is never taken on the
+    // real board -- but leaving it live cost real timing on ui_clk.  Its
+    // six-way field_height_min tree fed qy_limit (a -0.157 ns setup path from
+    // u_lc3/height_sync), and small_raster put a three-term shift/add inside
+    // scale_row(), which sits directly in the gate_need_row / gate_min_row
+    // comparison feeding the -0.163 ns worst path into pano_y.
+    //
+    // Keep the logic for bring-up but fold it out by default: with
+    // ENABLE_REDUCED_RASTER = 0 the height tree becomes dead, small_raster is
+    // a constant 0, scale_row() collapses to identity and qy_limit to 1078.
+    // Set it to 1 only to re-enable the bring-up raster diagnosis.
+    localparam integer ENABLE_REDUCED_RASTER = 0;
     wire [10:0] field_height_min = mn2(mn2(mn2(height0,height1),mn2(height2,height3)),mn2(height4,height5));
     wire all_heights_seen = (height0 != 0) && (height1 != 0) && (height2 != 0) &&
                             (height3 != 0) && (height4 != 0) && (height5 != 0);
-    wire reduced_raster = all_heights_seen && (field_height_min < 11'd300);
+    wire reduced_raster = (ENABLE_REDUCED_RASTER != 0) &&
+                          all_heights_seen && (field_height_min < 11'd300);
     wire [8:0] map_row_index = (pano_y >= CONTENT_Y0 && pano_y <= CONTENT_Y1) ?
                                (pano_y - CONTENT_Y0) : 9'd0;
     wire [10:0] gate_max_row = scale_row(row_max_y0[map_row_index]);
