@@ -340,6 +340,22 @@ module EoV19DdrCamWriter #(
                     // headroom: discard this complete incoming raster.
                     drop_frame <= 1'b1;
                 end
+            end else if (!drop_frame && have_bank && fifo_prog_full &&
+                         cam_active && (pix_x < `EO_V19_INPUT_W)) begin
+                // A frame can be admitted with comfortable headroom and still
+                // encounter a rare DDR-service stall while its 129,600 payload
+                // beats are in flight.  Do not wait for hard FIFO full: stop
+                // accepting the current frame at the soft watermark, emit no
+                // completion marker at the next SOF, and retry the same owned
+                // bank from row zero after pressure drains.  Partial payloads
+                // may retire to DDR, but without the marker they are never
+                // published to the six-camera frame-set manager.
+                drop_frame <= 1'b1;
+                pix_x <= 11'd0;
+                pack_count <= 4'd0;
+                pack_buf <= 256'd0;
+                row_base_addr <= bank_base_addr(wr_bank);
+                beat_addr <= bank_base_addr(wr_bank);
             end else if (!drop_frame && have_bank && cam_active &&
                          (pix_x < `EO_V19_INPUT_W)) begin
                 pack_buf <= pack_buf_next;

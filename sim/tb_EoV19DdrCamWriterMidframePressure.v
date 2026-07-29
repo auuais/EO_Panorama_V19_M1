@@ -1,11 +1,9 @@
 `timescale 1ns/1ps
 
-module tb_EoV19DdrCamWriterDrop;
-    localparam integer TEST_DEPTH = 16;
-
+module tb_EoV19DdrCamWriterMidframePressure;
     initial begin
         #1000000;
-        $fatal(1, "atomic-drop test timeout");
+        $fatal(1, "mid-frame pressure test timeout");
     end
 
     reg rst_n = 1'b0;
@@ -19,7 +17,7 @@ module tb_EoV19DdrCamWriterDrop;
     reg cam_hsync = 1'b0;
     reg cam_vsync = 1'b0;
     reg trigger_ref = 1'b0;
-    reg [19:0] cam_pixel = 20'h20400;
+    reg [19:0] cam_pixel = 20'h10400;
     reg fifo_rd_en = 1'b0;
     reg free_bank_valid_ui = 1'b0;
     reg [1:0] free_bank_ui = 2'd0;
@@ -31,17 +29,12 @@ module tb_EoV19DdrCamWriterDrop;
     wire desc_valid_ui;
     wire [1:0] desc_bank_ui;
     wire [15:0] desc_epoch_ui;
-    reg desc_seen = 1'b0;
     wire overflow_seen;
 
-    always @(posedge ui_clk) begin
-        if (ui_rst) desc_seen <= 1'b0;
-        else if (desc_valid_ui) desc_seen <= 1'b1;
-    end
-
     EoV19DdrCamWriter #(
-        .CAM_BASE_ADDR(29'h0010000),
-        .FIFO_WRITE_DEPTH(TEST_DEPTH)
+        .CAM_BASE_ADDR(29'h0020000),
+        .FIFO_WRITE_DEPTH(32),
+        .FIFO_PROG_FULL_THRESH(8)
     ) dut (
         .rst_n(rst_n),
         .capture_enable(capture_enable),
@@ -113,7 +106,7 @@ module tb_EoV19DdrCamWriterDrop;
             @(negedge cam_clk);
             cam_hsync = 1'b1;
             for (p = 0; p < 16; p = p + 1) begin
-                cam_pixel = cam_pixel + 20'h00401;
+                cam_pixel = cam_pixel + 20'h00101;
                 cam_cycle();
             end
             @(negedge cam_clk);
@@ -123,7 +116,8 @@ module tb_EoV19DdrCamWriterDrop;
     endtask
 
     integer i;
-    integer drained;
+    integer payloads;
+    integer markers;
     initial begin
         repeat (8) cam_cycle();
         rst_n = 1'b1;
@@ -134,61 +128,41 @@ module tb_EoV19DdrCamWriterDrop;
         push_free_bank(2'd0);
         repeat (8) cam_cycle();
 
-        // Arm bank 0, then exceed the deliberately tiny FIFO's soft pressure
-        // threshold.  The pressured frame must never produce a completion
-        // marker or descriptor, and it should not have to reach hard overflow.
+        // Admit bank 0, then cross prog_full while the frame is still active.
+        // The ninth beat attempt must be suppressed before hard full.  The
+        // next SOF must not publish a marker for this partial bank.
         frame_edge();
-        for (i = 0; i < TEST_DEPTH + 2; i = i + 1)
+        for (i = 0; i < 12; i = i + 1)
             emit_beat();
         frame_edge();
-        repeat (8) @(posedge ui_clk);
-        if (overflow_seen)
-            $fatal(1, "soft pressure abort reached hard overflow");
-        if (desc_seen)
-            $fatal(1, "pressure-aborted partial frame was published");
+        repeat (12) @(posedge ui_clk);
 
-        // Drain every queued partial payload and prove that no marker was
-        // inserted behind the incomplete frame.
-        drained = 0;
+        if (overflow_seen)
+            $fatal(1, "soft pressure abort waited for hard FIFO overflow");
+        if (desc_valid_ui)
+            $fatal(1, "partial pressure-aborted frame published a descriptor");
+
+        payloads = 0;
+        markers = 0;
         while (!fifo_empty) begin
-            if (fifo_is_marker)
-                $fatal(1, "pressure-aborted frame emitted a completion marker");
+            if (fifo_is_marker) begin
+                markers = markers + 1;
+                if (fifo_marker_bank !== 2'd0)
+                    $fatal(1, "unexpected marker bank after pressure abort");
+            end else begin
+                payloads = payloads + 1;
+            end
             @(negedge ui_clk);
             fifo_rd_en = 1'b1;
             @(negedge ui_clk);
             fifo_rd_en = 1'b0;
-            drained = drained + 1;
         end
-        if (drained < (TEST_DEPTH/2))
-            $fatal(1, "too few retained pressure-aborted payload beats: %0d", drained);
 
-        // One skipped frame boundary releases drop mode after the queue is
-        // empty.  The following complete frame must retry bank 0, not switch
-        // to bank 1, and publish only after its marker is consumed.
-        frame_edge();
-        emit_beat();
-        frame_edge();
-        wait (!fifo_empty);
-        if (fifo_is_marker)
-            $fatal(1, "replacement payload missing");
-        @(negedge ui_clk);
-        fifo_rd_en = 1'b1;
-        @(negedge ui_clk);
-        fifo_rd_en = 1'b0;
-        wait (!fifo_empty && fifo_is_marker);
-        if (fifo_marker_bank !== 2'd0)
-            $fatal(1, "retry switched banks after partial-frame discard");
-        if (desc_seen)
-            $fatal(1, "replacement bank published before marker retirement");
-        @(negedge ui_clk);
-        fifo_rd_en = 1'b1;
-        @(negedge ui_clk);
-        fifo_rd_en = 1'b0;
-        repeat (4) @(posedge ui_clk);
-        if (!desc_seen || desc_bank_ui !== 2'd0)
-            $fatal(1, "complete replacement bank was not published");
+        if (payloads != 8 || markers != 0)
+            $fatal(1, "pressure-aborted frame leakage: payloads=%0d markers=%0d",
+                   payloads, markers);
 
-        $display("PASS: pressure abort discards the whole bank and retries atomically");
+        $display("PASS: mid-frame high-water abort suppresses partial-bank publication");
         $finish;
     end
 endmodule
