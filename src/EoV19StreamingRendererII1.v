@@ -85,29 +85,40 @@ module EoV19StreamingRendererII1 #(
     wire [10:0] gate_need_row = gate_max_row + 11'd2;
     wire [10:0] first_need_row = scale_row(row_max_y0[0]) + 11'd2;
     wire [10:0] first_start_row = scale_row(row_min_y0[0]);
-    // A cache of 64 rows leaves 60 rows between the oldest required line and
-    // the write pointer.  The lower bound waits for y1; the overrun bound
-    // turns an unrecoverable lag into a labelled black row instead of torn
-    // pixels.  Importantly, being *below* gate_min_row is a normal startup
-    // condition and must leave the FSM waiting, not blacken the row.
+    // With captured_rows == R the 64-entry ring holds source rows
+    // [R-64, R-1], so the true contract is gate_min_row >= R-64, i.e. an
+    // overrun bound of gate_min_row + 64.  Use +62 to keep two rows of
+    // implementation margin while staying strictly inside the ring.
+    //
+    // The old +60 bound predated the row-window fix in
+    // scripts/v19_generate_render_runs.py.  row_max_y0/row_min_y0 now
+    // describe the source rows the RTL actually reconstructs from the
+    // quantised Q12.4 chord fit rather than the exact map, which widened the
+    // worst-case window to 58 rows; +60 would have left that row with zero
+    // margin and blackened it on any replay/renderer sampling skew.
+    //
+    // The lower bound waits for y1; the overrun bound turns an unrecoverable
+    // lag into a labelled black row instead of torn pixels.  Importantly,
+    // being *below* gate_min_row is a normal startup condition and must leave
+    // the FSM waiting, not blacken the row.
     wire gate_lower_ok = (rows0 >= gate_need_row) &&
                          (rows1 >= gate_need_row) &&
                          (rows2 >= gate_need_row) &&
                          (rows3 >= gate_need_row) &&
                          (rows4 >= gate_need_row) &&
                          (rows5 >= gate_need_row);
-    wire gate_upper_ok = (rows0 >= gate_min_row) && (rows0 <= gate_min_row + 11'd60) &&
-                         (rows1 >= gate_min_row) && (rows1 <= gate_min_row + 11'd60) &&
-                         (rows2 >= gate_min_row) && (rows2 <= gate_min_row + 11'd60) &&
-                         (rows3 >= gate_min_row) && (rows3 <= gate_min_row + 11'd60) &&
-                         (rows4 >= gate_min_row) && (rows4 <= gate_min_row + 11'd60) &&
-                         (rows5 >= gate_min_row) && (rows5 <= gate_min_row + 11'd60);
-    wire gate_overrun = (rows0 > gate_min_row + 11'd60) ||
-                        (rows1 > gate_min_row + 11'd60) ||
-                        (rows2 > gate_min_row + 11'd60) ||
-                        (rows3 > gate_min_row + 11'd60) ||
-                        (rows4 > gate_min_row + 11'd60) ||
-                        (rows5 > gate_min_row + 11'd60);
+    wire gate_upper_ok = (rows0 >= gate_min_row) && (rows0 <= gate_min_row + 11'd62) &&
+                         (rows1 >= gate_min_row) && (rows1 <= gate_min_row + 11'd62) &&
+                         (rows2 >= gate_min_row) && (rows2 <= gate_min_row + 11'd62) &&
+                         (rows3 >= gate_min_row) && (rows3 <= gate_min_row + 11'd62) &&
+                         (rows4 >= gate_min_row) && (rows4 <= gate_min_row + 11'd62) &&
+                         (rows5 >= gate_min_row) && (rows5 <= gate_min_row + 11'd62);
+    wire gate_overrun = (rows0 > gate_min_row + 11'd62) ||
+                        (rows1 > gate_min_row + 11'd62) ||
+                        (rows2 > gate_min_row + 11'd62) ||
+                        (rows3 > gate_min_row + 11'd62) ||
+                        (rows4 > gate_min_row + 11'd62) ||
+                        (rows5 > gate_min_row + 11'd62);
     wire epoch_bad = (epoch0 != pass_epoch0) || (epoch1 != pass_epoch1) ||
                      (epoch2 != pass_epoch2) || (epoch3 != pass_epoch3) ||
                      (epoch4 != pass_epoch4) || (epoch5 != pass_epoch5);

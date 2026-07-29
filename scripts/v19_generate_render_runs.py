@@ -54,9 +54,16 @@ def main() -> int:
     with args.out.open("w", encoding="ascii", newline="\n") as f:
         for sy in range(H):
             row0 = sy * W
-            row_values = [v >> 16 for v in y[row0 : row0 + W]]
-            row_max.append(max(row_values))
-            row_min.append(min(row_values))
+            # The row window must describe the source rows the RTL actually
+            # addresses, not the exact map.  The renderer reconstructs y from
+            # the quantised Q12.4 chord fit below, whose reconstruction error
+            # reaches a few pixels near the end of each 64-pixel segment.
+            # Deriving the window from the exact map left 112/378 rows whose
+            # reconstructed qy exceeded row_max_y0, so gate_need_row (max+2)
+            # never waited for those rows and the line-cache read missed.
+            # Accumulate the reconstructed extremes instead.
+            recon_hi = -1
+            recon_lo = 1 << 30
             for _cam in range(N):
                 for seg in range(SEGS):
                     ox0 = seg * SEG
@@ -78,6 +85,15 @@ def main() -> int:
                     # sy, ox0, len, ax0_q16, ay0_q16, dax_q12_4, day_q12_4.
                     rec = struct.pack("<HHHiiHH", sy, ox0, length, ax0, ay0, dax & 0xffff, day & 0xffff)
                     f.write(f"{int.from_bytes(rec, 'little'):036x}\n")
+                    # Mirror EoV19StreamingRendererII1's qy() on this segment:
+                    #   cy = ay0 + ((lx - ox0) * day_q12_4) << 12 ; qy = cy >> 16
+                    for lx in range(ox0, ox0 + length):
+                        cy = ay0 + (((lx - ox0) * day) << 12)
+                        qy = 0 if cy < 0 else min(1078, cy >> 16)
+                        recon_hi = max(recon_hi, qy)
+                        recon_lo = min(recon_lo, qy)
+            row_max.append(recon_hi)
+            row_min.append(recon_lo)
     with args.row_max_out.open("w", encoding="ascii", newline="\n") as f:
         for v in row_max:
             f.write(f"{max(0, min(1078, v)):04x}\n")
