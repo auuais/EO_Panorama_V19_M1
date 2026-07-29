@@ -43,6 +43,17 @@ module EoV19StreamingRendererII1 #(
     wire [1:0] epoch0,epoch1,epoch2,epoch3,epoch4,epoch5;
     wire hit00,hit01,hit10,hit11,hit20,hit21,hit30,hit31,hit40,hit41,hit50,hit51;
     reg [1:0] state;
+    // Registered gate terms + settle counter; see the state-1 comment.
+    localparam [1:0] GATE_SETTLE = 2'd2;
+    reg gate_lower_ok_q, gate_overrun_q;
+    // start_rows_aligned/epoch_consistent are the other six-camera reduction
+    // terms reaching pano_y.  start_rows_aligned alone is a 6-way min tree
+    // AND a 6-way max tree feeding the state-0 transition, which became the
+    // critical path once the gate terms above were registered.  Neither
+    // depends on pano_y, so no settle counter is needed: state 0 simply
+    // waits one more cycle for a pass to start.
+    reg start_rows_aligned_q, epoch_consistent_q;
+    reg [1:0] gate_settle;
     reg [8:0] pano_y;
     reg [11:0] pano_x;
     reg [8:0] sy;
@@ -312,7 +323,7 @@ module EoV19StreamingRendererII1 #(
     always @(posedge clk) begin
         if(!rst_n) begin
             pano_y<=0; pano_x<=0; sy<=0; state<=2'd0; started_for_copy<=0; small_raster<=0; qy_limit<=11'd1078;
-            row_black<=1'b0; pass_epoch0<=0; pass_epoch1<=0; pass_epoch2<=0; pass_epoch3<=0; pass_epoch4<=0; pass_epoch5<=0;
+            row_black<=1'b0; gate_lower_ok_q<=1'b0; gate_overrun_q<=1'b0; gate_settle<=2'd0; start_rows_aligned_q<=1'b0; epoch_consistent_q<=1'b0; pass_epoch0<=0; pass_epoch1<=0; pass_epoch2<=0; pass_epoch3<=0; pass_epoch4<=0; pass_epoch5<=0;
             miss_count<=0;
             hit_a6<=1'b0; hit_b6<=1'b0;
             px_valid<=0; px_data<=`EO_V19_BLACK_PIXEL; frame_done<=0; run_addr_a<=0; run_addr_b<=0;
@@ -329,7 +340,7 @@ module EoV19StreamingRendererII1 #(
             // tags (typically 1079) while the replay was already feeding row
             // zero of the next trigger epoch.
             pano_y<=0; pano_x<=0; sy<=0; state<=2'd0; started_for_copy<=0; small_raster<=0; qy_limit<=11'd1078;
-            row_black<=1'b0; pass_epoch0<=0; pass_epoch1<=0; pass_epoch2<=0; pass_epoch3<=0; pass_epoch4<=0; pass_epoch5<=0;
+            row_black<=1'b0; gate_lower_ok_q<=1'b0; gate_overrun_q<=1'b0; gate_settle<=2'd0; start_rows_aligned_q<=1'b0; epoch_consistent_q<=1'b0; pass_epoch0<=0; pass_epoch1<=0; pass_epoch2<=0; pass_epoch3<=0; pass_epoch4<=0; pass_epoch5<=0;
             miss_count<=0;
             hit_a6<=1'b0; hit_b6<=1'b0;
             px_valid<=0; px_data<=`EO_V19_BLACK_PIXEL; frame_done<=0; run_addr_a<=0; run_addr_b<=0;
@@ -339,6 +350,13 @@ module EoV19StreamingRendererII1 #(
             for(i=0;i<11;i=i+1) begin ca[i]<=0;cb[i]<=0;apos[i]<=0;lxa[i]<=0;lxb[i]<=0;fra[i]<=0;frb[i]<=0;ay[i]<=0;ac[i]<=0;ax0a[i]<=0;ay0a[i]<=0;ax0b[i]<=0;ay0b[i]<=0;daxa[i]<=0;daya[i]<=0;daxb[i]<=0;dayb[i]<=0;offa[i]<=0;offb[i]<=0;cxa[i]<=0;cya[i]<=0;cxb[i]<=0;cyb[i]<=0;sxa[i]<=0;sya[i]<=0;sxb[i]<=0;syb[i]<=0;ra0[i]<=0;ra1[i]<=0;rc0[i]<=8'd128;rc1[i]<=8'd128;rb0[i]<=0;rb1[i]<=0;rbc0[i]<=8'd128;rbc1[i]<=8'd128;ia_y[i]<=0;ia_c[i]<=8'd128;ib_y[i]<=0;ib_c[i]<=8'd128;xpar[i]<=1'b0; end
         end else begin
             px_valid<=px_valid; frame_done<=0;
+            // Register the gate terms every cycle; state 1 consumes the
+            // registered copies once gate_settle has covered the pano_y ->
+            // row-window ROM -> comparator latency.
+            gate_lower_ok_q <= gate_lower_ok;
+            gate_overrun_q  <= gate_overrun;
+            start_rows_aligned_q <= start_rows_aligned;
+            epoch_consistent_q   <= epoch_consistent;
             if(dbg_rows_min > rows_peak) rows_peak<=dbg_rows_min;
             if(state==2'd2) seen_out<=1;
             if(frame_done) seen_done<=1;
@@ -404,7 +422,7 @@ module EoV19StreamingRendererII1 #(
                     // counters to be high on that exact edge; they reset at
                     // the camera frame boundary and the row-wait state below
                     // will naturally pace the renderer from the new frame.
-                    if(start_copy && !started_for_copy && epoch_consistent && start_rows_aligned) begin
+                    if(start_copy && !started_for_copy && epoch_consistent_q && start_rows_aligned_q) begin
                         started_for_copy<=1; pano_y<=0; pano_x<=0;
                         // Use the completed field height, not the live row
                         // counter at the trigger edge.  The latter is near
@@ -422,11 +440,35 @@ module EoV19StreamingRendererII1 #(
                         pass_epoch0<=epoch0; pass_epoch1<=epoch1; pass_epoch2<=epoch2;
                         pass_epoch3<=epoch3; pass_epoch4<=epoch4; pass_epoch5<=epoch5;
                         row_black<=1'b0;
+                        gate_settle<=2'd0;
                         state<=2'd1;
                     end
                 end else if(state==2'd1) begin
+                    // Row gating runs off registered copies of the gate terms.
+                    // Combinationally, rows_sync from all six line caches fed
+                    // twelve 11-bit comparators against gate_need_row /
+                    // gate_min_row (themselves a row-window ROM read plus an
+                    // adder) and then the state/BRAM-enable logic, all in one
+                    // ui_clk.  That was the design's critical path at
+                    // -0.165 ns once hd_clk took over the scan-out domain.
+                    //
+                    // gate_settle covers the staleness this introduces:
+                    // gate_*_q are one cycle old, and gate_need_row/
+                    // gate_min_row come from a ROM addressed by pano_y, so for
+                    // a few cycles after pano_y advances the registered terms
+                    // still describe the previous row.  Honouring them then
+                    // could release a row before its source lines are
+                    // captured, which is exactly the line-cache miss that
+                    // produced the corruption fixed on 2026-07-29.  Wait for
+                    // the pipeline to refill first.
+                    //
+                    // Cost is GATE_SETTLE cycles per content row (~1.1k per
+                    // frame against ~1.84M pixel tokens); the padding rows
+                    // outside the content band still resolve immediately.
                     if((pano_y<CONTENT_Y0)||(pano_y>CONTENT_Y1)) begin row_black<=1'b0; state<=2'd2; end
-                    else if(gate_overrun) begin
+                    else if(gate_settle != GATE_SETTLE) begin
+                        gate_settle <= gate_settle + 2'd1;
+                    end else if(gate_overrun_q) begin
                         // A cache overrun cannot be recovered without
                         // random-access source storage.  Emit a bounded black
                         // row and keep the stream framed.  A transient
@@ -435,13 +477,13 @@ module EoV19StreamingRendererII1 #(
                         // checks below protect each sampled source line and
                         // let the renderer wait for the newly committed field.
                         row_black<=1'b1; state<=2'd2;
-                    end else if(gate_lower_ok) begin
+                    end else if(gate_lower_ok_q) begin
                         row_black<=1'b0; sy<=pano_y-CONTENT_Y0; state<=2'd2;
                     end
                 end else if(state==2'd2) begin
                     v[0]<=1; black[0]<=((pano_y<CONTENT_Y0)||(pano_y>CONTENT_Y1)||row_black); xpar[0]<=pano_x[0]; blend[0]<=map_blend; ca[0]<=map_cam_a[2:0]; cb[0]<=map_cam_b[2:0]; apos[0]<=map_alpha_pos; lxa[0]<=map_lx_a; lxb[0]<=map_lx_b; last[0]<=((pano_y==`EO_V19_PANO_H-1)&&(pano_x==`EO_V19_PANO_W-1));
                     run_addr_a<=((sy*6+map_cam_a)*SEGS_PER_ROW)+map_seg_a; run_addr_b<=((sy*6+map_cam_b)*SEGS_PER_ROW)+map_seg_b;
-                    if(pano_x==`EO_V19_PANO_W-1) begin pano_x<=0; if(pano_y==`EO_V19_PANO_H-1) state<=2'd3; else begin pano_y<=pano_y+1; state<=2'd1; end end else pano_x<=pano_x+1;
+                    if(pano_x==`EO_V19_PANO_W-1) begin pano_x<=0; if(pano_y==`EO_V19_PANO_H-1) state<=2'd3; else begin pano_y<=pano_y+1; gate_settle<=2'd0; state<=2'd1; end end else pano_x<=pano_x+1;
                 end
             end
         end

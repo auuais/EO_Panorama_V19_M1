@@ -1,3 +1,22 @@
+# ---------------------------------------------------------------------------
+# Board 27 MHz video oscillator (Y5, SiTime SIT9121AI, LVDS, +/-25 ppm) on
+# bank 93 HDGC pins.  Source for the 74.25 MHz HD pixel clock so the display
+# path no longer depends on camera 0's recovered pclk.
+#
+# LVDS_25 is an input-only standard on HD I/O banks and carries no VCCO
+# requirement, so it is legal here even though VCCO_93 is 3.3 V for the
+# camera-2 LVCMOS33 pins.  Verified by placing this exact combination.
+# Termination is external (R1646, 100R 1%) because HDIO has no DIFF_TERM.
+#
+# Declared at the top of the first XDC in the fileset on purpose: the clock
+# groups further down resolve generated clocks with "get_clocks -quiet", and a
+# source clock that does not exist yet makes -quiet silently discard the whole
+# set_clock_groups.
+set_property PACKAGE_PIN N15 [get_ports osc27_p]
+set_property PACKAGE_PIN N14 [get_ports osc27_n]
+set_property IOSTANDARD LVDS_25 [get_ports {osc27_p osc27_n}]
+create_clock -period 37.037037 -name osc27 [get_ports osc27_p]
+
 #IRCAM0_PCLK as use fpga_clock
 
 #IRCAM0_PCLK
@@ -777,6 +796,44 @@ set_clock_groups -physically_exclusive -group [get_clocks CAM0_PCLK] -group [get
 # CAM0_PCLK HD output domain only through dual-port memories. Those crossings
 # are asynchronous by design and should not be timed as synchronous paths.
 set_clock_groups -asynchronous -group [get_clocks CAM0_PCLK] -group [get_clocks {CAM1_PCLK CAM2_PCLK CAM3_PCLK CAM4_PCLK CAM5_PCLK IRCAM0_PCLK}]
+
+# ---------------------------------------------------------------------------
+# 27 MHz -> 74.25 MHz HD pixel clock (u_hdclk_mmcm).
+#
+# N15/N14 are in clock region X3Y9, which contains no MMCM and no PLL, and an
+# HDGC pin cannot drive a CMT directly.  Allow the buffered reference to reach
+# a CMT column over the clock backbone; without these the placer errors with
+# [Place 30-675] / [Place 30-716].  Verified to place and route cleanly.
+set_property CLOCK_DEDICATED_ROUTE ANY_CMT_COLUMN [get_nets -quiet osc27_ibuf]
+set_property CLOCK_DEDICATED_ROUTE ANY_CMT_COLUMN [get_nets -quiet osc27_bufg]
+
+# hd_clk is asynchronous to the MIG ui clock and to every camera clock; all
+# crossings go through the DDR FIFOs or 2-FF synchronizers.  Resolved through
+# the MMCM pin rather than an auto-generated clock name so this survives
+# renaming, and it reports whether it applied instead of failing silently.
+# Anchor on osc27, created ~20 lines above, so the lookup cannot come back
+# empty.  -include_generated_clocks then sweeps up hd_clk_mmcm and everything
+# derived from it without depending on Vivado's auto-generated clock names or
+# on a get_pins path that only resolves post-synthesis.  An earlier attempt
+# resolved the group through [get_pins u_hdclk_mmcm/CLKOUT0]; that returned
+# empty and -quiet discarded the whole constraint silently.
+#
+# Vivado times paths between unrelated clocks by default, so this grouping is
+# required, not decorative: in stage B hd_clk drives the entire DDR scan-out
+# domain and every ui_clk crossing would otherwise be analysed as synchronous.
+# XDC is a restricted Tcl subset: 'if' is rejected with
+#   [Designutils 20-1307] Command 'if' is not supported in the xdc constraint file
+# and everything inside it is silently skipped.  An earlier version of this
+# block wrapped the grouping in an if/else "safety" guard, which meant the
+# constraint never applied at all -- WNS -3.423 / TNS -50.135 once hd_clk
+# actually drove the scan-out domain.  Keep this as a single plain command.
+#
+# No -quiet on the osc27 lookup: osc27 is created near the top of this file, so
+# an empty result here is a real breakage and should be loud.
+set_clock_groups -asynchronous \
+    -group [get_clocks -include_generated_clocks osc27] \
+    -group [get_clocks -quiet mmcm_clkout0] \
+    -group [get_clocks -quiet {CAM0_PCLK CAM1_PCLK CAM2_PCLK CAM3_PCLK CAM4_PCLK CAM5_PCLK IRCAM0_PCLK IRCAM1_PCLK IRCAM2_PCLK IRCAM3_PCLK IRCAM4_PCLK IRCAM5_PCLK}]
 
 # The processed DDR path uses the MIG ui clock domain internally and crosses
 # to camera/HD clocks only through explicit FIFOs or 2-FF synchronizers.

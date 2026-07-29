@@ -85,6 +85,11 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     input  wire         SCL,
     inout  wire         SDA,
 
+    // Board 27.000000 MHz video reference (Y5, SiTime SIT9121AI, LVDS,
+    // +/-25 ppm) on bank 93 HDGC pins N15/N14.
+    input  wire         osc27_p,
+    input  wire         osc27_n,
+
     input  wire         c0_sys_clk_p,
     input  wire         c0_sys_clk_n,
     output wire [16:0]  c0_ddr4_adr,
@@ -109,6 +114,79 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     wire CAM0_PCLK_bufg;
     IBUF u_cam0_pclk_ibuf (.I(CAM0_PCLK), .O(CAM0_PCLK_ibuf));
     BUFG u_cam0_pclk_bufg (.I(CAM0_PCLK_ibuf), .O(CAM0_PCLK_bufg));
+
+    //------------------------------------------------------------------------
+    // Local HD pixel clock from the board's 27 MHz video oscillator.
+    //
+    // HD_PCLK, the DDR scan-out domain (rd_clk) and the power-on-reset clock
+    // were all CAM0_PCLK, so losing camera 0 took the whole display path down
+    // with it.  Y5 (SiTime SIT9121AI, 27.000000 MHz, LVDS, +/-25 ppm) on bank
+    // 93 HDGC pins N15/N14 is a dedicated video reference and gives the exact
+    // SMPTE pixel clock:
+    //
+    //   27.000000 MHz * 44 / 1 / 16 = 74.250000 MHz   (VCO 1188 MHz)
+    //
+    // Clock topology is forced by the device floorplan.  N15/N14 sit in clock
+    // region X3Y9, which contains no MMCM or PLL, and an HDGC pin cannot drive
+    // a CMT directly.  The chain must therefore be
+    //
+    //   IBUFDS -> BUFG -> MMCM -> BUFGCE -> hd_clk
+    //
+    // with CLOCK_DEDICATED_ROUTE=ANY_CMT_COLUMN in the XDC so the buffered
+    // reference can reach a CMT column over the clock backbone.  This was
+    // verified to place and route cleanly on this part before being adopted.
+    //
+    // HD_CLK_FROM_OSC27 stages the rework:
+    //   0 = stage A. MMCM present, constrained and placed, video still on
+    //       CAM0_PCLK.  A dead 27 MHz input cannot take the working output
+    //       down; check the MMCM lock status instead.
+    //   1 = stage B. HD_PCLK / rd_clk / clk_for_por move to hd_clk.
+    localparam integer HD_CLK_FROM_OSC27 = 1;
+
+    wire osc27_ibuf, osc27_bufg;
+    IBUFDS u_osc27_ibufds (.I(osc27_p), .IB(osc27_n), .O(osc27_ibuf));
+    BUFG   u_osc27_bufg   (.I(osc27_ibuf), .O(osc27_bufg));
+
+    wire hd_clk_mmcm, hd_clk_fb, hd_clk_fb_buf, hd_clk_locked;
+    (* DONT_TOUCH = "true" *)
+    MMCME4_BASE #(
+        .BANDWIDTH          ("OPTIMIZED"),
+        .CLKFBOUT_MULT_F    (44.000),
+        .CLKFBOUT_PHASE     (0.000),
+        .CLKIN1_PERIOD      (37.037),
+        .CLKOUT0_DIVIDE_F   (16.000),
+        .CLKOUT0_DUTY_CYCLE (0.500),
+        .CLKOUT0_PHASE      (0.000),
+        .DIVCLK_DIVIDE      (1),
+        .REF_JITTER1        (0.010),
+        .STARTUP_WAIT       ("FALSE")
+    ) u_hdclk_mmcm (
+        .CLKIN1    (osc27_bufg),
+        .CLKFBIN   (hd_clk_fb_buf),
+        .RST       (1'b0),
+        .PWRDWN    (1'b0),
+        .CLKFBOUT  (hd_clk_fb),
+        .CLKFBOUTB (),
+        .CLKOUT0   (hd_clk_mmcm),
+        .CLKOUT0B  (), .CLKOUT1 (), .CLKOUT1B (), .CLKOUT2 (), .CLKOUT2B (),
+        .CLKOUT3   (), .CLKOUT3B (), .CLKOUT4 (), .CLKOUT5 (), .CLKOUT6 (),
+        .LOCKED    (hd_clk_locked)
+    );
+    BUFG u_hdclk_fb_buf (.I(hd_clk_fb), .O(hd_clk_fb_buf));
+
+    // Gate until locked so HD_PCLK never presents the ragged pre-lock output
+    // to the downstream serialiser.  Synchronise the enable onto the clock it
+    // gates; BUFGCE switches only on a low phase, so the release is glitchless.
+    (* ASYNC_REG = "TRUE" *) reg hd_locked_meta = 1'b0, hd_locked_sync = 1'b0;
+    always @(posedge hd_clk_mmcm) begin
+        hd_locked_meta <= hd_clk_locked;
+        hd_locked_sync <= hd_locked_meta;
+    end
+    wire hd_clk;
+    BUFGCE u_hdclk_buf (.I(hd_clk_mmcm), .CE(hd_locked_sync), .O(hd_clk));
+
+    // Stage-selected clock for the processed (panorama) video path.
+    wire hd_path_clk = (HD_CLK_FROM_OSC27 != 0) ? hd_clk : CAM0_PCLK_bufg;
 
     // Camera-1-STROBE-derived common-trigger diagnostic.
     //
@@ -343,8 +421,8 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     wire [19:0] proc_hd_dout;
     PanoramaBase_DdrBlackFrame u_ddr_black_frame (
         .rst_n                (nRESET),
-        .clk_for_por          (CAM0_PCLK_bufg),
-        .rd_clk               (CAM0_PCLK_bufg),
+        .clk_for_por          (hd_path_clk),
+        .rd_clk               (hd_path_clk),
         .ir_single_mode       (ir_single_mode_active),
         .ir_sel               (ir_sel),
         .ir0_wr_clk           (IRCAM0_PCLK),
@@ -419,7 +497,7 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
         .hd_dout              (proc_hd_dout)
     );
 
-    assign HD_PCLK  = eo_single_mode_active ? EO_SEL_PCLK_BUFG : processed_mode_active ? CAM0_PCLK_bufg : 1'b0;
+    assign HD_PCLK  = eo_single_mode_active ? EO_SEL_PCLK_BUFG : processed_mode_active ? hd_path_clk : 1'b0;
     assign HD_DE    = eo_single_mode_active ? EO_SEL_HSYNC     : processed_mode_active ? proc_hd_de    : 1'b0;
     assign HD_HSYNC = eo_single_mode_active ? EO_SEL_HSYNC     : processed_mode_active ? proc_hd_hsync : 1'b0;
     assign HD_VSYNC = eo_single_mode_active ? EO_SEL_VSYNC     : processed_mode_active ? proc_hd_vsync : 1'b0;
