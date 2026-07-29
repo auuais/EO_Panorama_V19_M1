@@ -1,5 +1,9 @@
 set project_root [file normalize [file join [file dirname [info script]] ..]]
+source [file join $project_root scripts v19_fileset.tcl]
 open_project [file join $project_root EO_Panorama_V19_M1.xpr]
+# Never trust the .xpr's current fileset: batch runs have dropped source
+# entries on close_project, which fails the next elaboration.
+v19_refresh_fileset $project_root
 set_param general.maxThreads 8
 set synth_run [get_runs synth_1]
 # V19 bring-up must be a real source rebuild.  Vivado's auto-incremental
