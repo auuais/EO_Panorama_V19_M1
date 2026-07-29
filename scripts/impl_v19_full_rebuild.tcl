@@ -59,11 +59,22 @@ if {![string match "*Complete*" $synth_status]} {
 }
 
 set top [get_property TOP [get_filesets sources_1]]
+set part [get_property PART [current_project]]
 set synth_dir [get_property DIRECTORY $synth_run]
 set synth_dcp [file join $synth_dir "${top}.dcp"]
 if {![file exists $synth_dcp]} {
     error "Synthesized checkpoint not found: $synth_dcp"
 }
+
+set ip_files [list \
+    [file join $project_root ip dbg_ila_1 dbg_ila_1.xci] \
+    [file join $project_root ip dbg_ila_0 dbg_ila_0.xci] \
+    [file join $project_root ip ddr4_sub64 ddr4_sub64.xci] \
+]
+set xdc_files [list \
+    [file join $project_root constraints camera_base.xdc] \
+    [file join $project_root constraints ddr4_sub64_firstpass.xdc] \
+]
 
 set impl_dir [file join $project_root EO_Panorama_V19_M1.runs impl_1]
 file mkdir $impl_dir
@@ -87,7 +98,27 @@ set timing_rpt    [file join $impl_dir "${top}_timing_summary_routed.rpt"]
 set bus_skew_rpt  [file join $impl_dir "${top}_bus_skew_routed.rpt"]
 set route_rpt     [file join $impl_dir "${top}_route_status_routed.rpt"]
 
-open_checkpoint $synth_dcp
+# Recreate the project-generated implementation link stage explicitly.  A raw
+# open_checkpoint sees the synthesized top DCP but leaves the ILA/MIG IP as
+# black boxes; the generated Vivado run resolves those cells by reading the
+# IP .xci files before link_design.
+close_project
+create_project -in_memory -part $part
+set_property design_mode GateLvl [current_fileset]
+set_param project.singleFileAddWarning.threshold 0
+set_property webtalk.parent_dir [file join $project_root EO_Panorama_V19_M1.cache wt] [current_project]
+set_property parent.project_path [file join $project_root EO_Panorama_V19_M1.xpr] [current_project]
+set_property ip_output_repo [file join $project_root EO_Panorama_V19_M1.cache ip] [current_project]
+set_property ip_cache_permissions {read write} [current_project]
+set_property XPM_LIBRARIES {XPM_CDC XPM_FIFO XPM_MEMORY} [current_project]
+add_files -quiet $synth_dcp
+foreach ip_file $ip_files {
+    read_ip -quiet $ip_file
+}
+foreach xdc_file $xdc_files {
+    read_xdc $xdc_file
+}
+link_design -top $top -part $part
 
 opt_design
 write_checkpoint -force $opt_dcp
