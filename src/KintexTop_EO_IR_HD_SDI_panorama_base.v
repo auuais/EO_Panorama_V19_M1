@@ -110,6 +110,21 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
 
     wire nRESET = 1'b1;
 
+    // CAM0_PCLK now clocks only camera 0's own receiver (u_eo0), where a dead
+    // camera 0 simply means no camera 0 video.  Everything else that used to
+    // run on it -- the I2C mode register, the IR genlock generator, the
+    // trigger pulse generator, the vsync-follower diagnostic and the HD-mux
+    // ILA -- moved to hd_clk.  Those are control-plane blocks, and powering
+    // camera 0 down used to stop their clock outright: the I2C block stopped
+    // driving mode_current, which selects the entire output path, so the
+    // design appeared to crash.  Both relocated counters assume exactly
+    // 74.25 MHz (Kintex_top_I2C_test SCLK_HZ, and CLK_HZ in the genlock
+    // divider), which is what hd_clk delivers.
+    //
+    // Signals still named *_cam0 keep their names for diff clarity; they are
+    // sampled on hd_clk now, and every one of them was already behind a 3-FF
+    // synchroniser, so re-clocking them is CDC-safe.  hd_clk is declared
+    // asynchronous to all camera clocks in camera_base.xdc.
     wire CAM0_PCLK_ibuf;
     wire CAM0_PCLK_bufg;
     IBUF u_cam0_pclk_ibuf (.I(CAM0_PCLK), .O(CAM0_PCLK_ibuf));
@@ -210,7 +225,7 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     wire       eo_trigger_to_cam3 = eo_fpga_trigger_common;
     wire       eo_trigger_to_cam4 = eo_fpga_trigger_common;
     wire       eo_trigger_to_cam5 = eo_fpga_trigger_common;
-    always @(posedge CAM0_PCLK_bufg) begin
+    always @(posedge hd_clk) begin
         eo_strobe0_cam0 <= {eo_strobe0_cam0[1:0], STROBE_OUT0};
 
         if (eo_fpga_trigger_start) begin
@@ -229,7 +244,7 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
         .POR_MS(100)
     ) u_i2c (
         .FPGA_RESET(1'b1),
-        .SCLK_IN   (CAM0_PCLK_ibuf),
+        .SCLK_IN   (hd_clk),
         .SCL       (SCL),
         .SDA       (SDA),
         .cam_select(cam_select_unused),
@@ -357,7 +372,7 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     wire [11:0] eo_follow_probe9 = {eo_follow_span_cycles[21:20],
                                     eo_follow_seen, eo_follow_vsync_levels};
 
-    always @(posedge CAM0_PCLK_bufg) begin
+    always @(posedge hd_clk) begin
         eo1_vsync_cam0 <= {eo1_vsync_cam0[1:0], eo1_vsync};
         eo2_vsync_cam0 <= {eo2_vsync_cam0[1:0], eo2_vsync};
         eo3_vsync_cam0 <= {eo3_vsync_cam0[1:0], eo3_vsync};
@@ -507,7 +522,7 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     // top-level output selection is actually driving active BT.1120/YCbCr data
     // after the renderer, independent of the downstream SDI/grabber lock.
     dbg_ila_1 u_top_hd_mux_ila (
-        .clk     (CAM0_PCLK_bufg),
+        .clk     (hd_clk),
         .probe0  (eo_fpga_trigger_common),
         .probe1  (eo1_frame_start_cam0),
         .probe2  (eo2_frame_start_cam0),
@@ -538,7 +553,7 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     localparam integer CW = 22;
     reg [CW-1:0] cnt;
 
-    always @(posedge CAM0_PCLK_bufg or negedge nRESET) begin
+    always @(posedge hd_clk or negedge nRESET) begin
         if (!nRESET) begin
             cnt      <= {CW{1'b0}};
             sig_60hz <= 1'b0;
