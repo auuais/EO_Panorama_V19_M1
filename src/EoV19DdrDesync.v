@@ -19,7 +19,9 @@ module EoV19DdrCamWriter #(
 ) (
     input  wire        rst_n,
     input  wire        capture_enable,
-    input  wire        trigger_ref,
+    // Gray-coded global content-frame epoch, counted in ui_clk.  See the
+    // epoch block below for why this is not counted per camera any more.
+    input  wire [EPOCH_W-1:0] global_epoch_gray_ui,
     input  wire        cam_clk,
     input  wire        cam_hsync,
     input  wire        cam_vsync,
@@ -84,17 +86,48 @@ module EoV19DdrCamWriter #(
     // epoch at frame start, so arbitrary ISP/raster phase does not change the
     // content-frame identity.  Frames arriving without a trigger token are
     // deliberately discarded.
-    (* ASYNC_REG = "TRUE" *) reg trigger_meta;
-    (* ASYNC_REG = "TRUE" *) reg trigger_sync;
-    reg trigger_sync_d;
-    wire trigger_edge = trigger_sync && !trigger_sync_d;
-    reg [EPOCH_W-1:0] trigger_epoch_tail;
-    reg [EPOCH_W-1:0] trigger_epoch_head;
+    //
+    // The epoch VALUE, however, must not be counted here.  It used to be:
+    // trigger_epoch_tail/head were ordinary cam_clk registers counting local
+    // trigger edges.  A powered-down camera has no pixel clock, so its
+    // counters simply stopped while the other five kept counting.  On return
+    // the camera was permanently N triggers behind, its completion
+    // descriptors never again shared an epoch with the rest of the set, and
+    // EoV19FrameSetManager could never satisfy epoch_presentN() for it -- so
+    // no lease was ever granted and the whole panorama froze the moment a
+    // camera was plugged back in.  (Unplugging one was already handled
+    // cleanly by cam_present; it is only the rejoin that deadlocked.)
+    //
+    // Count once in the camera-independent ui_clk domain and broadcast the
+    // value here Gray-coded.  A returning camera then adopts the current
+    // global epoch on its very first frame and rejoins immediately.  Only the
+    // small trigger/frame occupancy counter stays local, which is what the
+    // queue actually needs.
+    (* ASYNC_REG = "TRUE" *) reg [EPOCH_W-1:0] gepoch_meta;
+    (* ASYNC_REG = "TRUE" *) reg [EPOCH_W-1:0] gepoch_sync;
+    reg [EPOCH_W-1:0] global_epoch_q;
     reg [3:0] trigger_pending;
+
+    // Exactly one Gray bit changes per increment, so the synchronised word is
+    // always either the previous or the new count -- never a bogus mix.
+    reg [EPOCH_W-1:0] global_epoch;
+    integer gi;
+    always @* begin
+        global_epoch[EPOCH_W-1] = gepoch_sync[EPOCH_W-1];
+        for (gi = EPOCH_W-2; gi >= 0; gi = gi - 1)
+            global_epoch[gi] = global_epoch[gi+1] ^ gepoch_sync[gi];
+    end
+
+    // One event source for both the edge and the value, so there is no race
+    // between a locally detected trigger and the broadcast count catching up.
+    wire trigger_edge = (global_epoch != global_epoch_q);
     wire frame_epoch_available = (trigger_pending != 0) || trigger_edge;
+    // pending==0: the just-arrived trigger's epoch is the current count.
+    // pending==P: the oldest unconsumed epoch is P-1 behind the count.
     wire [EPOCH_W-1:0] frame_epoch_next =
-        (trigger_pending != 0) ? trigger_epoch_head :
-                                 (trigger_epoch_tail + {{(EPOCH_W-1){1'b0}},1'b1});
+        (trigger_pending != 0)
+            ? (global_epoch - trigger_pending + {{(EPOCH_W-1){1'b0}},1'b1})
+            : global_epoch;
 
     function [28:0] bank_base_addr;
         input [1:0] bank;
@@ -181,44 +214,30 @@ module EoV19DdrCamWriter #(
 
     always @(posedge cam_clk) begin
         if (!rst_n || !capture_enable_cam) begin
-            trigger_meta <= 1'b0;
-            trigger_sync <= 1'b0;
-            trigger_sync_d <= 1'b0;
-            trigger_epoch_tail <= {EPOCH_W{1'b0}};
-            trigger_epoch_head <= {{(EPOCH_W-1){1'b0}},1'b1};
+            gepoch_meta <= {EPOCH_W{1'b0}};
+            gepoch_sync <= {EPOCH_W{1'b0}};
+            global_epoch_q <= {EPOCH_W{1'b0}};
             trigger_pending <= 4'd0;
         end else begin
-            trigger_meta <= trigger_ref;
-            trigger_sync <= trigger_meta;
-            trigger_sync_d <= trigger_sync;
+            gepoch_meta <= global_epoch_gray_ui;
+            gepoch_sync <= gepoch_meta;
+            global_epoch_q <= global_epoch;
 
+            // Only occupancy is tracked locally now; the epoch values are
+            // derived from the broadcast count above.  A camera returning
+            // from an outage sees one edge for the whole missed run, which
+            // is correct: it owes no frames for the time it was dark.
             case ({trigger_edge, (frame_start && frame_epoch_available)})
                 2'b10: begin
-                    trigger_epoch_tail <= trigger_epoch_tail +
-                        {{(EPOCH_W-1){1'b0}},1'b1};
-                    if (trigger_pending == 0)
-                        trigger_epoch_head <= trigger_epoch_tail +
-                            {{(EPOCH_W-1){1'b0}},1'b1};
                     if (trigger_pending != 4'hf)
                         trigger_pending <= trigger_pending + 4'd1;
                 end
                 2'b01: begin
-                    trigger_epoch_head <= trigger_epoch_head +
-                        {{(EPOCH_W-1){1'b0}},1'b1};
                     trigger_pending <= trigger_pending - 4'd1;
                 end
-                2'b11: begin
-                    trigger_epoch_tail <= trigger_epoch_tail +
-                        {{(EPOCH_W-1){1'b0}},1'b1};
-                    if (trigger_pending != 0) begin
-                        // One old epoch is consumed while one new epoch is
-                        // appended, so occupancy is unchanged.
-                        trigger_epoch_head <= trigger_epoch_head +
-                            {{(EPOCH_W-1){1'b0}},1'b1};
-                    end
-                    // With an empty queue the just-arrived epoch is consumed
-                    // by this same frame edge; occupancy remains zero.
-                end
+                // 2'b11 appends one epoch and consumes one in the same cycle,
+                // so occupancy is unchanged whether or not the queue was
+                // empty.
                 default: begin end
             endcase
         end

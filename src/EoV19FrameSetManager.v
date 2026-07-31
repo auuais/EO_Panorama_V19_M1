@@ -474,13 +474,23 @@ module EoV19FrameSetManager #(
                 end
 
                 ST_FIND_RESET: begin
-                    // A camera that has just come back needs its tokens before
-                    // it can capture again; seed it before the next search.
-                    if (|need_seed) state <= ST_INIT;
                     best_found <= 1'b0;
                     best_epoch <= {EPOCH_W{1'b0}};
                     bank_index <= 2'd0;
-                    state <= ST_FIND_LOAD;
+                    // A camera that has just come back needs its tokens
+                    // before it can capture again, so re-enter seeding first.
+                    //
+                    // This used to be written as an early
+                    //     if (|need_seed) state <= ST_INIT;
+                    // placed ABOVE an unconditional `state <= ST_FIND_LOAD`.
+                    // Both are non-blocking assignments to the same register,
+                    // so the later one always won and the re-seed branch was
+                    // dead code: a camera that was absent at power-on never
+                    // received bank tokens when it was plugged in, could
+                    // never publish a descriptor, and blocked every frame set
+                    // once its presence bit returned.
+                    if (|need_seed) state <= ST_INIT;
+                    else            state <= ST_FIND_LOAD;
                 end
 
                 ST_FIND_LOAD: begin

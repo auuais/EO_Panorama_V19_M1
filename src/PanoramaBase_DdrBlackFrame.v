@@ -181,7 +181,25 @@ module PanoramaBase_DdrBlackFrame(
     localparam [28:0]  BANK1_BASE    = BEATS_TOTAL * ADDR_STRIDE; // 921,600 (EO) / 163,840 (ramp) / 153,600 (EO0) / 1,036,800 (EO0RAW)
     localparam [28:0]  V19_SRC_BASE_ADDR    = 29'd2100000;
     localparam [28:0]  V19_SRC_FRAME_STRIDE = 29'd1036800;  // 1920*1080*2 bytes, low-256 payload: 129600 beats * 8
-    localparam [28:0]  V19_SRC_CAM_STRIDE   = 29'd4147200;  // four leased frame banks per camera
+    // Four leased frame banks per camera (4 * 1,036,800 = 4,147,200), plus a
+    // deliberate 8-address stagger so the six cameras do not share a DRAM bank.
+    //
+    // The MIG is configured ROW_COLUMN_BANK, so the bank/bank-group bits are
+    // the LOW app_addr bits just above the three BL8 burst bits, i.e.
+    // app_addr[6:3].  Two addresses share a bank when they agree on those
+    // bits.  With a stride of exactly 4,147,200 -- which is 0 mod 128, as are
+    // V19_SRC_FRAME_STRIDE and the base -- all six cameras' corresponding
+    // beats landed in the SAME bank, different rows.  Both traffic sources
+    // round-robin across cameras per command, so six consecutive commands were
+    // six row misses in one bank, each paying full tRC.  Measured cost:
+    // app_rdy 21-37%, replay grant rate 7-12%.
+    //
+    // Adding 8 per camera index walks the bank field by one per camera
+    // (banks 4..9 here), so a round-robin sweep now hits six different banks
+    // and their row activations overlap instead of serialising.  The 8 spare
+    // addresses per camera sit past that camera's four banks, so no region
+    // overlaps its neighbour.
+    localparam [28:0]  V19_SRC_CAM_STRIDE   = 29'd4147208;
     localparam [28:0]  V19_SRC_ROW_STRIDE   = 29'd960;      // 120 beats/row * 8
     // 2026-07-07: tried temporarily dropping this to 4 (see
     // docs/DDR_EO_PANORAMA_FIX_PLAN.md section 17) to test whether the
@@ -381,6 +399,30 @@ module PanoramaBase_DdrBlackFrame(
                 eo_strobe_period_ui  <= eo_strobe_period_ctr;
                 eo_strobe_period_ctr <= 24'd0;
             end
+        end
+    end
+
+    // Global content-frame epoch.
+    //
+    // Counted once here, in the camera-independent ui_clk domain, and
+    // broadcast Gray-coded to all six camera writers.  EoV19DdrCamWriter used
+    // to count trigger edges in each camera's own pixel-clock domain, so a
+    // camera that lost power fell permanently behind the others and could
+    // never again share an epoch with them -- the panorama froze on rejoin.
+    // Gray coding lets each writer cross this into its own clock with a plain
+    // two-flop synchroniser: the count changes at the ~60 Hz trigger rate, so
+    // only one bit is ever in flight.
+    reg [15:0] v19_global_epoch;
+    reg [15:0] v19_global_epoch_gray;
+    wire [15:0] v19_global_epoch_next = v19_global_epoch + 16'd1;
+    always @(posedge c0_ddr4_ui_clk) begin
+        if (ui_rst) begin
+            v19_global_epoch      <= 16'd0;
+            v19_global_epoch_gray <= 16'd0;
+        end else if (eo_strobe_edge_ui) begin
+            v19_global_epoch      <= v19_global_epoch_next;
+            v19_global_epoch_gray <= v19_global_epoch_next ^
+                                     (v19_global_epoch_next >> 1);
         end
     end
 
@@ -1127,7 +1169,8 @@ module PanoramaBase_DdrBlackFrame(
         wire [19:0] v19_cam3_pixel, v19_cam4_pixel, v19_cam5_pixel;
 
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 0))) u_v19_cap0 (
-            .rst_n(rst_n), .capture_enable(running), .trigger_ref(eo_strobe_ref),
+            .rst_n(rst_n), .capture_enable(running),
+            .global_epoch_gray_ui(v19_global_epoch_gray),
             .cam_clk(eo0_wr_clk), .cam_hsync(eo0_wr_hsync), .cam_vsync(eo0_wr_vsync), .cam_pixel(eo0_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap0_pop), .fifo_empty(v19_cap0_empty),
             .fifo_addr(v19_cap0_addr), .fifo_data(v19_cap0_data), .fifo_is_marker(v19_cap0_marker),
@@ -1138,7 +1181,8 @@ module PanoramaBase_DdrBlackFrame(
             .desc_epoch_ui(v19_cap0_desc_epoch), .fifo_overflow_seen_ui(v19_cap0_overflow),
             .fifo_level_ui(v19_cap0_level), .dbg_row_ui(v19_cap0_row));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 1))) u_v19_cap1 (
-            .rst_n(rst_n), .capture_enable(running), .trigger_ref(eo_strobe_ref),
+            .rst_n(rst_n), .capture_enable(running),
+            .global_epoch_gray_ui(v19_global_epoch_gray),
             .cam_clk(eo1_wr_clk), .cam_hsync(eo1_wr_hsync), .cam_vsync(eo1_wr_vsync), .cam_pixel(eo1_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap1_pop), .fifo_empty(v19_cap1_empty),
             .fifo_addr(v19_cap1_addr), .fifo_data(v19_cap1_data), .fifo_is_marker(v19_cap1_marker),
@@ -1149,7 +1193,8 @@ module PanoramaBase_DdrBlackFrame(
             .desc_epoch_ui(v19_cap1_desc_epoch), .fifo_overflow_seen_ui(v19_cap1_overflow),
             .fifo_level_ui(v19_cap1_level), .dbg_row_ui(v19_cap1_row));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 2))) u_v19_cap2 (
-            .rst_n(rst_n), .capture_enable(running), .trigger_ref(eo_strobe_ref),
+            .rst_n(rst_n), .capture_enable(running),
+            .global_epoch_gray_ui(v19_global_epoch_gray),
             .cam_clk(eo2_wr_clk), .cam_hsync(eo2_wr_hsync), .cam_vsync(eo2_wr_vsync), .cam_pixel(eo2_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap2_pop), .fifo_empty(v19_cap2_empty),
             .fifo_addr(v19_cap2_addr), .fifo_data(v19_cap2_data), .fifo_is_marker(v19_cap2_marker),
@@ -1160,7 +1205,8 @@ module PanoramaBase_DdrBlackFrame(
             .desc_epoch_ui(v19_cap2_desc_epoch), .fifo_overflow_seen_ui(v19_cap2_overflow),
             .fifo_level_ui(v19_cap2_level), .dbg_row_ui(v19_cap2_row));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 3))) u_v19_cap3 (
-            .rst_n(rst_n), .capture_enable(running), .trigger_ref(eo_strobe_ref),
+            .rst_n(rst_n), .capture_enable(running),
+            .global_epoch_gray_ui(v19_global_epoch_gray),
             .cam_clk(eo3_wr_clk), .cam_hsync(eo3_wr_hsync), .cam_vsync(eo3_wr_vsync), .cam_pixel(eo3_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap3_pop), .fifo_empty(v19_cap3_empty),
             .fifo_addr(v19_cap3_addr), .fifo_data(v19_cap3_data), .fifo_is_marker(v19_cap3_marker),
@@ -1171,7 +1217,8 @@ module PanoramaBase_DdrBlackFrame(
             .desc_epoch_ui(v19_cap3_desc_epoch), .fifo_overflow_seen_ui(v19_cap3_overflow),
             .fifo_level_ui(v19_cap3_level), .dbg_row_ui(v19_cap3_row));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 4))) u_v19_cap4 (
-            .rst_n(rst_n), .capture_enable(running), .trigger_ref(eo_strobe_ref),
+            .rst_n(rst_n), .capture_enable(running),
+            .global_epoch_gray_ui(v19_global_epoch_gray),
             .cam_clk(eo4_wr_clk), .cam_hsync(eo4_wr_hsync), .cam_vsync(eo4_wr_vsync), .cam_pixel(eo4_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap4_pop), .fifo_empty(v19_cap4_empty),
             .fifo_addr(v19_cap4_addr), .fifo_data(v19_cap4_data), .fifo_is_marker(v19_cap4_marker),
@@ -1182,7 +1229,8 @@ module PanoramaBase_DdrBlackFrame(
             .desc_epoch_ui(v19_cap4_desc_epoch), .fifo_overflow_seen_ui(v19_cap4_overflow),
             .fifo_level_ui(v19_cap4_level), .dbg_row_ui(v19_cap4_row));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 5))) u_v19_cap5 (
-            .rst_n(rst_n), .capture_enable(running), .trigger_ref(eo_strobe_ref),
+            .rst_n(rst_n), .capture_enable(running),
+            .global_epoch_gray_ui(v19_global_epoch_gray),
             .cam_clk(eo5_wr_clk), .cam_hsync(eo5_wr_hsync), .cam_vsync(eo5_wr_vsync), .cam_pixel(eo5_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap5_pop), .fifo_empty(v19_cap5_empty),
             .fifo_addr(v19_cap5_addr), .fifo_data(v19_cap5_data), .fifo_is_marker(v19_cap5_marker),
