@@ -127,10 +127,17 @@ module EoV19FrameSetManager #(
     // Measured with only camera 4 off: all six FIFO peaks 0, write_retiring 0,
     // scan_active 0.
     //
-    // Seed per camera instead, and clear the bit when a camera goes away so a
-    // returning one is re-seeded automatically.
+    // Seed per camera instead, keyed ONLY on that camera's own FIFO
+    // readiness.  Do not add cam_present here: presence is derived from the
+    // camera's row counter, which only advances once the writer is capturing,
+    // which needs a bank token, which needs this seeding -- a circular
+    // dependency that deadlocked every camera even with all six powered on
+    // (measured: all six FIFO peaks 0, write_retiring 0, magenta raster).
+    // free_ready is sufficient and non-circular: a camera whose async FIFO is
+    // still in reset because its pixel clock is stopped simply reads not-ready
+    // and is skipped, which is exactly the case this fix exists for.
     reg  [5:0] seeded;
-    wire [5:0] need_seed = cam_present & free_ready & ~seeded;
+    wire [5:0] need_seed = free_ready & ~seeded;
 
     reg [3:0] valid0, valid1, valid2, valid3, valid4, valid5;
     reg [EPOCH_W-1:0] epoch0 [0:3];
@@ -408,8 +415,6 @@ module EoV19FrameSetManager #(
             end
         end else begin
             free_valid <= 6'd0;
-            // A camera that disappears forfeits its tokens; re-seed on return.
-            seeded <= seeded & cam_present;
 
             // Completion descriptors are independent of the selection FSM.
             // A duplicate means a bank was reused without receiving a FREE
@@ -455,7 +460,7 @@ module EoV19FrameSetManager #(
                         free_bank4 <= bank_index; free_bank5 <= bank_index;
                         if (bank_index == 2'd3) begin
                             bank_index <= 2'd0;
-                            seeded <= (seeded | need_seed) & cam_present;
+                            seeded <= seeded | need_seed;
                             state <= ST_FIND_RESET;
                         end else begin
                             bank_index <= bank_index + 2'd1;
