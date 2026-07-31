@@ -19,6 +19,11 @@ module EoV19FrameSetManager #(
     input  wire                   clk,
     input  wire                   rst,
     input  wire                   enable,
+    // One bit per camera.  A camera whose bit is low is treated as absent:
+    // it neither contributes a seed epoch nor blocks a match, so the panorama
+    // keeps running on the remaining cameras and rejoins it automatically
+    // when the bit returns.
+    input  wire [5:0]             cam_present,
 
     input  wire [5:0]             desc_valid,
     input  wire [1:0]             desc_bank0,
@@ -62,6 +67,7 @@ module EoV19FrameSetManager #(
     localparam [5:0] ST_INIT          = 6'd0;
     localparam [5:0] ST_FIND_RESET    = 6'd1;
     localparam [5:0] ST_FIND_LOAD     = 6'd2;
+    localparam [5:0] ST_FIND_CAM0     = 6'd35;
     localparam [5:0] ST_FIND_CAM1     = 6'd3;
     localparam [5:0] ST_FIND_CAM2     = 6'd4;
     localparam [5:0] ST_FIND_CAM3     = 6'd5;
@@ -98,6 +104,17 @@ module EoV19FrameSetManager #(
     reg [5:0] state;
     reg [1:0] bank_index;
 
+    // The search walks one camera's four descriptor banks and asks whether the
+    // others hold the same epoch.  That anchor cannot be hard-wired to camera
+    // 0 any more: if camera 0 is the absent one there is no seed at all and no
+    // set is ever found.  Anchor on the lowest-index present camera instead.
+    wire [2:0] seed_cam = cam_present[0] ? 3'd0 :
+                          cam_present[1] ? 3'd1 :
+                          cam_present[2] ? 3'd2 :
+                          cam_present[3] ? 3'd3 :
+                          cam_present[4] ? 3'd4 : 3'd5;
+    wire       any_present = |cam_present;
+
     reg [3:0] valid0, valid1, valid2, valid3, valid4, valid5;
     reg [EPOCH_W-1:0] epoch0 [0:3];
     reg [EPOCH_W-1:0] epoch1 [0:3];
@@ -131,6 +148,28 @@ module EoV19FrameSetManager #(
     reg [EPOCH_W-1:0]      cam_oldest_epoch;
     reg [5:0]              release_mask_r;
     reg [5:0]              stale_mask_r;
+
+    // Camera 0 needed no lookup while it was hard-wired as the search anchor.
+    // It is now resolved like every other camera, so it needs the same pair.
+    function epoch_present0;
+        input [EPOCH_W-1:0] value;
+        begin
+            epoch_present0 = (valid0[0] && epoch0[0] == value) ||
+                             (valid0[1] && epoch0[1] == value) ||
+                             (valid0[2] && epoch0[2] == value) ||
+                             (valid0[3] && epoch0[3] == value);
+        end
+    endfunction
+
+    function [1:0] epoch_bank0;
+        input [EPOCH_W-1:0] value;
+        begin
+            if (valid0[0] && epoch0[0] == value) epoch_bank0 = 2'd0;
+            else if (valid0[1] && epoch0[1] == value) epoch_bank0 = 2'd1;
+            else if (valid0[2] && epoch0[2] == value) epoch_bank0 = 2'd2;
+            else epoch_bank0 = 2'd3;
+        end
+    endfunction
 
     function epoch_present1;
         input [EPOCH_W-1:0] value;
@@ -274,10 +313,15 @@ module EoV19FrameSetManager #(
         end
     endfunction
 
-    wire all_rings_full = &valid0 && &valid1 && &valid2 &&
-                          &valid3 && &valid4 && &valid5;
-    wire all_rings_nonempty = (|valid0) && (|valid1) && (|valid2) &&
-                              (|valid3) && (|valid4) && (|valid5);
+    // Absent cameras must not skew the reclaim decisions either: their rings
+    // are permanently empty, which would otherwise read as "never full" and
+    // "never all-nonempty" and keep the frontier path from running.
+    wire all_rings_full = (&valid0 || !cam_present[0]) && (&valid1 || !cam_present[1]) &&
+                          (&valid2 || !cam_present[2]) && (&valid3 || !cam_present[3]) &&
+                          (&valid4 || !cam_present[4]) && (&valid5 || !cam_present[5]);
+    wire all_rings_nonempty = (|valid0 || !cam_present[0]) && (|valid1 || !cam_present[1]) &&
+                              (|valid2 || !cam_present[2]) && (|valid3 || !cam_present[3]) &&
+                              (|valid4 || !cam_present[4]) && (|valid5 || !cam_present[5]);
 
     assign descriptor_valid_map = {valid5, valid4, valid3,
                                    valid2, valid1, valid0};
@@ -406,16 +450,36 @@ module EoV19FrameSetManager #(
                 end
 
                 ST_FIND_LOAD: begin
-                    find_epoch <= epoch0[bank_index];
-                    find_bank0 <= bank_index;
-                    find_bank1 <= 2'd0; find_bank2 <= 2'd0; find_bank3 <= 2'd0;
-                    find_bank4 <= 2'd0; find_bank5 <= 2'd0;
-                    find_ok <= valid0[bank_index];
+                    case (seed_cam)
+                        3'd0: begin find_epoch <= epoch0[bank_index]; find_ok <= valid0[bank_index]; end
+                        3'd1: begin find_epoch <= epoch1[bank_index]; find_ok <= valid1[bank_index]; end
+                        3'd2: begin find_epoch <= epoch2[bank_index]; find_ok <= valid2[bank_index]; end
+                        3'd3: begin find_epoch <= epoch3[bank_index]; find_ok <= valid3[bank_index]; end
+                        3'd4: begin find_epoch <= epoch4[bank_index]; find_ok <= valid4[bank_index]; end
+                        default: begin find_epoch <= epoch5[bank_index]; find_ok <= valid5[bank_index]; end
+                    endcase
+                    // Every camera, including camera 0, is now resolved by its
+                    // own FIND state; the anchor simply matches itself there.
+                    find_bank0 <= 2'd0; find_bank1 <= 2'd0; find_bank2 <= 2'd0;
+                    find_bank3 <= 2'd0; find_bank4 <= 2'd0; find_bank5 <= 2'd0;
+                    if (!any_present) find_ok <= 1'b0;
+                    state <= ST_FIND_CAM0;
+                end
+
+                ST_FIND_CAM0: begin
+                    if (!cam_present[0])
+                        find_bank0 <= 2'd0;
+                    else if (find_ok && epoch_present0(find_epoch))
+                        find_bank0 <= epoch_bank0(find_epoch);
+                    else
+                        find_ok <= 1'b0;
                     state <= ST_FIND_CAM1;
                 end
 
                 ST_FIND_CAM1: begin
-                    if (find_ok && epoch_present1(find_epoch))
+                    if (!cam_present[1])
+                        find_bank1 <= 2'd0;
+                    else if (find_ok && epoch_present1(find_epoch))
                         find_bank1 <= epoch_bank1(find_epoch);
                     else
                         find_ok <= 1'b0;
@@ -423,7 +487,9 @@ module EoV19FrameSetManager #(
                 end
 
                 ST_FIND_CAM2: begin
-                    if (find_ok && epoch_present2(find_epoch))
+                    if (!cam_present[2])
+                        find_bank2 <= 2'd0;
+                    else if (find_ok && epoch_present2(find_epoch))
                         find_bank2 <= epoch_bank2(find_epoch);
                     else
                         find_ok <= 1'b0;
@@ -431,7 +497,9 @@ module EoV19FrameSetManager #(
                 end
 
                 ST_FIND_CAM3: begin
-                    if (find_ok && epoch_present3(find_epoch))
+                    if (!cam_present[3])
+                        find_bank3 <= 2'd0;
+                    else if (find_ok && epoch_present3(find_epoch))
                         find_bank3 <= epoch_bank3(find_epoch);
                     else
                         find_ok <= 1'b0;
@@ -439,7 +507,9 @@ module EoV19FrameSetManager #(
                 end
 
                 ST_FIND_CAM4: begin
-                    if (find_ok && epoch_present4(find_epoch))
+                    if (!cam_present[4])
+                        find_bank4 <= 2'd0;
+                    else if (find_ok && epoch_present4(find_epoch))
                         find_bank4 <= epoch_bank4(find_epoch);
                     else
                         find_ok <= 1'b0;
@@ -447,7 +517,9 @@ module EoV19FrameSetManager #(
                 end
 
                 ST_FIND_CAM5: begin
-                    if (find_ok && epoch_present5(find_epoch))
+                    if (!cam_present[5])
+                        find_bank5 <= 2'd0;
+                    else if (find_ok && epoch_present5(find_epoch))
                         find_bank5 <= epoch_bank5(find_epoch);
                     else
                         find_ok <= 1'b0;

@@ -10,6 +10,10 @@ module EoV19StreamingRendererII1 #(
     parameter integer RUN_COUNT = 24948
 ) (
     input wire rst_n, input wire clk, input wire start_copy,
+    // One bit per camera; low means that camera is not streaming.  Absent
+    // cameras must not hold the row gates low, and their panorama tiles are
+    // rendered black rather than showing whatever is stale in their caches.
+    input wire [5:0] cam_present,
     input wire source_frame_reset,
     input wire cam0_clk, input wire cam0_hsync, input wire cam0_vsync, input wire [19:0] cam0_pixel,
     input wire cam1_clk, input wire cam1_hsync, input wire cam1_vsync, input wire [19:0] cam1_pixel,
@@ -76,13 +80,32 @@ module EoV19StreamingRendererII1 #(
     EoV19LineCache u_lc4(.rst_n(rst_n),.wr_clk(cam4_clk),.wr_hsync(cam4_hsync),.wr_vsync(cam4_vsync),.wr_frame_reset(source_frame_reset),.wr_start_row(source_start_row),.wr_pixel(cam4_pixel),.rd_clk(clk),.rd_x(rd_x4),.rd_y0(rd_y40),.rd_y1(rd_y41),.rd_pixel_y0(p40),.rd_pixel_y1(p41),.captured_rows(rows4),.frame_toggle(),.field_height(height4),.current_epoch(epoch4),.rd_hit_y0(hit40),.rd_hit_y1(hit41));
     EoV19LineCache u_lc5(.rst_n(rst_n),.wr_clk(cam5_clk),.wr_hsync(cam5_hsync),.wr_vsync(cam5_vsync),.wr_frame_reset(source_frame_reset),.wr_start_row(source_start_row),.wr_pixel(cam5_pixel),.rd_clk(clk),.rd_x(rd_x5),.rd_y0(rd_y50),.rd_y1(rd_y51),.rd_pixel_y0(p50),.rd_pixel_y1(p51),.captured_rows(rows5),.frame_toggle(),.field_height(height5),.current_epoch(epoch5),.rd_hit_y0(hit50),.rd_hit_y1(hit51));
 
-    assign frames_valid = (rows0 >= 11'd126) && (rows1 >= 11'd126) &&
-                          (rows2 >= 11'd126) && (rows3 >= 11'd126) &&
-                          (rows4 >= 11'd126) && (rows5 >= 11'd126);
+    assign frames_valid = (rows0 >= 11'd126 || !cam_present[0]) &&
+                          (rows1 >= 11'd126 || !cam_present[1]) &&
+                          (rows2 >= 11'd126 || !cam_present[2]) &&
+                          (rows3 >= 11'd126 || !cam_present[3]) &&
+                          (rows4 >= 11'd126 || !cam_present[4]) &&
+                          (rows5 >= 11'd126 || !cam_present[5]);
     function [10:0] mn2; input [10:0] a,b; begin mn2=(a<b)?a:b; end endfunction
     function [10:0] mx2; input [10:0] a,b; begin mx2=(a>b)?a:b; end endfunction
-    assign dbg_rows_min = mn2(mn2(mn2(rows0,rows1),mn2(rows2,rows3)),mn2(rows4,rows5));
-    wire [10:0] dbg_rows_max = mx2(mx2(mx2(rows0,rows1),mx2(rows2,rows3)),mx2(rows4,rows5));
+    // Neutralise absent cameras in the reductions: an absent camera's row
+    // counter is frozen, which would otherwise pin dbg_rows_min low forever
+    // and hold start_rows_aligned false -- the same class of permanent stall
+    // as the old epoch gate.
+    wire [10:0] rows0_e = cam_present[0] ? rows0 : 11'd2047;
+    wire [10:0] rows1_e = cam_present[1] ? rows1 : 11'd2047;
+    wire [10:0] rows2_e = cam_present[2] ? rows2 : 11'd2047;
+    wire [10:0] rows3_e = cam_present[3] ? rows3 : 11'd2047;
+    wire [10:0] rows4_e = cam_present[4] ? rows4 : 11'd2047;
+    wire [10:0] rows5_e = cam_present[5] ? rows5 : 11'd2047;
+    wire [10:0] rows0_x = cam_present[0] ? rows0 : 11'd0;
+    wire [10:0] rows1_x = cam_present[1] ? rows1 : 11'd0;
+    wire [10:0] rows2_x = cam_present[2] ? rows2 : 11'd0;
+    wire [10:0] rows3_x = cam_present[3] ? rows3 : 11'd0;
+    wire [10:0] rows4_x = cam_present[4] ? rows4 : 11'd0;
+    wire [10:0] rows5_x = cam_present[5] ? rows5 : 11'd0;
+    assign dbg_rows_min = mn2(mn2(mn2(rows0_e,rows1_e),mn2(rows2_e,rows3_e)),mn2(rows4_e,rows5_e));
+    wire [10:0] dbg_rows_max = mx2(mx2(mx2(rows0_x,rows1_x),mx2(rows2_x,rows3_x)),mx2(rows4_x,rows5_x));
 
     // Reduced-raster (1/6 bring-up scale) fallback.  The EO BT.1120 link has
     // been verified as 1080p progressive, so this path is never taken on the
@@ -125,24 +148,24 @@ module EoV19StreamingRendererII1 #(
     // lag into a labelled black row instead of torn pixels.  Importantly,
     // being *below* gate_min_row is a normal startup condition and must leave
     // the FSM waiting, not blacken the row.
-    wire gate_lower_ok = (rows0 >= gate_need_row) &&
-                         (rows1 >= gate_need_row) &&
-                         (rows2 >= gate_need_row) &&
-                         (rows3 >= gate_need_row) &&
-                         (rows4 >= gate_need_row) &&
-                         (rows5 >= gate_need_row);
+    wire gate_lower_ok = (rows0 >= gate_need_row || !cam_present[0]) &&
+                         (rows1 >= gate_need_row || !cam_present[1]) &&
+                         (rows2 >= gate_need_row || !cam_present[2]) &&
+                         (rows3 >= gate_need_row || !cam_present[3]) &&
+                         (rows4 >= gate_need_row || !cam_present[4]) &&
+                         (rows5 >= gate_need_row || !cam_present[5]);
     wire gate_upper_ok = (rows0 >= gate_min_row) && (rows0 <= gate_min_row + 11'd62) &&
                          (rows1 >= gate_min_row) && (rows1 <= gate_min_row + 11'd62) &&
                          (rows2 >= gate_min_row) && (rows2 <= gate_min_row + 11'd62) &&
                          (rows3 >= gate_min_row) && (rows3 <= gate_min_row + 11'd62) &&
                          (rows4 >= gate_min_row) && (rows4 <= gate_min_row + 11'd62) &&
                          (rows5 >= gate_min_row) && (rows5 <= gate_min_row + 11'd62);
-    wire gate_overrun = (rows0 > gate_min_row + 11'd62) ||
-                        (rows1 > gate_min_row + 11'd62) ||
-                        (rows2 > gate_min_row + 11'd62) ||
-                        (rows3 > gate_min_row + 11'd62) ||
-                        (rows4 > gate_min_row + 11'd62) ||
-                        (rows5 > gate_min_row + 11'd62);
+    wire gate_overrun = (cam_present[0] && rows0 > gate_min_row + 11'd62) ||
+                        (cam_present[1] && rows1 > gate_min_row + 11'd62) ||
+                        (cam_present[2] && rows2 > gate_min_row + 11'd62) ||
+                        (cam_present[3] && rows3 > gate_min_row + 11'd62) ||
+                        (cam_present[4] && rows4 > gate_min_row + 11'd62) ||
+                        (cam_present[5] && rows5 > gate_min_row + 11'd62);
     // epoch_consistent is DIAGNOSTIC ONLY -- it must never gate a pass start.
     //
     // EoV19LineCache gives each camera a free-running 2-bit epoch incremented
@@ -493,7 +516,7 @@ module EoV19StreamingRendererII1 #(
                         row_black<=1'b0; sy<=pano_y-CONTENT_Y0; state<=2'd2;
                     end
                 end else if(state==2'd2) begin
-                    v[0]<=1; black[0]<=((pano_y<CONTENT_Y0)||(pano_y>CONTENT_Y1)||row_black); xpar[0]<=pano_x[0]; blend[0]<=map_blend; ca[0]<=map_cam_a[2:0]; cb[0]<=map_cam_b[2:0]; apos[0]<=map_alpha_pos; lxa[0]<=map_lx_a; lxb[0]<=map_lx_b; last[0]<=((pano_y==`EO_V19_PANO_H-1)&&(pano_x==`EO_V19_PANO_W-1));
+                    v[0]<=1; black[0]<=((pano_y<CONTENT_Y0)||(pano_y>CONTENT_Y1)||row_black||!cam_present[map_cam_a[2:0]]); xpar[0]<=pano_x[0]; blend[0]<=map_blend && cam_present[map_cam_a[2:0]] && cam_present[map_cam_b[2:0]]; ca[0]<=map_cam_a[2:0]; cb[0]<=map_cam_b[2:0]; apos[0]<=map_alpha_pos; lxa[0]<=map_lx_a; lxb[0]<=map_lx_b; last[0]<=((pano_y==`EO_V19_PANO_H-1)&&(pano_x==`EO_V19_PANO_W-1));
                     run_addr_a<=((sy*6+map_cam_a)*SEGS_PER_ROW)+map_seg_a; run_addr_b<=((sy*6+map_cam_b)*SEGS_PER_ROW)+map_seg_b;
                     if(pano_x==`EO_V19_PANO_W-1) begin pano_x<=0; if(pano_y==`EO_V19_PANO_H-1) state<=2'd3; else begin pano_y<=pano_y+1; gate_settle<=2'd0; state<=2'd1; end end else pano_x<=pano_x+1;
                 end

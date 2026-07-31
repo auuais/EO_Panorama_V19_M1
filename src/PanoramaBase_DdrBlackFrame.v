@@ -785,6 +785,10 @@ module PanoramaBase_DdrBlackFrame(
     wire        v19_cap3_overflow, v19_cap4_overflow, v19_cap5_overflow;
     wire [11:0] v19_cap0_level, v19_cap1_level, v19_cap2_level;
     wire [11:0] v19_cap3_level, v19_cap4_level, v19_cap5_level;
+    // Per-camera liveness, driven by the EoV19CamPresence instances inside
+    // the SRC_V19 generate block.  Declared at module scope because
+    // v19_rows_start_aligned above consumes it well before that block.
+    wire [5:0] v19_cam_present;
     wire [10:0] v19_cap0_row, v19_cap1_row, v19_cap2_row;
     wire [10:0] v19_cap3_row, v19_cap4_row, v19_cap5_row;
     reg  [11:0] v19_cap0_peak, v19_cap1_peak, v19_cap2_peak;
@@ -925,12 +929,12 @@ module PanoramaBase_DdrBlackFrame(
     wire [10:0] v19_dbg_row4 = v19_dbg_rows_word0[54:44];
     wire [10:0] v19_dbg_row5 = v19_dbg_rows_word2[50:40];
     wire        v19_rows_start_aligned =
-        (v19_dbg_row0 >= 11'd124) && (v19_dbg_row0 <= 11'd187) &&
-        (v19_dbg_row1 >= 11'd124) && (v19_dbg_row1 <= 11'd187) &&
-        (v19_dbg_row2 >= 11'd124) && (v19_dbg_row2 <= 11'd187) &&
-        (v19_dbg_row3 >= 11'd124) && (v19_dbg_row3 <= 11'd187) &&
-        (v19_dbg_row4 >= 11'd124) && (v19_dbg_row4 <= 11'd187) &&
-        (v19_dbg_row5 >= 11'd124) && (v19_dbg_row5 <= 11'd187);
+        (!v19_cam_present[0] || ((v19_dbg_row0 >= 11'd124) && (v19_dbg_row0 <= 11'd187))) &&
+        (!v19_cam_present[1] || ((v19_dbg_row1 >= 11'd124) && (v19_dbg_row1 <= 11'd187))) &&
+        (!v19_cam_present[2] || ((v19_dbg_row2 >= 11'd124) && (v19_dbg_row2 <= 11'd187))) &&
+        (!v19_cam_present[3] || ((v19_dbg_row3 >= 11'd124) && (v19_dbg_row3 <= 11'd187))) &&
+        (!v19_cam_present[4] || ((v19_dbg_row4 >= 11'd124) && (v19_dbg_row4 <= 11'd187))) &&
+        (!v19_cam_present[5] || ((v19_dbg_row5 >= 11'd124) && (v19_dbg_row5 <= 11'd187)));
 
     // Qualifies "begin a new copy": free-running on the display frame edge for
     // the buffered EO panorama and cam0-only diagnostic sources (the tiles
@@ -1189,7 +1193,28 @@ module PanoramaBase_DdrBlackFrame(
             .desc_epoch_ui(v19_cap5_desc_epoch), .fifo_overflow_seen_ui(v19_cap5_overflow),
             .fifo_level_ui(v19_cap5_level), .dbg_row_ui(v19_cap5_row));
 
+        // Per-camera liveness.  Every frame-set / row-window decision below
+        // used to be an unconditional six-way AND, so one dead camera stopped
+        // the whole panorama (measured 2026-07-31: banks_ready=0,
+        // copy_active=0, copy_px_valid=0, magenta raster).  Judge liveness in
+        // ui_clk from each camera's synchronised row counter -- a powered-down
+        // camera has no clock, so anything clocked by it could never report
+        // its own absence.
+        EoV19CamPresence u_v19_pres0 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .activity(v19_cap0_row), .activity_pulse(v19_cap0_desc_valid), .present(v19_cam_present[0]));
+        EoV19CamPresence u_v19_pres1 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .activity(v19_cap1_row), .activity_pulse(v19_cap1_desc_valid), .present(v19_cam_present[1]));
+        EoV19CamPresence u_v19_pres2 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .activity(v19_cap2_row), .activity_pulse(v19_cap2_desc_valid), .present(v19_cam_present[2]));
+        EoV19CamPresence u_v19_pres3 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .activity(v19_cap3_row), .activity_pulse(v19_cap3_desc_valid), .present(v19_cam_present[3]));
+        EoV19CamPresence u_v19_pres4 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .activity(v19_cap4_row), .activity_pulse(v19_cap4_desc_valid), .present(v19_cam_present[4]));
+        EoV19CamPresence u_v19_pres5 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .activity(v19_cap5_row), .activity_pulse(v19_cap5_desc_valid), .present(v19_cam_present[5]));
+
         EoV19FrameSetManager u_v19_frameset (
+            .cam_present(v19_cam_present),
             .clk(c0_ddr4_ui_clk), .rst(ui_rst), .enable(running),
             .desc_valid(v19_cap_desc_valid),
             .desc_bank0(v19_cap0_desc_bank), .desc_bank1(v19_cap1_desc_bank),
@@ -1292,6 +1317,7 @@ module PanoramaBase_DdrBlackFrame(
             .rst_n      (rst_n),
             .clk        (c0_ddr4_ui_clk),
             .start_copy (v19_render_active),
+            .cam_present(v19_cam_present),
             .source_frame_reset(v19_replay_frame_edge_ui),
             .cam0_clk   (v19_replay_clk), .cam0_hsync(v19_cam0_hsync), .cam0_vsync(v19_cam0_vsync), .cam0_pixel(v19_cam0_pixel),
             .cam1_clk   (v19_replay_clk), .cam1_hsync(v19_cam1_hsync), .cam1_vsync(v19_cam1_vsync), .cam1_pixel(v19_cam1_pixel),
