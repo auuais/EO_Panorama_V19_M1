@@ -46,13 +46,14 @@ module EoV19StreamingRendererII1 #(
     // Registered gate terms + settle counter; see the state-1 comment.
     localparam [1:0] GATE_SETTLE = 2'd2;
     reg gate_lower_ok_q, gate_overrun_q;
-    // start_rows_aligned/epoch_consistent are the other six-camera reduction
-    // terms reaching pano_y.  start_rows_aligned alone is a 6-way min tree
-    // AND a 6-way max tree feeding the state-0 transition, which became the
-    // critical path once the gate terms above were registered.  Neither
-    // depends on pano_y, so no settle counter is needed: state 0 simply
-    // waits one more cycle for a pass to start.
-    reg start_rows_aligned_q, epoch_consistent_q;
+    // start_rows_aligned is the other six-camera reduction term reaching
+    // pano_y: a 6-way min tree AND a 6-way max tree feeding the state-0
+    // transition, which became the critical path once the gate terms above
+    // were registered.  It does not depend on pano_y, so no settle counter is
+    // needed -- state 0 simply waits one more cycle for a pass to start.
+    // (epoch_consistent used to be registered here too; it no longer gates
+    // anything, see its declaration below.)
+    reg start_rows_aligned_q;
     reg [1:0] gate_settle;
     reg [8:0] pano_y;
     reg [11:0] pano_x;
@@ -63,8 +64,6 @@ module EoV19StreamingRendererII1 #(
     reg [10:0] row_min_y0 [0:`EO_V19_PER_CAM_H-1];
     reg [15:0] alpha_y [0:48];
     reg [15:0] alpha_c [0:23];
-    reg [1:0] pass_epoch0,pass_epoch1,pass_epoch2;
-    reg [1:0] pass_epoch3,pass_epoch4,pass_epoch5;
     reg [2:0] ca[0:10],cb[0:10];
     reg [10:0] rd_x0_r,rd_x1_r,rd_x2_r,rd_x3_r,rd_x4_r,rd_x5_r;
     reg [10:0] rd_y00_r,rd_y01_r,rd_y10_r,rd_y11_r;
@@ -144,15 +143,31 @@ module EoV19StreamingRendererII1 #(
                         (rows3 > gate_min_row + 11'd62) ||
                         (rows4 > gate_min_row + 11'd62) ||
                         (rows5 > gate_min_row + 11'd62);
-    wire epoch_bad = (epoch0 != pass_epoch0) || (epoch1 != pass_epoch1) ||
-                     (epoch2 != pass_epoch2) || (epoch3 != pass_epoch3) ||
-                     (epoch4 != pass_epoch4) || (epoch5 != pass_epoch5);
-    // The parent starts a copy from camera-0's synchronized field edge.  The
-    // other five cache epochs can arrive a few renderer clocks later even when
-    // the cameras are strobe-locked.  Do not snapshot a mixed epoch vector;
-    // wait until all six tags describe the same field, then hold that value for
-    // the pass.  This prevents epoch_bad from permanently blackening every
-    // content row at the beginning of a copy.
+    // epoch_consistent is DIAGNOSTIC ONLY -- it must never gate a pass start.
+    //
+    // EoV19LineCache gives each camera a free-running 2-bit epoch incremented
+    // by that camera's own vsync, with no load path and nothing that can
+    // re-align them.  They match only because all six started at zero and have
+    // ticked the same number of times since.  A camera that misses N frames is
+    // then permanently offset by N: powering it back on resumes counting from
+    // where it stopped, so equality returns only if N mod 4 == 0.
+    //
+    // Gating the pass start on it therefore froze the panorama permanently
+    // whenever any camera was power-cycled, while EO single mode recovered
+    // because it bypasses this renderer entirely.  Kept as an ILA probe so the
+    // drift stays observable.
+    //
+    // It was also a broken proxy for what it claimed to enforce: equal
+    // free-running counters mean "the same number of frames elapsed since
+    // reset", never "these frames were simultaneous".  Real cross-camera
+    // temporal coherence needs the trigger-epoch descriptor scheme, which
+    // EoV19FrameSetManager implements separately.  Per-read validity is
+    // unaffected: the line cache still checks each row tag against its own
+    // cache's epoch, which is self-consistent and does not need cross-camera
+    // equality.
+    //
+    // start_rows_aligned remains the functional gate and is self-correcting,
+    // being built from row counters that reset every frame.
     wire epoch_consistent = (epoch0 == epoch1) && (epoch0 == epoch2) &&
                             (epoch0 == epoch3) && (epoch0 == epoch4) &&
                             (epoch0 == epoch5);
@@ -323,7 +338,7 @@ module EoV19StreamingRendererII1 #(
     always @(posedge clk) begin
         if(!rst_n) begin
             pano_y<=0; pano_x<=0; sy<=0; state<=2'd0; started_for_copy<=0; small_raster<=0; qy_limit<=11'd1078;
-            row_black<=1'b0; gate_lower_ok_q<=1'b0; gate_overrun_q<=1'b0; gate_settle<=2'd0; start_rows_aligned_q<=1'b0; epoch_consistent_q<=1'b0; pass_epoch0<=0; pass_epoch1<=0; pass_epoch2<=0; pass_epoch3<=0; pass_epoch4<=0; pass_epoch5<=0;
+            row_black<=1'b0; gate_lower_ok_q<=1'b0; gate_overrun_q<=1'b0; gate_settle<=2'd0; start_rows_aligned_q<=1'b0;
             miss_count<=0;
             hit_a6<=1'b0; hit_b6<=1'b0;
             px_valid<=0; px_data<=`EO_V19_BLACK_PIXEL; frame_done<=0; run_addr_a<=0; run_addr_b<=0;
@@ -340,7 +355,7 @@ module EoV19StreamingRendererII1 #(
             // tags (typically 1079) while the replay was already feeding row
             // zero of the next trigger epoch.
             pano_y<=0; pano_x<=0; sy<=0; state<=2'd0; started_for_copy<=0; small_raster<=0; qy_limit<=11'd1078;
-            row_black<=1'b0; gate_lower_ok_q<=1'b0; gate_overrun_q<=1'b0; gate_settle<=2'd0; start_rows_aligned_q<=1'b0; epoch_consistent_q<=1'b0; pass_epoch0<=0; pass_epoch1<=0; pass_epoch2<=0; pass_epoch3<=0; pass_epoch4<=0; pass_epoch5<=0;
+            row_black<=1'b0; gate_lower_ok_q<=1'b0; gate_overrun_q<=1'b0; gate_settle<=2'd0; start_rows_aligned_q<=1'b0;
             miss_count<=0;
             hit_a6<=1'b0; hit_b6<=1'b0;
             px_valid<=0; px_data<=`EO_V19_BLACK_PIXEL; frame_done<=0; run_addr_a<=0; run_addr_b<=0;
@@ -356,7 +371,6 @@ module EoV19StreamingRendererII1 #(
             gate_lower_ok_q <= gate_lower_ok;
             gate_overrun_q  <= gate_overrun;
             start_rows_aligned_q <= start_rows_aligned;
-            epoch_consistent_q   <= epoch_consistent;
             if(dbg_rows_min > rows_peak) rows_peak<=dbg_rows_min;
             if(state==2'd2) seen_out<=1;
             if(frame_done) seen_done<=1;
@@ -422,7 +436,7 @@ module EoV19StreamingRendererII1 #(
                     // counters to be high on that exact edge; they reset at
                     // the camera frame boundary and the row-wait state below
                     // will naturally pace the renderer from the new frame.
-                    if(start_copy && !started_for_copy && epoch_consistent_q && start_rows_aligned_q) begin
+                    if(start_copy && !started_for_copy && start_rows_aligned_q) begin
                         started_for_copy<=1; pano_y<=0; pano_x<=0;
                         // Use the completed field height, not the live row
                         // counter at the trigger edge.  The latter is near
@@ -437,8 +451,6 @@ module EoV19StreamingRendererII1 #(
                         qy_limit <= reduced_raster ?
                                     ((field_height_min > 11'd1) ? field_height_min - 11'd1 : 11'd179) :
                                     11'd1078;
-                        pass_epoch0<=epoch0; pass_epoch1<=epoch1; pass_epoch2<=epoch2;
-                        pass_epoch3<=epoch3; pass_epoch4<=epoch4; pass_epoch5<=epoch5;
                         row_black<=1'b0;
                         gate_settle<=2'd0;
                         state<=2'd1;
