@@ -115,6 +115,23 @@ module EoV19FrameSetManager #(
                           cam_present[4] ? 3'd4 : 3'd5;
     wire       any_present = |cam_present;
 
+    // Which cameras have received their FREE bank tokens.  Seeding used to be
+    // one shared walk gated on (&free_ready), i.e. ALL SIX free-bank FIFOs
+    // ready at once.  free_bank_ready_ui is
+    //     !free_bank_full && !free_bank_wr_rst_busy
+    // on an xpm_fifo_async whose rd_clk is that camera's pixel clock, and an
+    // XPM async FIFO cannot finish its reset while either clock is stopped.
+    // A powered-down camera therefore held wr_rst_busy high for ever, so
+    // ST_INIT never seeded ANY camera, no writer could claim a bank, nothing
+    // was captured at all and the raster showed its magenta underflow colour.
+    // Measured with only camera 4 off: all six FIFO peaks 0, write_retiring 0,
+    // scan_active 0.
+    //
+    // Seed per camera instead, and clear the bit when a camera goes away so a
+    // returning one is re-seeded automatically.
+    reg  [5:0] seeded;
+    wire [5:0] need_seed = cam_present & free_ready & ~seeded;
+
     reg [3:0] valid0, valid1, valid2, valid3, valid4, valid5;
     reg [EPOCH_W-1:0] epoch0 [0:3];
     reg [EPOCH_W-1:0] epoch1 [0:3];
@@ -372,6 +389,7 @@ module EoV19FrameSetManager #(
             stale_mask_r <= 6'd0;
 
             free_valid <= 6'd0;
+            seeded <= 6'd0;
             free_bank0 <= 2'd0; free_bank1 <= 2'd0; free_bank2 <= 2'd0;
             free_bank3 <= 2'd0; free_bank4 <= 2'd0; free_bank5 <= 2'd0;
             lease_valid <= 1'b0;
@@ -390,6 +408,8 @@ module EoV19FrameSetManager #(
             end
         end else begin
             free_valid <= 6'd0;
+            // A camera that disappears forfeits its tokens; re-seed on return.
+            seeded <= seeded & cam_present;
 
             // Completion descriptors are independent of the selection FSM.
             // A duplicate means a bank was reused without receiving a FREE
@@ -428,21 +448,30 @@ module EoV19FrameSetManager #(
             case (state)
                 ST_INIT: begin
                     lease_valid <= 1'b0;
-                    if (enable && (&free_ready)) begin
-                        free_valid <= 6'h3f;
+                    if (enable && (|need_seed)) begin
+                        free_valid <= need_seed;
                         free_bank0 <= bank_index; free_bank1 <= bank_index;
                         free_bank2 <= bank_index; free_bank3 <= bank_index;
                         free_bank4 <= bank_index; free_bank5 <= bank_index;
                         if (bank_index == 2'd3) begin
                             bank_index <= 2'd0;
+                            seeded <= (seeded | need_seed) & cam_present;
                             state <= ST_FIND_RESET;
                         end else begin
                             bank_index <= bank_index + 2'd1;
                         end
+                    end else if (enable) begin
+                        // Nothing to seed right now: never spin here waiting
+                        // for a camera that may never come back.
+                        bank_index <= 2'd0;
+                        state <= ST_FIND_RESET;
                     end
                 end
 
                 ST_FIND_RESET: begin
+                    // A camera that has just come back needs its tokens before
+                    // it can capture again; seed it before the next search.
+                    if (|need_seed) state <= ST_INIT;
                     best_found <= 1'b0;
                     best_epoch <= {EPOCH_W{1'b0}};
                     bank_index <= 2'd0;
