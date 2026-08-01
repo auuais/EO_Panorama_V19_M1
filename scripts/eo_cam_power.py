@@ -1,29 +1,46 @@
 #!/usr/bin/env python3
-"""Drive camera power on the STM32 master board over its PC UI link.
+"""Drive EO/IR camera power on the STM32 master over its PC UI link.
 
-Used to reproduce the V19 panorama camera-loss / rejoin faults without
-physically unplugging a camera, so an ILA capture can be armed immediately
-before the transition.
+Used to reproduce the V19 panorama camera-loss / rejoin fault without
+physically unplugging a camera, so an ILA capture can be taken in the failing
+state.
 
-Protocol taken from the master firmware at
-C:/Users/USER/STM32CubeIDE/workspace_1.16.1/ST_Link-test:
-  Core/Src/proto_uart.c   framing, COBS, CRC16-CCITT-FALSE
-  Core/Src/mcu_fsm.c      CMD_SET_CAMERA_POWER (0x17), NODE_DAY / NODE_IR
-  Core/Src/main.c         USART3 = PC UI, 115200 8N1
+The board speaks the **customer ICD protocol**, not the legacy COBS/CRC binary
+protocol that proto_uart.c implements.  A COBS frame gets no reply at all; the
+board streams ICD 0x2210 STATUS frames continuously.  Framing mirrors
+IcdProtocol in the working client at
+C:/Users/USER/source/repos/PC_MCU_COM/PC_MCU_COM/Program.cs:
 
-On-wire packet, before COBS:
-  [SOM=0x02][LEN_lo][LEN_hi][MsgID][SEQ][app...][CRC_lo][CRC_hi][EOM=0x03]
-where LEN = len(app) + 2 and the CRC covers the first len(app)+5 bytes.
-The whole packet is COBS-encoded and terminated with a 0x00 delimiter.
+  SOM   uint32 LE 0x70717883
+  msgId uint16 LE
+  seq   uint32 LE
+  len   uint32 LE          payload length
+  time  uint64 LE          ms since the Unix epoch
+  payload[len]
+  crc   uint16 LE          CRC16/CCITT-FALSE over the PAYLOAD ONLY
+  EOM   uint32 LE 0x83787170
+
+Camera power is ICD_RITA_PIPA_CAMERA_CONTROL (0x2202) with a 5-byte payload
+(see icd_apply_camera_power_action in mcu_fsm.c):
+
+  payload[0]  EO/day camera id, 1-based (1..6), or 7 = all
+  payload[1]  EO action: 1 = ON, 2 = OFF, 0 = no action
+  payload[2]  IR camera id
+  payload[3]  IR NUC mode
+  payload[4]  IR action
+
+Note the 1-based id: FPGA camera N is ICD id N+1.  This tool takes the FPGA
+index (0..5) and converts, so --cam 4 means the tile the panorama calls cam4.
 
 Examples:
   python scripts/eo_cam_power.py --cam 4 --off
   python scripts/eo_cam_power.py --cam 4 --on
-  python scripts/eo_cam_power.py --cam 4 --cycle --off-secs 3
   python scripts/eo_cam_power.py --cam all --on
+  python scripts/eo_cam_power.py --status
 """
 
 import argparse
+import struct
 import sys
 import time
 
@@ -33,22 +50,38 @@ try:
 except ImportError:
     sys.exit("pyserial is required:  python -m pip install pyserial")
 
-SOM = 0x02
-EOM = 0x03
+SOM = 0x70717883
+EOM = 0x83787170
+HEADER_SIZE = 22
+TAIL_SIZE = 6
 
-MSG_CMD = 0x01
-MSG_RESP = 0x02
-MSG_EVT = 0x03
-MSG_LOG = 0x7F
+ICD_RITA_PIPA_MODE_CONTROL = 0x2201
+ICD_RITA_PIPA_CAMERA_CONTROL = 0x2202
+ICD_PIPA_RITA_STATUS = 0x2210
+ICD_PIPA_RITA_MODE_CONTROL_ACK = 0x22A1
+ICD_PIPA_RITA_CAMERA_CONTROL_ACK = 0x22A2
 
-CMD_SET_CAMERA_POWER = 0x17
+# The firmware only acts on camera-power requests once it is out of standby.
+# Basic operation is the mode the operator uses for live panorama.
+ICD_OPERATION_STANDBY = 1
+ICD_OPERATION_TRACKING = 2
+ICD_OPERATION_BASIC = 3
+ICD_OPERATION_MAST = 4
+ICD_OPERATION_MAINTENANCE = 5
 
-NODE_DAY = 0x04  # EO / day cameras -- the six panorama sources
-NODE_IR = 0x05
+ACT_NONE, ACT_ON, ACT_OFF = 0, 1, 2
 
-CAM_ALL = 7  # firmware sentinel meaning "every camera on this node"
+ACK_NAMES = {0: "n/a", 1: "ON ok", 2: "OFF ok", 3: "NUC ok", 4: "FAIL"}
 
-ERR_NAMES = {0: "OK", 1: "FAIL", 2: "BADARG"}
+MSG_NAMES = {
+    0x2202: "RITA_PIPA_CAMERA_CONTROL",
+    0x2210: "PIPA_RITA_STATUS",
+    0x2211: "PIPA_RITA_MAINTENANCE_STATUS",
+    0x2212: "PIPA_RITA_PBIT",
+    0x2213: "PIPA_RITA_CBIT",
+    0x2214: "PIPA_RITA_IBIT",
+    0x22A2: "PIPA_RITA_CAMERA_CONTROL_ACK",
+}
 
 
 def crc16_ccitt_false(data: bytes) -> int:
@@ -60,195 +93,186 @@ def crc16_ccitt_false(data: bytes) -> int:
     return crc
 
 
-def cobs_encode(data: bytes) -> bytes:
-    out = bytearray([0])
-    code_index = 0
-    code = 1
-    for byte in data:
-        if byte == 0:
-            out[code_index] = code
-            code = 1
-            code_index = len(out)
-            out.append(0)
-        else:
-            out.append(byte)
-            code += 1
-            if code == 0xFF:
-                out[code_index] = code
-                code = 1
-                code_index = len(out)
-                out.append(0)
-    out[code_index] = code
-    return bytes(out)
+def build_icd(msg_id: int, seq: int, payload: bytes) -> bytes:
+    frame = bytearray(HEADER_SIZE + len(payload) + TAIL_SIZE)
+    struct.pack_into("<I", frame, 0, SOM)
+    struct.pack_into("<H", frame, 4, msg_id)
+    struct.pack_into("<I", frame, 6, seq)
+    struct.pack_into("<I", frame, 10, len(payload))
+    struct.pack_into("<Q", frame, 14, int(time.time() * 1000))
+    frame[HEADER_SIZE:HEADER_SIZE + len(payload)] = payload
+    off = HEADER_SIZE + len(payload)
+    struct.pack_into("<H", frame, off, crc16_ccitt_false(payload))
+    struct.pack_into("<I", frame, off + 2, EOM)
+    return bytes(frame)
 
 
-def cobs_decode(data: bytes) -> bytes:
-    out = bytearray()
-    i = 0
-    while i < len(data):
-        code = data[i]
-        if code == 0:
-            break
-        i += 1
-        for _ in range(code - 1):
-            if i >= len(data):
-                return bytes(out)
-            out.append(data[i])
-            i += 1
-        if code != 0xFF and i < len(data):
-            out.append(0)
-    return bytes(out)
-
-
-def build_frame(msg_type: int, seq: int, app: bytes) -> bytes:
-    wire_len = len(app) + 2
-    pkt = bytearray()
-    pkt.append(SOM)
-    pkt.append(wire_len & 0xFF)
-    pkt.append((wire_len >> 8) & 0xFF)
-    pkt.append(msg_type)
-    pkt.append(seq & 0xFF)
-    pkt.extend(app)
-    crc = crc16_ccitt_false(bytes(pkt))  # SOM + len(2) + msgid + seq + app
-    pkt.append(crc & 0xFF)
-    pkt.append((crc >> 8) & 0xFF)
-    pkt.append(EOM)
-    return cobs_encode(bytes(pkt)) + b"\x00"
-
-
-def parse_frame(encoded: bytes):
-    """Return (msg_type, seq, app) or None if the frame is not valid."""
-    raw = cobs_decode(encoded)
-    if len(raw) < 8 or raw[0] != SOM or raw[-1] != EOM:
-        return None
-    wire_len = raw[1] | (raw[2] << 8)
-    if wire_len + 6 != len(raw) or wire_len < 2:
-        return None
-    crc_rx = raw[-3] | (raw[-2] << 8)
-    if crc_rx != crc16_ccitt_false(raw[: wire_len + 3]):
-        return None
-    return raw[3], raw[4], bytes(raw[5 : 5 + wire_len - 2])
-
-
-def find_port() -> str:
-    for port in list_ports.comports():
-        if "STLink" in (port.description or "") or "ST-Link" in (port.description or ""):
-            return port.device
-    ports = [p.device for p in list_ports.comports()]
-    sys.exit(f"No ST-Link VCP found. Use --port. Available: {', '.join(ports) or 'none'}")
+def iter_icd(buf: bytearray):
+    """Yield (msg_id, seq, payload) for every complete frame; drop what's used."""
+    while True:
+        idx = buf.find(struct.pack("<I", SOM))
+        if idx < 0:
+            if len(buf) > 4:
+                del buf[:-4]
+            return
+        if idx:
+            del buf[:idx]
+        if len(buf) < HEADER_SIZE:
+            return
+        plen = struct.unpack_from("<I", buf, 10)[0]
+        if plen > 1024:
+            del buf[:4]
+            continue
+        total = HEADER_SIZE + plen + TAIL_SIZE
+        if len(buf) < total:
+            return
+        off = HEADER_SIZE + plen
+        if struct.unpack_from("<I", buf, off + 2)[0] != EOM:
+            del buf[:4]
+            continue
+        msg_id, seq = struct.unpack_from("<H", buf, 4)[0], struct.unpack_from("<I", buf, 6)[0]
+        payload = bytes(buf[HEADER_SIZE:HEADER_SIZE + plen])
+        rx_crc = struct.unpack_from("<H", buf, off)[0]
+        del buf[:total]
+        if rx_crc == crc16_ccitt_false(payload):
+            yield msg_id, seq, payload
 
 
 class Master:
-    def __init__(self, port: str, baud: int = 115200, verbose: bool = False):
-        self.ser = serial.Serial(port, baud, timeout=0.2)
-        self.seq = 0
+    def __init__(self, port, baud=115200, verbose=False):
+        self.ser = serial.Serial(port, baud, timeout=0.1)
+        self.buf = bytearray()
+        self.seq = 1
         self.verbose = verbose
-        self.rx = bytearray()
 
     def close(self):
         self.ser.close()
 
-    def send(self, app: bytes) -> int:
-        self.seq = (self.seq + 1) & 0xFF
-        frame = build_frame(MSG_CMD, self.seq, app)
+    def send(self, msg_id, payload):
+        frame = build_icd(msg_id, self.seq, payload)
+        self.seq += 1
         if self.verbose:
-            print(f"  TX {frame.hex(' ')}")
+            print(f"  TX {MSG_NAMES.get(msg_id, hex(msg_id))} {payload.hex(' ')}")
         self.ser.write(frame)
         self.ser.flush()
-        return self.seq
 
-    def poll(self, seq: int, timeout: float = 1.5):
-        """Collect frames until the RESP matching seq arrives, or timeout."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            chunk = self.ser.read(256)
+    def collect(self, seconds=1.5, want=None):
+        """Read for a while; return the first frame matching want (or all)."""
+        found = None
+        seen = {}
+        end = time.time() + seconds
+        while time.time() < end:
+            chunk = self.ser.read(4096)
             if chunk:
-                self.rx.extend(chunk)
-            while b"\x00" in self.rx:
-                idx = self.rx.index(b"\x00")
-                encoded, self.rx = bytes(self.rx[:idx]), self.rx[idx + 1 :]
-                if not encoded:
-                    continue
-                parsed = parse_frame(encoded)
-                if parsed is None:
-                    if self.verbose:
-                        print(f"  RX (unparsed) {encoded.hex(' ')}")
-                    continue
-                msg_type, rseq, app = parsed
-                if msg_type == MSG_LOG:
-                    if self.verbose:
-                        text = app.decode("utf-8", "replace").rstrip()
-                        print(f"  LOG {text}")
-                    continue
-                if msg_type == MSG_RESP and rseq == seq:
-                    return app
-                if self.verbose:
-                    print(f"  RX type=0x{msg_type:02X} seq={rseq} {app.hex(' ')}")
-        return None
+                self.buf.extend(chunk)
+            for msg_id, seq, payload in iter_icd(self.buf):
+                seen[msg_id] = seen.get(msg_id, 0) + 1
+                if want is not None and msg_id == want and found is None:
+                    found = (msg_id, seq, payload)
+            if found is not None:
+                break
+        if self.verbose:
+            print("  RX " + ", ".join(f"{MSG_NAMES.get(k, hex(k))}x{v}"
+                                      for k, v in sorted(seen.items())))
+        return found, seen
 
-    def set_power(self, node: int, cam: int, on: bool) -> bool:
-        app = bytes([CMD_SET_CAMERA_POWER, node, cam, 1 if on else 0])
-        seq = self.send(app)
-        resp = self.poll(seq)
-        label = "all" if cam == CAM_ALL else str(cam)
-        state = "ON" if on else "OFF"
-        if resp is None:
-            print(f"  cam {label} -> {state}: no response (command may still have applied)")
+    def set_mode(self, mode=ICD_OPERATION_BASIC):
+        """Camera-power requests are ignored until the firmware leaves standby."""
+        self.send(ICD_RITA_PIPA_MODE_CONTROL, bytes([mode]))
+        found, seen = self.collect(2.0, want=ICD_PIPA_RITA_MODE_CONTROL_ACK)
+        if found is None:
+            print(f"  mode {mode}: no ACK "
+                  f"(saw {', '.join(MSG_NAMES.get(k, hex(k)) for k in seen) or 'nothing'})")
             return False
-        err = resp[0]
-        ok = len(resp) >= 4 and resp[3] == 1 and err == 0
-        print(f"  cam {label} -> {state}: {ERR_NAMES.get(err, f'0x{err:02X}')}"
-              f"{'' if ok else '  <-- not acknowledged'}")
+        print(f"  mode -> BASIC ({mode}): ACK")
+        return True
+
+    def set_power(self, fpga_index, on, is_ir=False):
+        """fpga_index: 0..5, or 'all'. Converts to the ICD 1-based id."""
+        icd_id = 7 if fpga_index == "all" else fpga_index + 1
+        action = ACT_ON if on else ACT_OFF
+        payload = bytearray(5)
+        if is_ir:
+            payload[2] = icd_id
+            payload[4] = action
+        else:
+            payload[0] = icd_id
+            payload[1] = action
+        self.send(ICD_RITA_PIPA_CAMERA_CONTROL, bytes(payload))
+        found, seen = self.collect(2.0, want=ICD_PIPA_RITA_CAMERA_CONTROL_ACK)
+        label = "all" if fpga_index == "all" else f"cam{fpga_index}"
+        state = "ON" if on else "OFF"
+        if found is None:
+            print(f"  {label} -> {state}: no ACK "
+                  f"(saw {', '.join(MSG_NAMES.get(k, hex(k)) for k in seen) or 'nothing'})")
+            return False
+        ack = found[2]
+        status = ack[11:17] if is_ir else ack[5:11]
+        if fpga_index == "all":
+            detail = " ".join(f"{i}:{ACK_NAMES.get(s, s)}" for i, s in enumerate(status))
+        else:
+            detail = ACK_NAMES.get(status[fpga_index], status[fpga_index])
+        ok = (status[0 if fpga_index == "all" else fpga_index]
+              in (1, 2)) if len(status) == 6 else False
+        print(f"  {label} -> {state}: {detail}")
         return ok
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="EO/IR camera power control via the STM32 master")
-    ap.add_argument("--port", help="serial port (default: auto-detect ST-Link VCP)")
+def find_port():
+    for p in list_ports.comports():
+        if "USB Serial Port" in (p.description or ""):
+            return p.device
+    ports = [p.device for p in list_ports.comports()]
+    sys.exit(f"No USB serial port found. Use --port. Available: {', '.join(ports)}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="EO/IR camera power over the ICD link")
+    ap.add_argument("--port", help="serial port (default: auto-detect FTDI)")
     ap.add_argument("--baud", type=int, default=115200)
-    ap.add_argument("--node", choices=["day", "ir"], default="day",
-                    help="day = EO panorama cameras (default)")
-    ap.add_argument("--cam", default="4",
-                    help="camera index 0-5, or 'all'")
-    action = ap.add_mutually_exclusive_group(required=True)
-    action.add_argument("--on", action="store_true")
-    action.add_argument("--off", action="store_true")
-    action.add_argument("--cycle", action="store_true",
-                        help="power off, wait --off-secs, power back on")
-    ap.add_argument("--off-secs", type=float, default=3.0,
-                    help="seconds to stay off during --cycle (default 3)")
-    ap.add_argument("--settle", type=float, default=0.0,
-                    help="seconds to wait after the final command before exiting")
+    ap.add_argument("--ir", action="store_true", help="target IR instead of EO/day")
+    ap.add_argument("--cam", default="4", help="FPGA camera index 0-5, or 'all'")
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--on", action="store_true")
+    g.add_argument("--off", action="store_true")
+    g.add_argument("--cycle", action="store_true", help="off, wait, on")
+    g.add_argument("--status", action="store_true", help="just listen and report frames")
+    g.add_argument("--mode-only", action="store_true",
+                   help="only send MODE_CONTROL(BASIC), touch no camera")
+    ap.add_argument("--off-secs", type=float, default=4.0)
+    ap.add_argument("--no-mode", action="store_true",
+                    help="skip the MODE_CONTROL(BASIC) preamble")
     ap.add_argument("-v", "--verbose", action="store_true")
-    args = ap.parse_args()
+    a = ap.parse_args()
 
-    node = NODE_DAY if args.node == "day" else NODE_IR
-    if args.cam.lower() == "all":
-        cam = CAM_ALL
-    else:
-        cam = int(args.cam)
-        if not 0 <= cam <= 5:
-            sys.exit("--cam must be 0-5 or 'all'")
+    cam = "all" if a.cam.lower() == "all" else int(a.cam)
+    if cam != "all" and not 0 <= cam <= 5:
+        sys.exit("--cam must be 0-5 or 'all'")
 
-    port = args.port or find_port()
-    print(f"port {port} @ {args.baud}  node={args.node}  cam={args.cam}")
-
-    master = Master(port, args.baud, args.verbose)
+    port = a.port or find_port()
+    m = Master(port, a.baud, a.verbose)
+    print(f"port {port} @ {a.baud}  {'IR' if a.ir else 'EO'}  cam={a.cam}")
     try:
-        if args.cycle:
-            print(f"[{time.strftime('%H:%M:%S')}] powering OFF")
-            master.set_power(node, cam, False)
-            time.sleep(args.off_secs)
-            print(f"[{time.strftime('%H:%M:%S')}] powering ON")
-            master.set_power(node, cam, True)
+        if a.status:
+            _, seen = m.collect(2.5)
+            print("  frames seen: " + (", ".join(f"{MSG_NAMES.get(k, hex(k))} x{v}"
+                                                 for k, v in sorted(seen.items())) or "none"))
+            return 0
+        if not a.no_mode:
+            m.set_mode(ICD_OPERATION_BASIC)
+        if a.mode_only:
+            return 0
+        if a.cycle:
+            print(f"[{time.strftime('%H:%M:%S')}] OFF")
+            m.set_power(cam, False, a.ir)
+            time.sleep(a.off_secs)
+            print(f"[{time.strftime('%H:%M:%S')}] ON")
+            m.set_power(cam, True, a.ir)
         else:
-            on = bool(args.on)
-            print(f"[{time.strftime('%H:%M:%S')}] powering {'ON' if on else 'OFF'}")
-            master.set_power(node, cam, on)
-        if args.settle:
-            time.sleep(args.settle)
+            print(f"[{time.strftime('%H:%M:%S')}] {'ON' if a.on else 'OFF'}")
+            m.set_power(cam, bool(a.on), a.ir)
     finally:
-        master.close()
+        m.close()
     return 0
 
 

@@ -53,9 +53,20 @@ set synth_run [get_runs synth_1]
 set_property AUTO_INCREMENTAL_CHECKPOINT 0 $synth_run
 set_property INCREMENTAL_CHECKPOINT "" $synth_run
 
-reset_run synth_1
-launch_runs synth_1 -jobs 12
-wait_on_run synth_1
+# Second argument "reuse-synth" re-implements from the existing synthesis
+# checkpoint.  Only valid when the RTL has not changed since that checkpoint --
+# use it to retry placement after a MIG-internal skew failure, never after a
+# source edit.
+set reuse_synth 0
+if {[llength $argv] > 1 && [lindex $argv 1] eq "reuse-synth"} { set reuse_synth 1 }
+
+if {$reuse_synth} {
+    puts "reusing existing synth_1 checkpoint (RTL assumed unchanged)"
+} else {
+    reset_run synth_1
+    launch_runs synth_1 -jobs 12
+    wait_on_run synth_1
+}
 set synth_status [get_property STATUS [get_runs synth_1]]
 puts "synth_1 status: $synth_status"
 if {![string match "*Complete*" $synth_status]} {
@@ -124,10 +135,26 @@ foreach xdc_file $xdc_files {
 }
 link_design -top $top -part $part
 
+# Placement directive, overridable from the command line:
+#   vivado ... -source scripts/impl_v19_full_rebuild.tcl -tclargs <place_directive>
+# The DDR4 PHY carries MIG-internal Min Skew checks between RXTX_BITSLICE pins
+# that are sensitive to how the rest of the design places around them.  An
+# unrelated logic edit can push one of those negative (seen 2026-08-02:
+# WPWS -0.269 on xiphy_rxtx_bitslice/D[2] with setup and hold both clean), and
+# re-running an identical build is pointless because Vivado is deterministic.
+# Changing the directive re-places the design without touching logic.
+set place_directive "Default"
+if {[llength $argv] > 0} { set place_directive [lindex $argv 0] }
+puts "place_design directive: $place_directive"
+
 opt_design
 write_checkpoint -force $opt_dcp
 
-place_design
+if {$place_directive eq "Default"} {
+    place_design
+} else {
+    place_design -directive $place_directive
+}
 write_checkpoint -force $placed_dcp
 
 phys_opt_design

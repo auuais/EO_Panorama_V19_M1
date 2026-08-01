@@ -83,12 +83,22 @@ def main():
     # whatever the capture device actually delivered.
     pano_h = int(round(h * 960 / 1080))
     tw, th = w // 3, pano_h // 2
+    # Per-tile liveness matters as much as the colour: a whole-frame delta
+    # cannot tell "tile4 frozen on its last good image" from "tile4 updating".
     print("tiles (3x2 over the top-aligned panorama region):")
     for row in range(2):
         for cIdx in range(3):
-            t = last[row * th:(row + 1) * th, cIdx * tw:(cIdx + 1) * tw]
+            y0, y1 = row * th, (row + 1) * th
+            x0, x1 = cIdx * tw, (cIdx + 1) * tw
+            t = last[y0:y1, x0:x1]
             verdict, y, std = classify(t)
-            print(f"  tile{row * 3 + cIdx}: {verdict:<8} mean_y={y:6.2f} std={std:6.2f}")
+            tdiffs = [float(np.abs(a[y0:y1, x0:x1].astype(np.int16) -
+                                   b[y0:y1, x0:x1].astype(np.int16)).mean())
+                      for a, b in zip(frames, frames[1:])]
+            moving = sum(1 for d in tdiffs if d > 0.5)
+            live = "LIVE  " if moving >= max(1, len(tdiffs) // 4) else "FROZEN"
+            print(f"  tile{row * 3 + cIdx}: {verdict:<8} {live} "
+                  f"mean_y={y:6.2f} std={std:6.2f} moved={moving}/{len(tdiffs)}")
 
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
