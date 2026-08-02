@@ -1,5 +1,11 @@
 # V19 panorama: a camera that is powered back on never rejoins
 
+> **SUPERSEDED by `PLAN_V19_REJOIN_FIX_20260802.md`** for root cause and fix
+> plan. In particular, §3's "token loss disproved" claim is **retracted** —
+> the re-seed experiment was confounded by a boot-time double-seed in its own
+> logic (see the plan, §2). Sections 5–7 below (test harness, ICD protocol,
+> build traps) remain current.
+
 **Status 2026-08-02.** Reproducible, isolated, instrumented, **not fixed**.
 Everything below was measured on hardware, not inferred.
 
