@@ -104,6 +104,8 @@ def ila(label):
         print(d.stdout)
         f = run([sys.executable, "scripts/v19_decode_frameset.py", csv])
         print(f.stdout or f.stderr)
+        j = run([sys.executable, "scripts/v19_decode_rejoin.py", csv])
+        print(j.stdout or j.stderr)
     # hd_clk domain too -- trigger liveness, which free-running windows miss
     run([VIVADO, "-mode", "batch", "-nojournal", "-nolog",
          "-source", "scripts/probe_ui_alive.tcl", "-tclargs", "10"])
@@ -179,8 +181,12 @@ def main():
             results[f"cycle{cycle}_on"] = on
 
             # Rejoin means every tile is MOVING again, including the one that
-            # was powered down.  Colour alone is not enough.
-            if on["live"] and all(on["moving"].get(i) for i in range(6)):
+            # was powered down.  Colour alone is not enough -- but neither is
+            # the whole-frame delta: it averages over the black margin and a
+            # mostly-static scene falls under the threshold while every tile is
+            # individually moving, which reported a false failure.  Per-tile
+            # liveness is the measure that actually answers the question.
+            if all(on["moving"].get(i) for i in range(6)):
                 log(f"  cycle {cycle}: rejoin OK (all six tiles moving)")
                 continue
 

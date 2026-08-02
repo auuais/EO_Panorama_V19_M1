@@ -813,6 +813,58 @@ module PanoramaBase_DdrBlackFrame(
     wire [15:0] v19_cap3_desc_epoch, v19_cap4_desc_epoch, v19_cap5_desc_epoch;
     wire [5:0]  v19_free_valid;
     wire [5:0]  v19_free_ready;
+
+    // Rejoin supervisor plumbing.  See src/EoV19CamRejoin.v for why a camera
+    // power cycle needs every one of these re-baselined together.
+    wire [5:0]  v19_join_enable;
+    wire [5:0]  v19_cap_fifo_rst;
+    wire [5:0]  v19_free_fifo_rst;
+    wire [5:0]  v19_cam_alive_tgl;
+    wire [5:0]  v19_rejoin_busy;
+    wire [5:0]  v19_forfeit_req;
+    wire [5:0]  v19_forfeit_ack;
+    wire [5:0]  v19_rejoin_shed;
+    wire        v19_release_timeout_seen;
+    wire [15:0] v19_dbg_writer0, v19_dbg_writer1, v19_dbg_writer2;
+    wire [15:0] v19_dbg_writer3, v19_dbg_writer4, v19_dbg_writer5;
+    wire [3:0]  v19_rejoin_state0, v19_rejoin_state1, v19_rejoin_state2;
+    wire [3:0]  v19_rejoin_state3, v19_rejoin_state4, v19_rejoin_state5;
+
+    // Which camera's writer/rejoin detail lands on the ILA.  One camera at a
+    // time keeps the probe at its existing 32-bit width; set to whichever
+    // camera is being power-cycled in the test.
+    localparam integer V19_DBG_CAM = 4;
+    wire [15:0] v19_dbg_writer_sel =
+        (V19_DBG_CAM == 0) ? v19_dbg_writer0 :
+        (V19_DBG_CAM == 1) ? v19_dbg_writer1 :
+        (V19_DBG_CAM == 2) ? v19_dbg_writer2 :
+        (V19_DBG_CAM == 3) ? v19_dbg_writer3 :
+        (V19_DBG_CAM == 4) ? v19_dbg_writer4 : v19_dbg_writer5;
+    wire [3:0] v19_dbg_rejoin_state =
+        (V19_DBG_CAM == 0) ? v19_rejoin_state0 :
+        (V19_DBG_CAM == 1) ? v19_rejoin_state1 :
+        (V19_DBG_CAM == 2) ? v19_rejoin_state2 :
+        (V19_DBG_CAM == 3) ? v19_rejoin_state3 :
+        (V19_DBG_CAM == 4) ? v19_rejoin_state4 : v19_rejoin_state5;
+
+    // Shared 1 ms strobe for the six supervisors: their timeouts are in
+    // milliseconds, so a common prescaler keeps each one's counter to 12 bits
+    // instead of six 29-bit counters on ui_clk.
+    localparam integer MS_DIVIDE = 233400;   // 1 ms at the 233.4 MHz MIG ui_clk
+    reg [17:0] v19_ms_div;
+    reg        v19_tick_ms;
+    always @(posedge c0_ddr4_ui_clk) begin
+        if (ui_rst) begin
+            v19_ms_div  <= 18'd0;
+            v19_tick_ms <= 1'b0;
+        end else if (v19_ms_div >= MS_DIVIDE[17:0] - 18'd1) begin
+            v19_ms_div  <= 18'd0;
+            v19_tick_ms <= 1'b1;
+        end else begin
+            v19_ms_div  <= v19_ms_div + 18'd1;
+            v19_tick_ms <= 1'b0;
+        end
+    end
     wire [1:0]  v19_free_bank0, v19_free_bank1, v19_free_bank2;
     wire [1:0]  v19_free_bank3, v19_free_bank4, v19_free_bank5;
     wire        v19_frameset_lease_valid;
@@ -835,6 +887,18 @@ module PanoramaBase_DdrBlackFrame(
     wire [10:0] v19_cap3_row, v19_cap4_row, v19_cap5_row;
     reg  [11:0] v19_cap0_peak, v19_cap1_peak, v19_cap2_peak;
     reg  [11:0] v19_cap3_peak, v19_cap4_peak, v19_cap5_peak;
+    // A capture FIFO is only a candidate for the write arbiter when it holds
+    // data AND is not mid-reset.  Popping a FIFO whose pointers the rejoin
+    // supervisor is re-initialising would hand the DDR write engine a garbage
+    // address, and a phantom marker would corrupt the frame-set manager's
+    // ownership ring.
+    wire v19_cap0_selectable = !v19_cap0_empty && !v19_rejoin_busy[0];
+    wire v19_cap1_selectable = !v19_cap1_empty && !v19_rejoin_busy[1];
+    wire v19_cap2_selectable = !v19_cap2_empty && !v19_rejoin_busy[2];
+    wire v19_cap3_selectable = !v19_cap3_empty && !v19_rejoin_busy[3];
+    wire v19_cap4_selectable = !v19_cap4_empty && !v19_rejoin_busy[4];
+    wire v19_cap5_selectable = !v19_cap5_empty && !v19_rejoin_busy[5];
+
     reg  [2:0]  v19_cap_rr;
     reg         v19_cap_sel_valid;
     reg  [2:0]  v19_cap_sel;
@@ -872,52 +936,52 @@ module PanoramaBase_DdrBlackFrame(
         v19_cap_sel_marker = 1'b0;
         case (v19_cap_rr)
             3'd0: begin
-                if (!v19_cap0_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
-                else if (!v19_cap1_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
-                else if (!v19_cap2_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
-                else if (!v19_cap3_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
-                else if (!v19_cap4_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
-                else if (!v19_cap5_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
+                if (v19_cap0_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
+                else if (v19_cap1_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
+                else if (v19_cap2_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
+                else if (v19_cap3_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
+                else if (v19_cap4_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
+                else if (v19_cap5_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
             end
             3'd1: begin
-                if (!v19_cap1_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
-                else if (!v19_cap2_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
-                else if (!v19_cap3_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
-                else if (!v19_cap4_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
-                else if (!v19_cap5_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
-                else if (!v19_cap0_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
+                if (v19_cap1_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
+                else if (v19_cap2_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
+                else if (v19_cap3_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
+                else if (v19_cap4_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
+                else if (v19_cap5_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
+                else if (v19_cap0_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
             end
             3'd2: begin
-                if (!v19_cap2_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
-                else if (!v19_cap3_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
-                else if (!v19_cap4_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
-                else if (!v19_cap5_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
-                else if (!v19_cap0_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
-                else if (!v19_cap1_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
+                if (v19_cap2_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
+                else if (v19_cap3_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
+                else if (v19_cap4_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
+                else if (v19_cap5_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
+                else if (v19_cap0_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
+                else if (v19_cap1_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
             end
             3'd3: begin
-                if (!v19_cap3_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
-                else if (!v19_cap4_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
-                else if (!v19_cap5_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
-                else if (!v19_cap0_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
-                else if (!v19_cap1_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
-                else if (!v19_cap2_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
+                if (v19_cap3_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
+                else if (v19_cap4_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
+                else if (v19_cap5_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
+                else if (v19_cap0_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
+                else if (v19_cap1_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
+                else if (v19_cap2_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
             end
             3'd4: begin
-                if (!v19_cap4_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
-                else if (!v19_cap5_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
-                else if (!v19_cap0_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
-                else if (!v19_cap1_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
-                else if (!v19_cap2_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
-                else if (!v19_cap3_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
+                if (v19_cap4_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
+                else if (v19_cap5_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
+                else if (v19_cap0_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
+                else if (v19_cap1_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
+                else if (v19_cap2_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
+                else if (v19_cap3_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
             end
             default: begin
-                if (!v19_cap5_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
-                else if (!v19_cap0_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
-                else if (!v19_cap1_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
-                else if (!v19_cap2_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
-                else if (!v19_cap3_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
-                else if (!v19_cap4_empty) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
+                if (v19_cap5_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
+                else if (v19_cap0_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
+                else if (v19_cap1_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
+                else if (v19_cap2_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
+                else if (v19_cap3_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
+                else if (v19_cap4_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
             end
         endcase
         if (v19_cap_sel_valid) begin
@@ -1170,6 +1234,11 @@ module PanoramaBase_DdrBlackFrame(
 
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 0))) u_v19_cap0 (
             .rst_n(rst_n), .capture_enable(running),
+            .join_enable(v19_join_enable[0]),
+            .cap_fifo_rst_req(v19_cap_fifo_rst[0]),
+            .free_fifo_rst_req(v19_free_fifo_rst[0]),
+            .cam_alive_tgl(v19_cam_alive_tgl[0]),
+            .rejoin_busy_ui(v19_rejoin_busy[0]),
             .global_epoch_gray_ui(v19_global_epoch_gray),
             .cam_clk(eo0_wr_clk), .cam_hsync(eo0_wr_hsync), .cam_vsync(eo0_wr_vsync), .cam_pixel(eo0_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap0_pop), .fifo_empty(v19_cap0_empty),
@@ -1179,9 +1248,15 @@ module PanoramaBase_DdrBlackFrame(
             .free_bank_ready_ui(v19_free_ready[0]),
             .desc_valid_ui(v19_cap_desc_valid[0]), .desc_bank_ui(v19_cap0_desc_bank),
             .desc_epoch_ui(v19_cap0_desc_epoch), .fifo_overflow_seen_ui(v19_cap0_overflow),
-            .fifo_level_ui(v19_cap0_level), .dbg_row_ui(v19_cap0_row));
+            .fifo_level_ui(v19_cap0_level), .dbg_row_ui(v19_cap0_row),
+            .dbg_writer_ui(v19_dbg_writer0));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 1))) u_v19_cap1 (
             .rst_n(rst_n), .capture_enable(running),
+            .join_enable(v19_join_enable[1]),
+            .cap_fifo_rst_req(v19_cap_fifo_rst[1]),
+            .free_fifo_rst_req(v19_free_fifo_rst[1]),
+            .cam_alive_tgl(v19_cam_alive_tgl[1]),
+            .rejoin_busy_ui(v19_rejoin_busy[1]),
             .global_epoch_gray_ui(v19_global_epoch_gray),
             .cam_clk(eo1_wr_clk), .cam_hsync(eo1_wr_hsync), .cam_vsync(eo1_wr_vsync), .cam_pixel(eo1_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap1_pop), .fifo_empty(v19_cap1_empty),
@@ -1191,9 +1266,15 @@ module PanoramaBase_DdrBlackFrame(
             .free_bank_ready_ui(v19_free_ready[1]),
             .desc_valid_ui(v19_cap_desc_valid[1]), .desc_bank_ui(v19_cap1_desc_bank),
             .desc_epoch_ui(v19_cap1_desc_epoch), .fifo_overflow_seen_ui(v19_cap1_overflow),
-            .fifo_level_ui(v19_cap1_level), .dbg_row_ui(v19_cap1_row));
+            .fifo_level_ui(v19_cap1_level), .dbg_row_ui(v19_cap1_row),
+            .dbg_writer_ui(v19_dbg_writer1));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 2))) u_v19_cap2 (
             .rst_n(rst_n), .capture_enable(running),
+            .join_enable(v19_join_enable[2]),
+            .cap_fifo_rst_req(v19_cap_fifo_rst[2]),
+            .free_fifo_rst_req(v19_free_fifo_rst[2]),
+            .cam_alive_tgl(v19_cam_alive_tgl[2]),
+            .rejoin_busy_ui(v19_rejoin_busy[2]),
             .global_epoch_gray_ui(v19_global_epoch_gray),
             .cam_clk(eo2_wr_clk), .cam_hsync(eo2_wr_hsync), .cam_vsync(eo2_wr_vsync), .cam_pixel(eo2_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap2_pop), .fifo_empty(v19_cap2_empty),
@@ -1203,9 +1284,15 @@ module PanoramaBase_DdrBlackFrame(
             .free_bank_ready_ui(v19_free_ready[2]),
             .desc_valid_ui(v19_cap_desc_valid[2]), .desc_bank_ui(v19_cap2_desc_bank),
             .desc_epoch_ui(v19_cap2_desc_epoch), .fifo_overflow_seen_ui(v19_cap2_overflow),
-            .fifo_level_ui(v19_cap2_level), .dbg_row_ui(v19_cap2_row));
+            .fifo_level_ui(v19_cap2_level), .dbg_row_ui(v19_cap2_row),
+            .dbg_writer_ui(v19_dbg_writer2));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 3))) u_v19_cap3 (
             .rst_n(rst_n), .capture_enable(running),
+            .join_enable(v19_join_enable[3]),
+            .cap_fifo_rst_req(v19_cap_fifo_rst[3]),
+            .free_fifo_rst_req(v19_free_fifo_rst[3]),
+            .cam_alive_tgl(v19_cam_alive_tgl[3]),
+            .rejoin_busy_ui(v19_rejoin_busy[3]),
             .global_epoch_gray_ui(v19_global_epoch_gray),
             .cam_clk(eo3_wr_clk), .cam_hsync(eo3_wr_hsync), .cam_vsync(eo3_wr_vsync), .cam_pixel(eo3_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap3_pop), .fifo_empty(v19_cap3_empty),
@@ -1215,9 +1302,15 @@ module PanoramaBase_DdrBlackFrame(
             .free_bank_ready_ui(v19_free_ready[3]),
             .desc_valid_ui(v19_cap_desc_valid[3]), .desc_bank_ui(v19_cap3_desc_bank),
             .desc_epoch_ui(v19_cap3_desc_epoch), .fifo_overflow_seen_ui(v19_cap3_overflow),
-            .fifo_level_ui(v19_cap3_level), .dbg_row_ui(v19_cap3_row));
+            .fifo_level_ui(v19_cap3_level), .dbg_row_ui(v19_cap3_row),
+            .dbg_writer_ui(v19_dbg_writer3));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 4))) u_v19_cap4 (
             .rst_n(rst_n), .capture_enable(running),
+            .join_enable(v19_join_enable[4]),
+            .cap_fifo_rst_req(v19_cap_fifo_rst[4]),
+            .free_fifo_rst_req(v19_free_fifo_rst[4]),
+            .cam_alive_tgl(v19_cam_alive_tgl[4]),
+            .rejoin_busy_ui(v19_rejoin_busy[4]),
             .global_epoch_gray_ui(v19_global_epoch_gray),
             .cam_clk(eo4_wr_clk), .cam_hsync(eo4_wr_hsync), .cam_vsync(eo4_wr_vsync), .cam_pixel(eo4_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap4_pop), .fifo_empty(v19_cap4_empty),
@@ -1227,9 +1320,15 @@ module PanoramaBase_DdrBlackFrame(
             .free_bank_ready_ui(v19_free_ready[4]),
             .desc_valid_ui(v19_cap_desc_valid[4]), .desc_bank_ui(v19_cap4_desc_bank),
             .desc_epoch_ui(v19_cap4_desc_epoch), .fifo_overflow_seen_ui(v19_cap4_overflow),
-            .fifo_level_ui(v19_cap4_level), .dbg_row_ui(v19_cap4_row));
+            .fifo_level_ui(v19_cap4_level), .dbg_row_ui(v19_cap4_row),
+            .dbg_writer_ui(v19_dbg_writer4));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 5))) u_v19_cap5 (
             .rst_n(rst_n), .capture_enable(running),
+            .join_enable(v19_join_enable[5]),
+            .cap_fifo_rst_req(v19_cap_fifo_rst[5]),
+            .free_fifo_rst_req(v19_free_fifo_rst[5]),
+            .cam_alive_tgl(v19_cam_alive_tgl[5]),
+            .rejoin_busy_ui(v19_rejoin_busy[5]),
             .global_epoch_gray_ui(v19_global_epoch_gray),
             .cam_clk(eo5_wr_clk), .cam_hsync(eo5_wr_hsync), .cam_vsync(eo5_wr_vsync), .cam_pixel(eo5_wr_pixel),
             .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(v19_cap5_pop), .fifo_empty(v19_cap5_empty),
@@ -1239,7 +1338,8 @@ module PanoramaBase_DdrBlackFrame(
             .free_bank_ready_ui(v19_free_ready[5]),
             .desc_valid_ui(v19_cap_desc_valid[5]), .desc_bank_ui(v19_cap5_desc_bank),
             .desc_epoch_ui(v19_cap5_desc_epoch), .fifo_overflow_seen_ui(v19_cap5_overflow),
-            .fifo_level_ui(v19_cap5_level), .dbg_row_ui(v19_cap5_row));
+            .fifo_level_ui(v19_cap5_level), .dbg_row_ui(v19_cap5_row),
+            .dbg_writer_ui(v19_dbg_writer5));
 
         // Per-camera liveness.  Every frame-set / row-window decision below
         // used to be an unconditional six-way AND, so one dead camera stopped
@@ -1260,6 +1360,48 @@ module PanoramaBase_DdrBlackFrame(
             .activity(v19_cap4_row), .activity_pulse(v19_cap_desc_valid[4]), .present(v19_cam_present[4]));
         EoV19CamPresence u_v19_pres5 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
             .activity(v19_cap5_row), .activity_pulse(v19_cap_desc_valid[5]), .present(v19_cam_present[5]));
+
+        // Rejoin supervisors.  Presence decides whether a camera participates
+        // in the frame set; these decide when a camera's whole clock domain
+        // has to be re-baselined because its power was cycled.  They are
+        // deliberately separate: presence is a fast, purely observational
+        // shed, while this is a slow, stateful recovery protocol.
+        EoV19CamRejoin u_v19_rejoin0 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
+            .cam_alive_tgl(v19_cam_alive_tgl[0]), .desc_valid(v19_cap_desc_valid[0]),
+            .rejoin_busy(v19_rejoin_busy[0]), .forfeit_ack(v19_forfeit_ack[0]),
+            .join_enable(v19_join_enable[0]), .cap_fifo_rst_req(v19_cap_fifo_rst[0]),
+            .free_fifo_rst_req(v19_free_fifo_rst[0]), .forfeit_req(v19_forfeit_req[0]),
+            .dbg_state(v19_rejoin_state0), .shed_sticky(v19_rejoin_shed[0]));
+        EoV19CamRejoin u_v19_rejoin1 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
+            .cam_alive_tgl(v19_cam_alive_tgl[1]), .desc_valid(v19_cap_desc_valid[1]),
+            .rejoin_busy(v19_rejoin_busy[1]), .forfeit_ack(v19_forfeit_ack[1]),
+            .join_enable(v19_join_enable[1]), .cap_fifo_rst_req(v19_cap_fifo_rst[1]),
+            .free_fifo_rst_req(v19_free_fifo_rst[1]), .forfeit_req(v19_forfeit_req[1]),
+            .dbg_state(v19_rejoin_state1), .shed_sticky(v19_rejoin_shed[1]));
+        EoV19CamRejoin u_v19_rejoin2 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
+            .cam_alive_tgl(v19_cam_alive_tgl[2]), .desc_valid(v19_cap_desc_valid[2]),
+            .rejoin_busy(v19_rejoin_busy[2]), .forfeit_ack(v19_forfeit_ack[2]),
+            .join_enable(v19_join_enable[2]), .cap_fifo_rst_req(v19_cap_fifo_rst[2]),
+            .free_fifo_rst_req(v19_free_fifo_rst[2]), .forfeit_req(v19_forfeit_req[2]),
+            .dbg_state(v19_rejoin_state2), .shed_sticky(v19_rejoin_shed[2]));
+        EoV19CamRejoin u_v19_rejoin3 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
+            .cam_alive_tgl(v19_cam_alive_tgl[3]), .desc_valid(v19_cap_desc_valid[3]),
+            .rejoin_busy(v19_rejoin_busy[3]), .forfeit_ack(v19_forfeit_ack[3]),
+            .join_enable(v19_join_enable[3]), .cap_fifo_rst_req(v19_cap_fifo_rst[3]),
+            .free_fifo_rst_req(v19_free_fifo_rst[3]), .forfeit_req(v19_forfeit_req[3]),
+            .dbg_state(v19_rejoin_state3), .shed_sticky(v19_rejoin_shed[3]));
+        EoV19CamRejoin u_v19_rejoin4 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
+            .cam_alive_tgl(v19_cam_alive_tgl[4]), .desc_valid(v19_cap_desc_valid[4]),
+            .rejoin_busy(v19_rejoin_busy[4]), .forfeit_ack(v19_forfeit_ack[4]),
+            .join_enable(v19_join_enable[4]), .cap_fifo_rst_req(v19_cap_fifo_rst[4]),
+            .free_fifo_rst_req(v19_free_fifo_rst[4]), .forfeit_req(v19_forfeit_req[4]),
+            .dbg_state(v19_rejoin_state4), .shed_sticky(v19_rejoin_shed[4]));
+        EoV19CamRejoin u_v19_rejoin5 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
+            .cam_alive_tgl(v19_cam_alive_tgl[5]), .desc_valid(v19_cap_desc_valid[5]),
+            .rejoin_busy(v19_rejoin_busy[5]), .forfeit_ack(v19_forfeit_ack[5]),
+            .join_enable(v19_join_enable[5]), .cap_fifo_rst_req(v19_cap_fifo_rst[5]),
+            .free_fifo_rst_req(v19_free_fifo_rst[5]), .forfeit_req(v19_forfeit_req[5]),
+            .dbg_state(v19_rejoin_state5), .shed_sticky(v19_rejoin_shed[5]));
 
         EoV19FrameSetManager u_v19_frameset (
             .cam_present(v19_cam_present),
@@ -1282,6 +1424,8 @@ module PanoramaBase_DdrBlackFrame(
             .lease_bank0(v19_frameset_bank0), .lease_bank1(v19_frameset_bank1),
             .lease_bank2(v19_frameset_bank2), .lease_bank3(v19_frameset_bank3),
             .lease_bank4(v19_frameset_bank4), .lease_bank5(v19_frameset_bank5),
+            .forfeit_req(v19_forfeit_req), .forfeit_ack(v19_forfeit_ack),
+            .release_timeout_seen(v19_release_timeout_seen),
             .descriptor_collision_seen(v19_descriptor_collision_seen),
             .rings_full_no_common_seen(v19_no_common_epoch_seen),
             .descriptor_valid_map(v19_descriptor_valid_map),
@@ -2744,7 +2888,26 @@ module PanoramaBase_DdrBlackFrame(
         .probe8  (read_retiring),
         .probe9  (rd_addr[15:0]),
         .probe10 (c0_ddr4_app_rd_data_valid),
-        .probe11 ({c0_ddr4_app_rd_data[DDR_APP_DATA_W-1 -: 16], c0_ddr4_app_rd_data[15:0]}),
+        // Rejoin diagnostics.  This slot carried raw DDR read data, which has
+        // served its purpose; the open question is what a returning camera's
+        // writer is doing, and none of it was observable.  Width unchanged so
+        // the ILA IP is not regenerated.
+        //   [31:28] 4'hB signature
+        //   [27:24] rejoin FSM state of the camera under test
+        //   [23:8]  that camera's dbg_writer_ui:
+        //           [23] have_bank      [22] drop_frame
+        //           [21] free_bank_empty[20] free_bank_rd_rst_busy
+        //           [19] fifo_prog_full [18] fifo_full
+        //           [17] frame_epoch_available [16] fifo_overflow_seen
+        //           [15:8] fifo_level[11:4]
+        //   [7:2]   rejoin_busy per camera
+        //   [1]     release_timeout_seen  [0] any rejoin shed sticky
+        .probe11 ((SRC_SEL == SRC_V19)
+                  ? {4'hB, v19_dbg_rejoin_state, v19_dbg_writer_sel,
+                     v19_rejoin_busy, v19_release_timeout_seen,
+                     (|v19_rejoin_shed)}
+                  : {c0_ddr4_app_rd_data[DDR_APP_DATA_W-1 -: 16],
+                     c0_ddr4_app_rd_data[15:0]}),
         .probe12 (outstanding),
         .probe13 ({beat_fifo_wr_en, beat_fifo_rd_en, beat_fifo_empty, beat_fifo_full}),
         .probe14 ({beat_fifo_dout[DDR_APP_DATA_W-1 -: 16], beat_fifo_dout[15:0]}),

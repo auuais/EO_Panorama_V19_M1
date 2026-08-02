@@ -19,6 +19,26 @@ module EoV19DdrCamWriter #(
 ) (
     input  wire        rst_n,
     input  wire        capture_enable,
+    // Per-camera enable from the rejoin supervisor (ui_clk level).  Dropping
+    // it clears every cam_clk register in this writer through the existing
+    // capture_enable reset branches -- the only reset that can reach this
+    // domain, since rst_n is global and never pulsed in operation.  Taking it
+    // low requires cam_clk to be running to have any effect; the supervisor
+    // guarantees that.
+    input  wire        join_enable,
+    // Reset requests for the two CDC FIFOs, driven by the supervisor while
+    // the camera clock is known good.  An XPM async FIFO cannot complete a
+    // reset unless BOTH clocks toggle, which is why these cannot simply be
+    // asserted while the camera is dark.
+    input  wire        cap_fifo_rst_req,
+    input  wire        free_fifo_rst_req,
+    // Free-running toggle in cam_clk: the supervisor's clock-alive detector.
+    // Deliberately independent of raster, bank ownership and capture_enable,
+    // so it reports "this camera has a clock" and nothing else.
+    output reg         cam_alive_tgl,
+    // High while either FIFO is resetting.  Combined and synchronised to
+    // ui_clk so the supervisor can sequence the reset handshake.
+    output wire        rejoin_busy_ui,
     // Gray-coded global content-frame epoch, counted in ui_clk.  See the
     // epoch block below for why this is not counted per camera any more.
     input  wire [EPOCH_W-1:0] global_epoch_gray_ui,
@@ -43,7 +63,10 @@ module EoV19DdrCamWriter #(
     output reg  [EPOCH_W-1:0] desc_epoch_ui,
     output reg         fifo_overflow_seen_ui,
     output wire [11:0] fifo_level_ui,
-    output wire [10:0] dbg_row_ui
+    output wire [10:0] dbg_row_ui,
+    // Writer-state telemetry, already synchronised into ui_clk.  Bit map in
+    // docs/PLAN_V19_REJOIN_FIX_20260802.md section 6.
+    output wire [15:0] dbg_writer_ui
 );
     // Only the 256 useful pixel bits plus address/marker metadata cross the
     // camera CDC.  The 126-bit DDR guard region is reconstructed at the FIFO
@@ -167,19 +190,52 @@ module EoV19DdrCamWriter #(
         end
     endfunction
 
+    // Containment bound for the payload writes: the address of the beat about
+    // to be queued must lie inside the bank this writer actually owns.
+    wire [28:0] wr_bank_lo = bank_base_addr(wr_bank);
+    wire        beat_in_bank = (beat_addr >= wr_bank_lo) &&
+                               (beat_addr < (wr_bank_lo + FRAME_STRIDE_ADDR));
+
     // The cameras can be streaming for hundreds of milliseconds while the
     // MIG is still calibrating.  Do not fill the bounded CDC FIFO during that
     // interval: otherwise the first DDR-visible entries are stale fragments
     // and the overflow alarm is guaranteed to latch before the backend can
     // service one beat.  Release capture through a normal two-flop CDC after
     // the ui_clk backend asserts running.
+    // capture_enable is global (`running`), so it can never clear ONE camera's
+    // state.  AND in the supervisor's per-camera join_enable: this is the lever
+    // that re-baselines a returning camera's writer, and it reuses the reset
+    // branches that already exist below rather than adding a second reset path.
+    wire capture_enable_gated = capture_enable && join_enable;
     always @(posedge cam_clk) begin
         if (!rst_n) begin
             capture_enable_meta <= 1'b0;
             capture_enable_cam  <= 1'b0;
         end else begin
-            capture_enable_meta <= capture_enable;
+            capture_enable_meta <= capture_enable_gated;
             capture_enable_cam  <= capture_enable_meta;
+        end
+    end
+
+    // Clock-alive beacon.  Reset only by rst_n so that neither capture_enable
+    // nor join_enable can make a live camera look dead -- otherwise the
+    // supervisor would deadlock the moment it disabled the writer.
+    always @(posedge cam_clk) begin
+        if (!rst_n) cam_alive_tgl <= 1'b0;
+        else        cam_alive_tgl <= ~cam_alive_tgl;
+    end
+
+    // FIFO reset requests arrive as ui_clk levels.  u_cap_fifo's rst is in its
+    // write domain (cam_clk) so it needs synchronising; u_free_bank_fifo's rst
+    // is in its write domain (ui_clk) and is used directly.
+    (* ASYNC_REG = "TRUE" *) reg cap_rst_meta, cap_rst_cam;
+    always @(posedge cam_clk) begin
+        if (!rst_n) begin
+            cap_rst_meta <= 1'b0;
+            cap_rst_cam  <= 1'b0;
+        end else begin
+            cap_rst_meta <= cap_fifo_rst_req;
+            cap_rst_cam  <= cap_rst_meta;
         end
     end
 
@@ -212,7 +268,7 @@ module EoV19DdrCamWriter #(
         .RELATED_CLOCKS      (0)
     ) u_free_bank_fifo (
         .sleep         (1'b0),
-        .rst           (~rst_n | ui_rst),
+        .rst           (~rst_n | ui_rst | free_fifo_rst_req),
         .wr_clk        (ui_clk),
         .wr_en         (free_bank_valid_ui && free_bank_ready_ui),
         .din           (free_bank_ui),
@@ -419,10 +475,17 @@ module EoV19DdrCamWriter #(
                 if (pack_count == 4'd15) begin
                     pack_count <= 4'd0;
                     pack_buf <= 256'd0;
-                    if (!fifo_full) begin
+                    // beat_in_bank is belt-and-braces against the same
+                    // runaway the line_end guard above stops: never emit a
+                    // payload beat whose address is outside the bank this
+                    // writer actually owns, whatever the raster does.
+                    if (!fifo_full && beat_in_bank) begin
                         fifo_wr_en <= 1'b1;
                         fifo_din <= {beat_addr, 1'b0, 2'd0,
                                      {EPOCH_W{1'b0}}, pack_buf_next};
+                    end else if (!fifo_full) begin
+                        // Out of bank: drop the frame, do not corrupt DDR.
+                        drop_frame <= 1'b1;
                     end else begin
                         // Do not publish a bank containing a missing beat.
                         fifo_overflow_seen_cam <= 1'b1;
@@ -436,14 +499,35 @@ module EoV19DdrCamWriter #(
                 pix_x <= 11'd0;
                 pack_count <= 4'd0;
                 pack_buf <= 256'd0;
-                if (row_y != 11'd1079)
+                // Address containment.  row_y saturates at 1079, but the
+                // address used to keep advancing on every further line_end, so
+                // a raster with more than 1080 lines between frame starts --
+                // exactly what a rebooting ISP emits -- streamed payload beats
+                // past the end of the owned bank and into the neighbouring
+                // camera's region.  Freeze the address at the last row instead.
+                //
+                // Do NOT drop the frame here.  A normal 1080-line raster
+                // produces 1080 line_end pulses and row_y reaches 1079 on the
+                // 1079th, so the legitimate final line lands in this branch:
+                // setting drop_frame here killed every frame on every camera
+                // and no descriptor was ever published (measured -- baseline
+                // magenta, cam_present 000000).  Over-long rasters simply
+                // rewrite the last row in place, which is harmless and stays
+                // inside the bank; the beat_in_bank guard on the payload write
+                // is the belt-and-braces for anything this misses.
+                if (row_y != 11'd1079) begin
                     row_y <= row_y + 11'd1;
-                row_base_addr <= row_base_addr + ROW_STRIDE_ADDR;
-                beat_addr <= row_base_addr + ROW_STRIDE_ADDR;
+                    row_base_addr <= row_base_addr + ROW_STRIDE_ADDR;
+                    beat_addr <= row_base_addr + ROW_STRIDE_ADDR;
+                end else begin
+                    beat_addr <= row_base_addr;
+                end
             end
         end
     end
 
+    wire cap_wr_rst_busy;   // cam_clk domain
+    wire cap_rd_rst_busy;   // ui_clk  domain
     wire [FIFO_W-1:0] fifo_dout;
     xpm_fifo_async #(
         .DOUT_RESET_VALUE    ("0"),
@@ -466,13 +550,18 @@ module EoV19DdrCamWriter #(
         .RELATED_CLOCKS      (0)
     ) u_cap_fifo (
         .sleep         (1'b0),
-        .rst           (~rst_n),
+        // This reset lives in the CAMERA clock domain.  Before the supervisor
+        // existed it was reachable only via rst_n, i.e. never while the system
+        // was running, and never at all while the camera was dark -- so a
+        // pointer corrupted by runt clock edges at power collapse stayed
+        // corrupt until the FPGA was reconfigured.
+        .rst           (~rst_n | cap_rst_cam),
         .wr_clk        (cam_clk),
         .wr_en         (fifo_wr_en),
         .din           (fifo_din),
         .full          (fifo_full),
         .overflow      (fifo_overflow),
-        .wr_rst_busy   (),
+        .wr_rst_busy   (cap_wr_rst_busy),
         .wr_ack        (),
         .wr_data_count (),
         .almost_full   (),
@@ -482,7 +571,7 @@ module EoV19DdrCamWriter #(
         .dout          (fifo_dout),
         .empty         (fifo_empty),
         .underflow     (),
-        .rd_rst_busy   (),
+        .rd_rst_busy   (cap_rd_rst_busy),
         .data_valid    (),
         .rd_data_count (fifo_level_native),
         .almost_empty  (),
@@ -524,6 +613,47 @@ module EoV19DdrCamWriter #(
         end
     end
     assign dbg_row_ui = row_sync;
+
+    // ---------------------------------------------------------------------
+    // Rejoin support: cam_clk status into ui_clk.
+    //
+    // These are all quasi-static level signals sampled by a supervisor that
+    // only acts on them after millisecond-scale debounces, so plain two-flop
+    // synchronisers are sufficient; none of them is part of a multi-bit value
+    // that has to be coherent.
+    // ---------------------------------------------------------------------
+    (* ASYNC_REG = "TRUE" *) reg [1:0] have_bank_sync, drop_frame_sync;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] fbe_sync, fbrb_sync;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] pfull_sync, ffull_sync;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] fea_sync, capwrb_sync;
+    always @(posedge ui_clk) begin
+        if (ui_rst) begin
+            have_bank_sync <= 2'b0; drop_frame_sync <= 2'b0;
+            fbe_sync <= 2'b0; fbrb_sync <= 2'b0;
+            pfull_sync <= 2'b0; ffull_sync <= 2'b0;
+            fea_sync <= 2'b0; capwrb_sync <= 2'b0;
+        end else begin
+            have_bank_sync  <= {have_bank_sync[0],  have_bank};
+            drop_frame_sync <= {drop_frame_sync[0], drop_frame};
+            fbe_sync        <= {fbe_sync[0],        free_bank_empty};
+            fbrb_sync       <= {fbrb_sync[0],       free_bank_rd_rst_busy};
+            pfull_sync      <= {pfull_sync[0],      fifo_prog_full};
+            ffull_sync      <= {ffull_sync[0],      fifo_full};
+            fea_sync        <= {fea_sync[0],        frame_epoch_available};
+            capwrb_sync     <= {capwrb_sync[0],     cap_wr_rst_busy};
+        end
+    end
+
+    // Either FIFO mid-reset.  The supervisor waits for this to pulse high and
+    // fall again before trusting the pointers.
+    assign rejoin_busy_ui = capwrb_sync[1] | cap_rd_rst_busy |
+                            free_bank_wr_rst_busy | fbrb_sync[1];
+
+    assign dbg_writer_ui = {have_bank_sync[1], drop_frame_sync[1],
+                            fbe_sync[1],       fbrb_sync[1],
+                            pfull_sync[1],     ffull_sync[1],
+                            fea_sync[1],       fifo_overflow_seen_ui,
+                            fifo_level_ui[11:4]};
 endmodule
 
 // DDR frame replay engine. It reads one 16-pixel beat from each camera bank,

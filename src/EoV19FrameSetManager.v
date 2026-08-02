@@ -59,8 +59,20 @@ module EoV19FrameSetManager #(
     output reg  [1:0]             lease_bank4,
     output reg  [1:0]             lease_bank5,
 
+    // Rejoin supervisor interface.  A pulse on forfeit_req[n] tells the
+    // manager to drop every record of camera n's banks -- ring entries and the
+    // seeded bit -- so that after the writer and both CDC FIFOs have been
+    // reset the token pool for that camera can be rebuilt from zero.  The
+    // request is applied only at a quiescent point in the FSM and acknowledged
+    // when it has been.
+    input  wire [5:0]             forfeit_req,
+    output reg  [5:0]             forfeit_ack,
+
     output reg                    descriptor_collision_seen,
     output reg                    rings_full_no_common_seen,
+    // Sticky: a token push had to be abandoned because a camera's FREE FIFO
+    // never became ready.  See ST_RELEASE_SEND.
+    output reg                    release_timeout_seen,
     output wire [23:0]            descriptor_valid_map,
     output wire [3:0]             dbg_state
 );
@@ -138,6 +150,21 @@ module EoV19FrameSetManager #(
     // and is skipped, which is exactly the case this fix exists for.
     reg  [5:0] seeded;
     wire [5:0] need_seed = free_ready & ~seeded;
+
+    // Latched forfeit requests, applied only in ST_FIND_RESET.  Applying them
+    // mid-RELEASE/RECLAIM walk would let a token be pushed for a bank whose
+    // valid bit was just cleared, i.e. duplicate that bank.
+    reg  [5:0] forfeit_pend;
+
+    // Bounded wait for a camera's FREE FIFO in the token-return states.  An
+    // XPM FIFO whose pointers were corrupted while its read clock died can
+    // hold free_ready low for ever; without a bound that stalls ST_RELEASE_SEND
+    // and therefore every future lease, so replay starves, the pixel FIFO
+    // underflows and the whole raster goes to the underflow colour.  Roughly
+    // 9 ms at 233.4 MHz -- orders of magnitude beyond any legitimate backlog.
+    localparam integer SEND_TIMEOUT = 21;
+    reg [SEND_TIMEOUT-1:0] send_wait;
+    wire send_expired = &send_wait;
 
     reg [3:0] valid0, valid1, valid2, valid3, valid4, valid5;
     reg [EPOCH_W-1:0] epoch0 [0:3];
@@ -397,6 +424,10 @@ module EoV19FrameSetManager #(
 
             free_valid <= 6'd0;
             seeded <= 6'd0;
+            forfeit_pend <= 6'd0;
+            forfeit_ack <= 6'd0;
+            release_timeout_seen <= 1'b0;
+            send_wait <= {SEND_TIMEOUT{1'b0}};
             free_bank0 <= 2'd0; free_bank1 <= 2'd0; free_bank2 <= 2'd0;
             free_bank3 <= 2'd0; free_bank4 <= 2'd0; free_bank5 <= 2'd0;
             lease_valid <= 1'b0;
@@ -415,6 +446,8 @@ module EoV19FrameSetManager #(
             end
         end else begin
             free_valid <= 6'd0;
+            forfeit_ack <= 6'd0;
+            forfeit_pend <= forfeit_pend | forfeit_req;
 
             // Completion descriptors are independent of the selection FSM.
             // A duplicate means a bank was reused without receiving a FREE
@@ -477,6 +510,26 @@ module EoV19FrameSetManager #(
                     best_found <= 1'b0;
                     best_epoch <= {EPOCH_W{1'b0}};
                     bank_index <= 2'd0;
+
+                    // Apply any latched forfeit here and nowhere else: this is
+                    // the one state where no bank walk is in flight, so
+                    // dropping a camera's ring cannot race a token push.
+                    // Clearing seeded lets ST_INIT reissue exactly four tokens
+                    // once that camera's freshly reset FREE FIFO reports ready.
+                    if (|forfeit_pend) begin
+                        if (forfeit_pend[0]) valid0 <= 4'd0;
+                        if (forfeit_pend[1]) valid1 <= 4'd0;
+                        if (forfeit_pend[2]) valid2 <= 4'd0;
+                        if (forfeit_pend[3]) valid3 <= 4'd0;
+                        if (forfeit_pend[4]) valid4 <= 4'd0;
+                        if (forfeit_pend[5]) valid5 <= 4'd0;
+                        seeded       <= seeded & ~forfeit_pend;
+                        forfeit_ack  <= forfeit_pend;
+                        // Keep, do not drop, a request arriving this cycle:
+                        // the unconditional accumulate above this case is
+                        // overridden by this later assignment.
+                        forfeit_pend <= forfeit_req;
+                    end
                     // A camera that has just come back needs its tokens
                     // before it can capture again, so re-enter seeding first.
                     //
@@ -615,6 +668,7 @@ module EoV19FrameSetManager #(
 
                 ST_RELEASE_PREP: begin
                     release_mask_r <= 6'd0;
+                    send_wait <= {SEND_TIMEOUT{1'b0}};
                     state <= ST_RELEASE_CAM0;
                 end
 
@@ -655,8 +709,17 @@ module EoV19FrameSetManager #(
                 end
 
                 ST_RELEASE_SEND: begin
-                    if ((release_mask_r & ~free_ready) == 6'd0) begin
-                        free_valid <= release_mask_r;
+                    if (!send_expired) send_wait <= send_wait + 1'b1;
+                    // On expiry, give up on the cameras that never became
+                    // ready: clear their ring entries without pushing a token.
+                    // That token is intentionally leaked -- the rejoin
+                    // supervisor rebuilds the pool from zero, so a leak is
+                    // recoverable, whereas stalling here is not.
+                    if (((release_mask_r & ~free_ready) == 6'd0) ||
+                        send_expired) begin
+                        if (send_expired && ((release_mask_r & ~free_ready) != 6'd0))
+                            release_timeout_seen <= 1'b1;
+                        free_valid <= release_mask_r & free_ready;
                         free_bank0 <= bank_index; free_bank1 <= bank_index;
                         free_bank2 <= bank_index; free_bank3 <= bank_index;
                         free_bank4 <= bank_index; free_bank5 <= bank_index;
@@ -674,6 +737,7 @@ module EoV19FrameSetManager #(
                             bank_index <= bank_index + 2'd1;
                             state <= ST_RELEASE_PREP;
                         end
+                        send_wait <= {SEND_TIMEOUT{1'b0}};
                     end
                 end
 
@@ -739,6 +803,7 @@ module EoV19FrameSetManager #(
 
                 ST_RECLAIM_PREP: begin
                     stale_mask_r <= 6'd0;
+                    send_wait <= {SEND_TIMEOUT{1'b0}};
                     state <= ST_RECLAIM_CAM0;
                 end
 
@@ -785,9 +850,13 @@ module EoV19FrameSetManager #(
                 end
 
                 ST_RECLAIM_SEND: begin
+                    if (!send_expired) send_wait <= send_wait + 1'b1;
                     if ((stale_mask_r == 6'd0) ||
-                        ((stale_mask_r & ~free_ready) == 6'd0)) begin
-                        free_valid <= stale_mask_r;
+                        ((stale_mask_r & ~free_ready) == 6'd0) ||
+                        send_expired) begin
+                        if (send_expired && ((stale_mask_r & ~free_ready) != 6'd0))
+                            release_timeout_seen <= 1'b1;
+                        free_valid <= stale_mask_r & free_ready;
                         free_bank0 <= bank_index; free_bank1 <= bank_index;
                         free_bank2 <= bank_index; free_bank3 <= bank_index;
                         free_bank4 <= bank_index; free_bank5 <= bank_index;
@@ -804,6 +873,7 @@ module EoV19FrameSetManager #(
                             bank_index <= bank_index + 2'd1;
                             state <= ST_RECLAIM_PREP;
                         end
+                        send_wait <= {SEND_TIMEOUT{1'b0}};
                     end
                 end
 
