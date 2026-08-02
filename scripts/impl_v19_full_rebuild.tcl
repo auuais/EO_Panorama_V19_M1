@@ -69,7 +69,12 @@ if {$reuse_synth} {
 }
 set synth_status [get_property STATUS [get_runs synth_1]]
 puts "synth_1 status: $synth_status"
-if {![string match "*Complete*" $synth_status]} {
+# In reuse-synth mode the run reports "Out-of-date" even when the checkpoint on
+# disk is exactly the one we want: Vivado compares source timestamps and
+# v19_refresh_fileset re-adds every file on entry.  The checkpoint's existence
+# is verified below, which is the real precondition, so only assert a clean
+# Complete when we actually ran synthesis.
+if {!$reuse_synth && ![string match "*Complete*" $synth_status]} {
     error "synth_1 failed: $synth_status"
 }
 

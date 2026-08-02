@@ -77,11 +77,18 @@ def grab(label, outdir, frames=20):
              "--frames", str(frames), "--out", str(out)], timeout=300)
     txt = r.stdout
     live = "-> LIVE" in txt
-    tiles = re.findall(r"tile(\d): (\w+)", txt)
-    state = {int(i): v for i, v in tiles}
+    # Per-tile liveness, not just colour.  A tile blacked because its camera
+    # is absent still classifies as "image" when the blend seams give it
+    # enough variance (measured: mean_y 2.95, std 21.96), so judging on colour
+    # alone reported a rejoin that had not happened.
+    tiles = re.findall(r"tile(\d): (\w+)\s+(LIVE|FROZEN)", txt)
+    state = {int(i): v for i, v, _ in tiles}
+    moving = {int(i): (m == "LIVE") for i, _, m in tiles}
     log(f"  {label}: {'LIVE' if live else 'STATIC'}  " +
-        " ".join(f"{i}:{state.get(i,'?')}" for i in range(6)))
-    return {"live": live, "tiles": state, "png": str(out), "raw": txt}
+        " ".join(f"{i}:{state.get(i,'?')}{'' if moving.get(i) else '(frozen)'}"
+                 for i in range(6)))
+    return {"live": live, "tiles": state, "moving": moving,
+            "png": str(out), "raw": txt}
 
 
 def ila(label):
@@ -124,6 +131,8 @@ def main():
     ap.add_argument("--bit", default=DEFAULT_BIT)
     ap.add_argument("--steps", default="program,mode,baseline,off,on")
     ap.add_argument("--settle", type=float, default=6.0)
+    ap.add_argument("--cycles", type=int, default=6,
+                    help="off/on cycles to run before declaring the rejoin sound")
     ap.add_argument("--outdir", default=None)
     a = ap.parse_args()
 
@@ -153,25 +162,33 @@ def main():
             return 1
         log("  baseline OK: six live tiles")
 
-    if "off" in steps:
-        set_power(a.port, a.cam, False)
-        time.sleep(a.settle)
-        results["off"] = grab("03_cam_off", outdir)
-        if verdict_ok(results["off"], a.cam, True):
-            log(f"  OFF OK: tile{a.cam} black, others live")
-        else:
-            log("  OFF UNEXPECTED -- capturing ILA")
-            ila("cam_off_bad")
+    # The rejoin failure is intermittent, so cycle until it bites.  A tile can
+    # keep showing stale DDR content after its camera goes dark, so liveness --
+    # not colour -- is what decides whether the panorama is still running.
+    if "off" in steps or "on" in steps:
+        for cycle in range(1, a.cycles + 1):
+            log(f"--- cycle {cycle}/{a.cycles} ---")
+            set_power(a.port, a.cam, False)
+            time.sleep(a.settle)
+            off = grab(f"c{cycle}_off", outdir)
+            results[f"cycle{cycle}_off"] = off
 
-    if "on" in steps:
-        set_power(a.port, a.cam, True)
-        time.sleep(a.settle)
-        results["on"] = grab("04_cam_on", outdir)
-        if verdict_ok(results["on"], a.cam, False):
-            log(f"  ON OK: tile{a.cam} rejoined -- REJOIN WORKS")
-        else:
-            log("  ON FAILED (the reported crash) -- capturing ILA")
-            results["on_ila"] = ila("cam_on_crash")
+            set_power(a.port, a.cam, True)
+            time.sleep(a.settle)
+            on = grab(f"c{cycle}_on", outdir)
+            results[f"cycle{cycle}_on"] = on
+
+            # Rejoin means every tile is MOVING again, including the one that
+            # was powered down.  Colour alone is not enough.
+            if on["live"] and all(on["moving"].get(i) for i in range(6)):
+                log(f"  cycle {cycle}: rejoin OK (all six tiles moving)")
+                continue
+
+            log(f"  cycle {cycle}: REJOIN FAILED -- capturing ILA")
+            results[f"cycle{cycle}_ila"] = ila(f"cam_on_crash_c{cycle}")
+            (outdir / "results.json").write_text(json.dumps(results, indent=2))
+            log(f"reproduced on cycle {cycle}; evidence in {outdir}")
+            return 2
 
     (outdir / "results.json").write_text(json.dumps(results, indent=2))
     log(f"done -> {outdir}")

@@ -121,9 +121,35 @@ module EoV19DdrCamWriter #(
     // One event source for both the edge and the value, so there is no race
     // between a locally detected trigger and the broadcast count catching up.
     wire trigger_edge = (global_epoch != global_epoch_q);
+
+    // A raster consumes the OLDEST unassigned trigger, so the epoch names the
+    // trigger that actually exposed the frame rather than whichever one
+    // happens to be current when the raster starts.  Keeping that pairing
+    // matters: sampling global_epoch directly at frame_start was tried on
+    // 2026-08-02 and made every camera's choice depend on which side of a
+    // trigger edge its own frame_start landed.  The cameras then disagreed by
+    // one epoch (measured: cam0 114, cam4 113, persistently), the renderer's
+    // row gate never opened, and the whole raster went black.
+    //
+    // What must NOT happen is the backlog growing without bound.  While a
+    // camera's ISP warms up after power-on its clock is running but it
+    // publishes no frames, so triggers keep arriving with nothing consuming
+    // them and trigger_pending climbs.  Once frames resume, triggers and
+    // frames arrive at the same rate, increments match decrements, and a
+    // plain one-per-frame queue NEVER drains -- the camera stays permanently
+    // offset.  Measured on one off/on cycle of camera 4: cam0 published epoch
+    // 242 while cam4 published 231, a fixed offset of 11.  Every camera 4
+    // descriptor was then older than the reclaim frontier and was freed as
+    // stale on arrival, so descriptor_valid_map read cam4:0000 even though
+    // cam4 was publishing normally, no epoch was ever common to all six, and
+    // lease_valid sat at 0 until the FPGA was reprogrammed.
+    //
+    // So drain the backlog instead of merely bounding it: a frame consumes
+    // two queued triggers whenever it is behind (see the update below).  A
+    // camera that fell behind catches up within a bounded number of frames --
+    // simulated at 14 frames even for a 40-frame warm-up -- and then tracks
+    // the others exactly.  scripts/v19_verify_epoch_rejoin.py covers this.
     wire frame_epoch_available = (trigger_pending != 0) || trigger_edge;
-    // pending==0: the just-arrived trigger's epoch is the current count.
-    // pending==P: the oldest unconsumed epoch is P-1 behind the count.
     wire [EPOCH_W-1:0] frame_epoch_next =
         (trigger_pending != 0)
             ? (global_epoch - trigger_pending + {{(EPOCH_W-1){1'b0}},1'b1})
@@ -233,11 +259,22 @@ module EoV19DdrCamWriter #(
                         trigger_pending <= trigger_pending + 4'd1;
                 end
                 2'b01: begin
-                    trigger_pending <= trigger_pending - 4'd1;
+                    // Consume two when behind, one otherwise.  With a strict
+                    // one-per-frame queue and equal trigger/frame rates the
+                    // occupancy is a fixed point: whatever backlog a warm-up
+                    // left behind stays for ever and offsets this camera's
+                    // epochs from the rest of the set.  Taking two while
+                    // behind makes the queue converge instead, discarding the
+                    // stale triggers this camera never turned into frames.
+                    trigger_pending <= (trigger_pending > 4'd1)
+                                       ? (trigger_pending - 4'd2) : 4'd0;
                 end
-                // 2'b11 appends one epoch and consumes one in the same cycle,
-                // so occupancy is unchanged whether or not the queue was
-                // empty.
+                2'b11: begin
+                    // One appended and one consumed; take an extra only when
+                    // behind, so a healthy camera's occupancy is unchanged.
+                    if (trigger_pending > 4'd1)
+                        trigger_pending <= trigger_pending - 4'd1;
+                end
                 default: begin end
             endcase
         end

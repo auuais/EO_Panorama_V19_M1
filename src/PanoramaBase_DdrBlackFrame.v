@@ -1249,17 +1249,17 @@ module PanoramaBase_DdrBlackFrame(
         // camera has no clock, so anything clocked by it could never report
         // its own absence.
         EoV19CamPresence u_v19_pres0 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
-            .activity(v19_cap0_row), .activity_pulse(v19_cap0_desc_valid), .present(v19_cam_present[0]));
+            .activity(v19_cap0_row), .activity_pulse(v19_cap_desc_valid[0]), .present(v19_cam_present[0]));
         EoV19CamPresence u_v19_pres1 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
-            .activity(v19_cap1_row), .activity_pulse(v19_cap1_desc_valid), .present(v19_cam_present[1]));
+            .activity(v19_cap1_row), .activity_pulse(v19_cap_desc_valid[1]), .present(v19_cam_present[1]));
         EoV19CamPresence u_v19_pres2 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
-            .activity(v19_cap2_row), .activity_pulse(v19_cap2_desc_valid), .present(v19_cam_present[2]));
+            .activity(v19_cap2_row), .activity_pulse(v19_cap_desc_valid[2]), .present(v19_cam_present[2]));
         EoV19CamPresence u_v19_pres3 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
-            .activity(v19_cap3_row), .activity_pulse(v19_cap3_desc_valid), .present(v19_cam_present[3]));
+            .activity(v19_cap3_row), .activity_pulse(v19_cap_desc_valid[3]), .present(v19_cam_present[3]));
         EoV19CamPresence u_v19_pres4 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
-            .activity(v19_cap4_row), .activity_pulse(v19_cap4_desc_valid), .present(v19_cam_present[4]));
+            .activity(v19_cap4_row), .activity_pulse(v19_cap_desc_valid[4]), .present(v19_cam_present[4]));
         EoV19CamPresence u_v19_pres5 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
-            .activity(v19_cap5_row), .activity_pulse(v19_cap5_desc_valid), .present(v19_cam_present[5]));
+            .activity(v19_cap5_row), .activity_pulse(v19_cap_desc_valid[5]), .present(v19_cam_present[5]));
 
         EoV19FrameSetManager u_v19_frameset (
             .cam_present(v19_cam_present),
@@ -2752,7 +2752,25 @@ module PanoramaBase_DdrBlackFrame(
         .probe16 ({pix_fifo_wr_en, pix_fifo_wr_data}),
         .probe17 ({scan_active, copy_active, flush_active, frame_edge}),
         .probe18 ({dbg_beat_overflow, dbg_cmd_retry_seen}),
-        .probe19 (wdf_data_q[63:0]),
+        // Frame-set ownership diagnostics.  This slot used to carry
+        // wdf_data_q[63:0] (raw DDR write data), which has served its purpose:
+        // the open question is now why the manager stops leasing after a
+        // camera rejoins, and none of descriptor_valid_map / cam_present /
+        // free_ready / the published epochs were observable.  Width is
+        // unchanged so the ILA IP does not need regenerating.
+        //   [63:60] 4'hA signature      [59:54] cam_present
+        //   [53:48] free_ready          [47:24] descriptor_valid_map
+        //   [23:20] frameset state      [19:12] cam0 last published epoch
+        //   [11:4]  cam4 last published epoch
+        //   [3] no-common-epoch  [2] desc collision  [1] lease_valid
+        //   [0] a FREE token was issued this cycle
+        .probe19 ({4'hA,
+                   v19_cam_present, v19_free_ready,
+                   v19_descriptor_valid_map,
+                   v19_frameset_dbg_state,
+                   v19_cap0_desc_epoch[7:0], v19_cap4_desc_epoch[7:0],
+                   v19_no_common_epoch_seen, v19_descriptor_collision_seen,
+                   v19_replay_banks_ready, (v19_free_valid != 6'd0)}),
         .probe20 (v19_dbg_bus),
         .probe21 ((SRC_SEL == SRC_V19) ? v19_replay_dbg_word : c0_ddr4_app_rd_data[63:0]),
         .probe22 ((SRC_SEL == SRC_V19) ? v19_dbg_rows_word0_strobe : dbg_bus[127:64]),
