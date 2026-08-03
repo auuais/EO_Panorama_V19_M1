@@ -724,25 +724,55 @@ module EoV19DdrReplay #(
     localparam [2:0] ST_SHIFT = 3'd3;
     localparam [2:0] ST_LINE_END = 3'd4;
     localparam [2:0] ST_GAP = 3'd5;
+    localparam [2:0] ST_LOAD = 3'd6;
+
+    // Beats fetched from ONE camera before moving to the next.
+    //
+    // This engine used to request a single beat from each of the six cameras
+    // per beat_x, so it changed camera -- and therefore DRAM row, since the
+    // camera frame regions are ~4.1 M addresses apart -- on literally every
+    // read.  Every read paid a full row activation for eight addresses of
+    // data, and replay reads are roughly 70% of all DDR command traffic
+    // (measured 347 reads vs 144 writes per 1000 ui_clk cycles), so this was
+    // the dominant cost in the system.
+    //
+    // Consecutive beats within one camera are 8 addresses apart, and with
+    // ROW_COLUMN_BANK a DRAM row spans 128 addresses.  Fetching 8 beats from
+    // one camera therefore covers 64 sequential addresses inside a single row
+    // and amortises the activation over the whole batch.  8 keeps the buffer
+    // small and divides the 120 beats of a row exactly (15 batches).
+    localparam integer RBATCH = 8;
+    localparam integer RTOTAL = 6 * RBATCH;   // reads issued per batch
+    localparam [2:0]   RBATCH_LAST = RBATCH - 1;
+    localparam [6:0]   RBATCH_STEP = RBATCH;
 
     reg [2:0] state;
-    reg [2:0] req_cam;
-    reg [2:0] ret_cam;
-    reg [2:0] ret_count;
-    reg [6:0] beat_x;
+    reg [6:0] req_idx;        // 0..RTOTAL-1 while issuing: {cam, beat within batch}
+    reg [6:0] ret_idx;        // same encoding for returns, which arrive in order
+    reg [2:0] shift_k;        // which beat of the batch is being shifted out
+    reg [6:0] beat_x;         // first beat of the current batch
     reg [3:0] shift_count;
     reg [15:0] gap_count;
     reg [12:0] line_timer;
     reg [28:0] row_base_addr;
     reg [11:0] latched_bank;
-    reg [255:0] beat0, beat1, beat2, beat3, beat4, beat5;
+    // One small buffer per camera, written as returns arrive and read back a
+    // beat at a time during the shift.  Six separate arrays rather than one
+    // indexed by camera: the shift needs all six simultaneously, which a
+    // single array would turn into a six-read-port memory.
+    reg [255:0] cbuf0 [0:RBATCH-1];
+    reg [255:0] cbuf1 [0:RBATCH-1];
+    reg [255:0] cbuf2 [0:RBATCH-1];
+    reg [255:0] cbuf3 [0:RBATCH-1];
+    reg [255:0] cbuf4 [0:RBATCH-1];
+    reg [255:0] cbuf5 [0:RBATCH-1];
     reg [255:0] shift0, shift1, shift2, shift3, shift4, shift5;
     wire hold_for_demand = !source_need_valid || (dbg_row >= source_need_row);
 
     assign dbg_word = {8'hE1,
                        run_enable, banks_ready,
                        source_need_valid, hold_for_demand,
-                       state, req_cam, ret_cam, ret_count,
+                       state, req_idx[5:3], ret_idx[5:3], shift_k,
                        beat_x, shift_count,
                        dbg_row, source_need_row,
                        rd_req_valid, rd_req_ready,
@@ -802,11 +832,12 @@ module EoV19DdrReplay #(
 
     function [28:0] cam_addr;
         input [2:0] cam;
+        input [6:0] bx;
         begin
             cam_addr = cam_base(cam) +
                        bank_offset(bank_for_cam(cam)) +
                        row_base_addr +
-                       ({22'd0, beat_x} * BEAT_STRIDE_ADDR);
+                       ({22'd0, bx} * BEAT_STRIDE_ADDR);
         end
     endfunction
 
@@ -827,9 +858,9 @@ module EoV19DdrReplay #(
     always @(posedge clk) begin
         if (ui_rst || !rst_n) begin
             state <= ST_IDLE;
-            req_cam <= 3'd0;
-            ret_cam <= 3'd0;
-            ret_count <= 3'd0;
+            req_idx <= 7'd0;
+            ret_idx <= 7'd0;
+            shift_k <= 3'd0;
             beat_x <= 7'd0;
             shift_count <= 4'd0;
             gap_count <= 16'd0;
@@ -845,8 +876,6 @@ module EoV19DdrReplay #(
             frame_edge <= 1'b0;
             dbg_row <= 11'd0;
             dbg_state <= ST_IDLE;
-            beat0 <= 256'd0; beat1 <= 256'd0; beat2 <= 256'd0;
-            beat3 <= 256'd0; beat4 <= 256'd0; beat5 <= 256'd0;
             shift0 <= 256'd0; shift1 <= 256'd0; shift2 <= 256'd0;
             shift3 <= 256'd0; shift4 <= 256'd0; shift5 <= 256'd0;
         end else if (!run_enable) begin
@@ -858,9 +887,9 @@ module EoV19DdrReplay #(
             // renderer's row gates then wait for each required source-row
             // window instead of finding the cache already overrun at row 1079.
             state <= ST_IDLE;
-            req_cam <= 3'd0;
-            ret_cam <= 3'd0;
-            ret_count <= 3'd0;
+            req_idx <= 7'd0;
+            ret_idx <= 7'd0;
+            shift_k <= 3'd0;
             beat_x <= 7'd0;
             shift_count <= 4'd0;
             gap_count <= 16'd0;
@@ -881,24 +910,27 @@ module EoV19DdrReplay #(
             replay_hsync0 <= 1'b0; replay_hsync1 <= 1'b0; replay_hsync2 <= 1'b0;
             replay_hsync3 <= 1'b0; replay_hsync4 <= 1'b0; replay_hsync5 <= 1'b0;
             // Bring-up visibility: while waiting for the six camera DDR
-            // returns, expose ret_count on the existing 3-bit debug port.
+            // returns, expose the return camera index on the 3-bit port.
             // Other states keep their normal state encoding.
-            dbg_state <= (state == ST_WAIT) ? ret_count : state;
+            dbg_state <= (state == ST_WAIT) ? ret_idx[5:3] : state;
 
             if (state != ST_IDLE && line_timer != 13'h1fff)
                 line_timer <= line_timer + 13'd1;
 
+            // The native MIG interface returns completions strictly in issue
+            // order, so a single counter demultiplexes them: the high bits
+            // select the camera the batch was fetching, the low bits the beat
+            // within that batch.
             if (rd_data_valid) begin
-                case (ret_cam)
-                    3'd0: beat0 <= rd_data[255:0];
-                    3'd1: beat1 <= rd_data[255:0];
-                    3'd2: beat2 <= rd_data[255:0];
-                    3'd3: beat3 <= rd_data[255:0];
-                    3'd4: beat4 <= rd_data[255:0];
-                    default: beat5 <= rd_data[255:0];
+                case (ret_idx[5:3])
+                    3'd0: cbuf0[ret_idx[2:0]] <= rd_data[255:0];
+                    3'd1: cbuf1[ret_idx[2:0]] <= rd_data[255:0];
+                    3'd2: cbuf2[ret_idx[2:0]] <= rd_data[255:0];
+                    3'd3: cbuf3[ret_idx[2:0]] <= rd_data[255:0];
+                    3'd4: cbuf4[ret_idx[2:0]] <= rd_data[255:0];
+                    default: cbuf5[ret_idx[2:0]] <= rd_data[255:0];
                 endcase
-                ret_cam <= ret_cam + 3'd1;
-                ret_count <= ret_count + 3'd1;
+                ret_idx <= ret_idx + 7'd1;
             end
 
             case (state)
@@ -913,9 +945,9 @@ module EoV19DdrReplay #(
                         dbg_row <= source_start_row;
                         row_base_addr <= row_offset(source_start_row);
                         beat_x <= 7'd0;
-                        req_cam <= 3'd0;
-                        ret_cam <= 3'd0;
-                        ret_count <= 3'd0;
+                        req_idx <= 7'd0;
+                        ret_idx <= 7'd0;
+                        shift_k <= 3'd0;
                         line_timer <= 13'd0;
                         replay_vsync0 <= 1'b0; replay_vsync1 <= 1'b0; replay_vsync2 <= 1'b0;
                         replay_vsync3 <= 1'b0; replay_vsync4 <= 1'b0; replay_vsync5 <= 1'b0;
@@ -928,20 +960,25 @@ module EoV19DdrReplay #(
                     replay_vsync0 <= 1'b0; replay_vsync1 <= 1'b0; replay_vsync2 <= 1'b0;
                     replay_vsync3 <= 1'b0; replay_vsync4 <= 1'b0; replay_vsync5 <= 1'b0;
                     rd_req_valid <= 1'b1;
-                    rd_req_addr <= cam_addr(req_cam);
+                    // Walk camera-major: all RBATCH beats of one camera before
+                    // the next.  Within a camera the addresses step by
+                    // BEAT_STRIDE_ADDR, so the batch stays inside one DRAM row
+                    // instead of activating a new one on every read.
+                    rd_req_addr <= cam_addr(req_idx[5:3],
+                                            beat_x + {4'd0, req_idx[2:0]});
                     // rd_req_valid/rd_req_addr are registered outputs.  The
                     // top-level arbiter accepts the address that was visible
                     // before this clock edge, so only advance after a cycle in
                     // which valid was already high and ready returned.  Drop
-                    // valid for one clock after each accept so the next camera
+                    // valid for one clock after each accept so the next
                     // address is presented cleanly before it can be accepted.
                     if (rd_req_valid && rd_req_ready) begin
                         rd_req_valid <= 1'b0;
-                        if (req_cam == 3'd5) begin
-                            req_cam <= 3'd0;
+                        if (req_idx == RTOTAL[6:0] - 7'd1) begin
+                            req_idx <= 7'd0;
                             state <= ST_WAIT;
                         end else begin
-                            req_cam <= req_cam + 3'd1;
+                            req_idx <= req_idx + 7'd1;
                         end
                     end
                 end
@@ -949,21 +986,30 @@ module EoV19DdrReplay #(
                 ST_WAIT: begin
                     replay_vsync0 <= 1'b0; replay_vsync1 <= 1'b0; replay_vsync2 <= 1'b0;
                     replay_vsync3 <= 1'b0; replay_vsync4 <= 1'b0; replay_vsync5 <= 1'b0;
-                    if (ret_count == 3'd6) begin
-                        shift0 <= beat0; shift1 <= beat1; shift2 <= beat2;
-                        shift3 <= beat3; shift4 <= beat4; shift5 <= beat5;
-                        // Present pixel zero with hsync already asserted.
-                        // Asserting hsync for the first time in ST_SHIFT made
-                        // the line caches miss pixel 0, then accept the
-                        // post-shift zero one clock after pixel 15.  The
-                        // resulting source rows had zero at every x=15 mod 16.
-                        replay_hsync0 <= 1'b1; replay_hsync1 <= 1'b1; replay_hsync2 <= 1'b1;
-                        replay_hsync3 <= 1'b1; replay_hsync4 <= 1'b1; replay_hsync5 <= 1'b1;
-                        ret_cam <= 3'd0;
-                        ret_count <= 3'd0;
-                        shift_count <= 4'd0;
-                        state <= ST_SHIFT;
+                    if (ret_idx == RTOTAL[6:0]) begin
+                        ret_idx <= 7'd0;
+                        shift_k <= 3'd0;
+                        state <= ST_LOAD;
                     end
+                end
+
+                // Present one beat of the batch: all six cameras' data for the
+                // same beat index, exactly as the old per-beat path did.
+                ST_LOAD: begin
+                    replay_vsync0 <= 1'b0; replay_vsync1 <= 1'b0; replay_vsync2 <= 1'b0;
+                    replay_vsync3 <= 1'b0; replay_vsync4 <= 1'b0; replay_vsync5 <= 1'b0;
+                    shift0 <= cbuf0[shift_k]; shift1 <= cbuf1[shift_k];
+                    shift2 <= cbuf2[shift_k]; shift3 <= cbuf3[shift_k];
+                    shift4 <= cbuf4[shift_k]; shift5 <= cbuf5[shift_k];
+                    // Present pixel zero with hsync already asserted.
+                    // Asserting hsync for the first time in ST_SHIFT made
+                    // the line caches miss pixel 0, then accept the
+                    // post-shift zero one clock after pixel 15.  The
+                    // resulting source rows had zero at every x=15 mod 16.
+                    replay_hsync0 <= 1'b1; replay_hsync1 <= 1'b1; replay_hsync2 <= 1'b1;
+                    replay_hsync3 <= 1'b1; replay_hsync4 <= 1'b1; replay_hsync5 <= 1'b1;
+                    shift_count <= 4'd0;
+                    state <= ST_SHIFT;
                 end
 
                 ST_SHIFT: begin
@@ -984,12 +1030,24 @@ module EoV19DdrReplay #(
                         replay_hsync0 <= 1'b0; replay_hsync1 <= 1'b0; replay_hsync2 <= 1'b0;
                         replay_hsync3 <= 1'b0; replay_hsync4 <= 1'b0; replay_hsync5 <= 1'b0;
                         shift_count <= 4'd0;
-                        if (beat_x == 7'd119) begin
-                            beat_x <= 7'd0;
-                            state <= ST_LINE_END;
+                        // RBATCH-1 written out: RBATCH[2:0] is 0 for RBATCH=8
+                        // and only yields 7 by wrapping, which would stay 7
+                        // and be silently wrong if RBATCH ever changed.
+                        if (shift_k == RBATCH_LAST) begin
+                            // Batch drained: fetch the next RBATCH beats, or
+                            // end the row.  120 beats divide into 15 batches
+                            // of 8 exactly, so beat_x lands on 120 precisely.
+                            shift_k <= 3'd0;
+                            if (beat_x + RBATCH_STEP >= 7'd120) begin
+                                beat_x <= 7'd0;
+                                state <= ST_LINE_END;
+                            end else begin
+                                beat_x <= beat_x + RBATCH_STEP;
+                                state <= ST_REQ;
+                            end
                         end else begin
-                            beat_x <= beat_x + 7'd1;
-                            state <= ST_REQ;
+                            shift_k <= shift_k + 3'd1;
+                            state <= ST_LOAD;
                         end
                     end else begin
                         shift_count <= shift_count + 4'd1;

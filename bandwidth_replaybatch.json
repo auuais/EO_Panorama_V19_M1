@@ -1,0 +1,14 @@
+{
+  "label": "replaybatch",
+  "windows": 12,
+  "windows_used": 12,
+  "app_rdy_pct": 47.4853515625,
+  "app_rdy_sd": 10.042732574555165,
+  "copy_active_pct": 100.0,
+  "reads_per_k": 474.0397135416667,
+  "writes_per_k": 129.59798177083334,
+  "read_returns_per_k": 111.6943359375,
+  "pixfifo_per_k": 226.84733072916666,
+  "replay_grant_pct": 19.802659802659804,
+  "replay_reqs_per_k": 474.2431640625
+}
