@@ -1540,9 +1540,21 @@ module PanoramaBase_DdrBlackFrame(
         localparam integer IR_X0 = RAMP_X_OFF;   // 640
         localparam integer IR_Y0 = RAMP_Y_OFF;   // 284
 
-        reg  [10:0] ir_x, ir_y;
+        // The output write path folds a 3840x480 LOGICAL raster into the
+        // 1920x960 physical frame: the first 120 beats of a logical row go to
+        // physical row L, the next 120 to physical row L+480 (see the
+        // fb_fold_beat_x walk in the write-retire block).  A producer that
+        // emits a plain linear 1920x960 raster therefore gets de-interlaced --
+        // its even rows land in physical rows 0..479 and its odd rows in
+        // 480..959, which on hardware split the IR image into two 256-row
+        // bands 224 rows apart.  Walk the folded order instead: column, then
+        // half, then logical row.
+        reg  [10:0] ir_x;        // 0..1919, physical column
+        reg         ir_half;     // 0 = physical row ir_l, 1 = physical row +480
+        reg  [9:0]  ir_l;        // 0..479, logical row
         reg  [2:0]  ir_vld;      // stage k holds a pixel issued k cycles ago
         reg  [2:0]  ir_box;      // ... and whether it came from the image
+        wire [10:0] ir_y      = {1'b0, ir_l} + (ir_half ? 11'd480 : 11'd0);
         wire        ir_mode   = (SRC_SEL == SRC_V19) && ir_single_ui;
         wire        ir_en     = copy_active && ir_mode && !fb_write_pending;
         wire        ir_in_box = (ir_x >= IR_X0) && (ir_x < IR_X0 + IR_W) &&
@@ -1553,7 +1565,8 @@ module PanoramaBase_DdrBlackFrame(
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst || !copy_active || !ir_mode) begin
                 ir_x       <= 11'd0;
-                ir_y       <= 11'd0;
+                ir_half    <= 1'b0;
+                ir_l       <= 10'd0;
                 ir_vld     <= 3'd0;
                 ir_box     <= 3'd0;
                 fb_rd_en   <= 1'b0;
@@ -1565,9 +1578,17 @@ module PanoramaBase_DdrBlackFrame(
                 fb_rd_en   <= ir_in_box;
                 ir_vld     <= {ir_vld[1:0], 1'b1};
                 ir_box     <= {ir_box[1:0], ir_in_box};
+                // 1920 columns, then the other half of the same logical row,
+                // then the next logical row: 1920*2*480 = 1,843,200 pixels,
+                // exactly BEATS_TOTAL*PIXELS_PER_BEAT.
                 if (ir_x == SRC_W - 1) begin
                     ir_x <= 11'd0;
-                    ir_y <= (ir_y == SRC_H - 1) ? 11'd0 : (ir_y + 11'd1);
+                    if (!ir_half) begin
+                        ir_half <= 1'b1;
+                    end else begin
+                        ir_half <= 1'b0;
+                        ir_l    <= (ir_l == 10'd479) ? 10'd0 : (ir_l + 10'd1);
+                    end
                 end else begin
                     ir_x <= ir_x + 11'd1;
                 end
