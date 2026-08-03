@@ -769,6 +769,59 @@ module EoV19DdrReplay #(
     reg [255:0] shift0, shift1, shift2, shift3, shift4, shift5;
     wire hold_for_demand = !source_need_valid || (dbg_row >= source_need_row);
 
+    //------------------------------------------------------------------------
+    // Orphaned-read guard.
+    //
+    // A pass ends when run_enable drops, which can happen with reads already
+    // accepted by the arbiter but not yet returned.  Those returns arrive
+    // later; if any of them lands after the NEXT pass has started, the
+    // free-running ret_idx demux counts it, and every beat of that pass is
+    // then written one slot late.  The slots that go unwritten keep the
+    // PREVIOUS frame's pixels, which is invisible on a static scene and shows
+    // up as short stale runs as soon as anything moves.  Simulated: a pass
+    // gap shorter than the DDR return latency corrupts 100% of that pass's
+    // pixels, a gap at or above it is clean.
+    //
+    // The old engine could not do this -- it had six plain registers, all six
+    // rewritten every batch, so a stray return could only rotate cameras.
+    //
+    // Count reads in flight (the counter is exact: the same condition
+    // advances ST_REQ), and at the instant a new pass starts, drop exactly
+    // that many returns before trusting the demux again.
+    //------------------------------------------------------------------------
+    wire req_accept = rd_req_valid && rd_req_ready;
+    reg [6:0] inflight;
+    reg [6:0] discard;
+    reg       run_enable_q;
+
+    always @(posedge clk) begin
+        if (ui_rst || !rst_n) begin
+            inflight     <= 7'd0;
+            discard      <= 7'd0;
+            run_enable_q <= 1'b0;
+        end else begin
+            run_enable_q <= run_enable;
+            case ({req_accept, rd_data_valid})
+                2'b10: inflight <= inflight + 7'd1;
+                2'b01: if (inflight != 7'd0) inflight <= inflight - 7'd1;
+                default: ;   // 00, or 11 which cancels out
+            endcase
+            // Edge detected inline from the two signals themselves rather
+            // than through a continuously-assigned wire: reading a wire that
+            // depends on run_enable in the same block that samples
+            // run_enable is order-dependent in simulation.
+            if (run_enable && !run_enable_q) begin
+                // Everything still outstanding belongs to the pass that just
+                // ended.  A return landing on this very cycle is already
+                // accounted for: ST_IDLE clears ret_idx below it.
+                discard <= (rd_data_valid && (inflight != 7'd0))
+                           ? (inflight - 7'd1) : inflight;
+            end else if (rd_data_valid && (discard != 7'd0)) begin
+                discard <= discard - 7'd1;
+            end
+        end
+    end
+
     assign dbg_word = {8'hE1,
                        run_enable, banks_ready,
                        source_need_valid, hold_for_demand,
@@ -921,7 +974,7 @@ module EoV19DdrReplay #(
             // order, so a single counter demultiplexes them: the high bits
             // select the camera the batch was fetching, the low bits the beat
             // within that batch.
-            if (rd_data_valid) begin
+            if (rd_data_valid && (discard == 7'd0)) begin
                 case (ret_idx[5:3])
                     3'd0: cbuf0[ret_idx[2:0]] <= rd_data[255:0];
                     3'd1: cbuf1[ret_idx[2:0]] <= rd_data[255:0];
