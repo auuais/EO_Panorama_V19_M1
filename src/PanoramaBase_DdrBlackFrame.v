@@ -613,6 +613,13 @@ module PanoramaBase_DdrBlackFrame(
                               (ir_sel_latched == 3'd3) ? irfb3_pulse :
                               (ir_sel_latched == 3'd4) ? irfb4_pulse : irfb5_pulse;
 
+    // sel_pulse is one cycle wide, and copy_bank_available can be low at that
+    // instant (a finished bank still waiting for its frame_edge commit), which
+    // would drop the request and skip a whole IR frame.  Hold it until a copy
+    // actually starts.  Driven below, next to copy_start_accept; declared here
+    // because copy_start_trig references it.
+    reg ir_start_pending;
+
     //------------------------------------------------------------------------
     // Copy / scan / arbiter state (ui_clk).  Declared here, BEFORE the
     // SRC_SEL generate block below, because Vivado's synthesis elaborator
@@ -1064,8 +1071,12 @@ module PanoramaBase_DdrBlackFrame(
         // until copy_active, so each copy pass begins from source row zero and
         // the renderer's row gates consume synchronized DDR rows on the same
         // phase instead of chasing a free-running replay cache.
+        // In IR single mode the same output-frame back-end is fed by the IR
+        // capture buffer instead of the panorama replay, so the copy starts
+        // on the selected IR camera's frame pulse rather than on a panorama
+        // bank lease.
         : (SRC_SEL == SRC_V19)
-        ? v19_replay_banks_ready
+        ? (ir_single_ui ? ir_start_pending : v19_replay_banks_ready)
         : (SRC_SEL == SRC_EOSTK || SRC_SEL == SRC_EO0)
         ? (frame_edge && (eo_frames_valid || eo_frames_ready_seen))
         : ((PATTERN_TEST && frame_edge) || (!PATTERN_TEST && sel_pulse && ir_single_ui));
@@ -1082,6 +1093,15 @@ module PanoramaBase_DdrBlackFrame(
                              copy_bank_available;
     wire v19_output_bank_conflict = (SRC_SEL == SRC_V19) && copy_active &&
                                     frame_valid && (wr_bank == rd_bank);
+
+    // Arm on the IR frame pulse, disarm once the copy has been accepted.  A
+    // pulse landing on the same cycle as an accept re-arms, which is correct:
+    // that frame still needs a pass.
+    always @(posedge c0_ddr4_ui_clk) begin
+        if (ui_rst || !ir_single_ui)     ir_start_pending <= 1'b0;
+        else if (sel_pulse)              ir_start_pending <= 1'b1;
+        else if (copy_start_accept)      ir_start_pending <= 1'b0;
+    end
 
     // V19 bring-up debug overlay.  Stamp [63:60]=4'hD so the ILA capture
     // proves that the freshly built RTL is actually loaded, then expose the
@@ -1473,7 +1493,10 @@ module PanoramaBase_DdrBlackFrame(
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst || !rst_n)
                 v19_render_active <= 1'b0;
-            else if (copy_start_accept)
+            // Never run the panorama replay/renderer for an IR-mode copy:
+            // it would issue source reads and hold DDR bandwidth for pixels
+            // the IR producer is supplying instead.
+            else if (copy_start_accept && !ir_single_ui)
                 v19_render_active <= 1'b1;
             else if (v19_frame_done || !copy_active)
                 v19_render_active <= 1'b0;
@@ -1492,8 +1515,73 @@ module PanoramaBase_DdrBlackFrame(
         wire v19_fifo_empty = (v19_fifo_count == 13'd0);
         wire v19_fifo_pop   = copy_active && !v19_fifo_empty && !fb_write_pending;
         wire v19_fifo_push  = v19_px_valid && !v19_fifo_full;
-        assign copy_px_valid = v19_fifo_pop;
-        assign copy_px_data  = v19_fifo_mem[v19_fifo_rd_ptr];
+        //--------------------------------------------------------------------
+        // IR single mode, sharing the panorama's output-frame geometry.
+        //
+        // The IR image is 640x512 and the panorama raster is 1920x960.
+        // Rather than putting BEATS_TOTAL, the bank bases and the whole
+        // display scan under a runtime mode bit, the IR source simply
+        // produces the SAME 1920x960 raster with the image composited into
+        // it and neutral black everywhere else.  Placing the box at
+        // (RAMP_X_OFF, RAMP_Y_OFF) lands it at exactly the screen position
+        // the proven stand-alone IR build used, and nothing downstream of
+        // copy_px_* changes at all.
+        //
+        // The capture buffers are xpm_memory_sdpram with READ_LATENCY=2 and
+        // rd_en tied to enb, so the output register HOLDS while rd_en is
+        // low.  That lets the whole three-stage pipeline freeze on packer
+        // backpressure without losing the read already in flight, instead of
+        // the one-outstanding-read handshake the stand-alone build used --
+        // which at this raster size would need ~24 ms per frame and could
+        // not sustain 60 Hz.
+        //--------------------------------------------------------------------
+        localparam integer IR_W  = 640;
+        localparam integer IR_H  = 512;
+        localparam integer IR_X0 = RAMP_X_OFF;   // 640
+        localparam integer IR_Y0 = RAMP_Y_OFF;   // 284
+
+        reg  [10:0] ir_x, ir_y;
+        reg  [2:0]  ir_vld;      // stage k holds a pixel issued k cycles ago
+        reg  [2:0]  ir_box;      // ... and whether it came from the image
+        wire        ir_mode   = (SRC_SEL == SRC_V19) && ir_single_ui;
+        wire        ir_en     = copy_active && ir_mode && !fb_write_pending;
+        wire        ir_in_box = (ir_x >= IR_X0) && (ir_x < IR_X0 + IR_W) &&
+                                (ir_y >= IR_Y0) && (ir_y < IR_Y0 + IR_H);
+        wire [10:0] ir_bx     = ir_x - IR_X0[10:0];
+        wire [10:0] ir_by     = ir_y - IR_Y0[10:0];
+
+        always @(posedge c0_ddr4_ui_clk) begin
+            if (ui_rst || !copy_active || !ir_mode) begin
+                ir_x       <= 11'd0;
+                ir_y       <= 11'd0;
+                ir_vld     <= 3'd0;
+                ir_box     <= 3'd0;
+                fb_rd_en   <= 1'b0;
+                fb_rd_addr <= 19'd0;
+            end else if (ir_en) begin
+                // Row stride 640 = (by<<9) + (by<<7); no wide multiplier.
+                fb_rd_addr <= ({8'd0, ir_by} << 9) + ({8'd0, ir_by} << 7) +
+                              {8'd0, ir_bx};
+                fb_rd_en   <= ir_in_box;
+                ir_vld     <= {ir_vld[1:0], 1'b1};
+                ir_box     <= {ir_box[1:0], ir_in_box};
+                if (ir_x == SRC_W - 1) begin
+                    ir_x <= 11'd0;
+                    ir_y <= (ir_y == SRC_H - 1) ? 11'd0 : (ir_y + 11'd1);
+                end else begin
+                    ir_x <= ir_x + 11'd1;
+                end
+            end else begin
+                fb_rd_en <= 1'b0;   // freeze: sdpram holds the pending word
+            end
+        end
+
+        // Stage 2 lines up with the buffer's two-cycle read latency, exactly
+        // where the stand-alone build consumed fb_rd_en_d2.
+        assign copy_px_valid = ir_mode ? (ir_vld[2] && ir_en) : v19_fifo_pop;
+        assign copy_px_data  = ir_mode
+                             ? (ir_box[2] ? {sel_rd_pixel, 8'h80} : BLACK_PIXEL)
+                             : v19_fifo_mem[v19_fifo_rd_ptr];
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst || copy_start_accept) begin
                 v19_fifo_wr_ptr <= 12'd0;
