@@ -899,6 +899,14 @@ module PanoramaBase_DdrBlackFrame(
     wire v19_cap4_selectable = !v19_cap4_empty && !v19_rejoin_busy[4];
     wire v19_cap5_selectable = !v19_cap5_empty && !v19_rejoin_busy[5];
 
+    // Consecutive capture beats served from one camera before the arbiter
+    // rotates.  One beat is 8 app_addr units and a DRAM row spans 128, so 32
+    // beats is two rows' worth of sequential traffic per activation pair --
+    // long enough to amortise the row miss, short enough that a camera's FIFO
+    // cannot build a backlog while it waits its turn (32 beats is ~0.7 us at
+    // the measured command rate, against a 33 ms frame period).
+    localparam integer V19_CAP_BATCH = 32;
+    reg  [5:0]  v19_cap_batch_ctr;
     reg  [2:0]  v19_cap_rr;
     reg         v19_cap_sel_valid;
     reg  [2:0]  v19_cap_sel;
@@ -2392,6 +2400,7 @@ module PanoramaBase_DdrBlackFrame(
             ftog_sync        <= 1'b0;
             ftog_sync_d      <= 1'b0;
             v19_cap_rr       <= 3'd0;
+            v19_cap_batch_ctr <= 6'd0;
             v19_cap0_pop     <= 1'b0;
             v19_cap1_pop     <= 1'b0;
             v19_cap2_pop     <= 1'b0;
@@ -2768,7 +2777,33 @@ module PanoramaBase_DdrBlackFrame(
                             3'd4: v19_cap4_pop <= 1'b1;
                             default: v19_cap5_pop <= 1'b1;
                         endcase
-                        v19_cap_rr <= (v19_cap_sel == 3'd5) ? 3'd0 : (v19_cap_sel + 3'd1);
+                        // Batched round-robin.  Rotating on EVERY accepted
+                        // command sent six consecutive writes to six different
+                        // cameras, whose frame regions are ~4.1 M addresses
+                        // apart, so each command opened a different DRAM row
+                        // and paid a full activation for a single beat.
+                        // Staying with one camera for a batch keeps those
+                        // writes address-sequential: with ROW_COLUMN_BANK the
+                        // low address bits are the bank field, so consecutive
+                        // beats interleave across banks inside one open row
+                        // and the activation is amortised over the whole
+                        // batch instead of being paid per beat.
+                        //
+                        // Restart the count whenever the served camera is not
+                        // the one the batch was following -- that happens when
+                        // the preferred camera's FIFO ran dry and the scan
+                        // fell through -- so the new camera gets a full batch
+                        // rather than the tail of someone else's.
+                        if (v19_cap_sel != v19_cap_rr) begin
+                            v19_cap_rr        <= v19_cap_sel;
+                            v19_cap_batch_ctr <= 1'b1;
+                        end else if (v19_cap_batch_ctr >= V19_CAP_BATCH[5:0] - 6'd1) begin
+                            v19_cap_rr <= (v19_cap_sel == 3'd5) ? 3'd0
+                                                                : (v19_cap_sel + 3'd1);
+                            v19_cap_batch_ctr <= 6'd0;
+                        end else begin
+                            v19_cap_batch_ctr <= v19_cap_batch_ctr + 6'd1;
+                        end
                         if (v19_cap_sel_marker) begin
                             v19_cap_marker_pop_pending <= 1'b1;
                         end else begin

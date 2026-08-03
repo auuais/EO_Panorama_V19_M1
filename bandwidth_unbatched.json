@@ -1,0 +1,14 @@
+{
+  "label": "unbatched",
+  "windows": 12,
+  "windows_used": 7,
+  "app_rdy_pct": 50.31389508928571,
+  "app_rdy_sd": 5.326508929911713,
+  "copy_active_pct": 100.0,
+  "reads_per_k": 312.01171875,
+  "writes_per_k": 148.22823660714286,
+  "read_returns_per_k": 82.17075892857143,
+  "pixfifo_per_k": 272.0424107142857,
+  "replay_grant_pct": 20.810931899641577,
+  "replay_reqs_per_k": 311.38392857142856
+}
