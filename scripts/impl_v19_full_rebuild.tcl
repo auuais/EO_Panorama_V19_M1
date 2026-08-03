@@ -1,5 +1,39 @@
 set project_root [file normalize [file join [file dirname [info script]] ..]]
 source [file join $project_root scripts v19_fileset.tcl]
+
+# Progress reporting.
+#
+# Only synthesis shows up in an open Vivado GUI, because it is the one stage
+# launched as a project run (launch_runs synth_1).  Implementation runs here as
+# explicit opt/place/phys_opt/route commands in an in-memory project, which the
+# GUI's Design Runs window knows nothing about.  That is deliberate and must
+# stay that way: a project impl run can continue into its generated
+# write_bitstream step before the Tcl timing guard below regains control, which
+# is exactly how a bitstream with violated MIG paths would escape.
+#
+# So report progress explicitly instead.  Each phase appends a timestamped line
+# to build_progress.txt, which is tiny and safe to tail from anywhere:
+#
+#     tail -f build_progress.txt          (or: python scripts/build_watch.py)
+set v19_progress_file [file join $project_root build_progress.txt]
+set v19_phase_start [clock seconds]
+proc v19_phase {msg} {
+    global v19_progress_file v19_phase_start
+    set now [clock seconds]
+    set line [format "%s  %6ds  %s" \
+                  [clock format $now -format "%H:%M:%S"] \
+                  [expr {$now - $v19_phase_start}] $msg]
+    puts "PHASE: $line"
+    flush stdout
+    if {![catch {open $v19_progress_file a} fh]} {
+        puts $fh $line
+        close $fh
+    }
+}
+if {![catch {open $v19_progress_file w} fh]} {
+    puts $fh "=== build started [clock format [clock seconds]] ==="
+    close $fh
+}
 open_project [file join $project_root EO_Panorama_V19_M1.xpr]
 # Never trust the .xpr's current fileset: batch runs have dropped source
 # entries on close_project, which fails the next elaboration.
@@ -63,9 +97,11 @@ if {[llength $argv] > 1 && [lindex $argv 1] eq "reuse-synth"} { set reuse_synth 
 if {$reuse_synth} {
     puts "reusing existing synth_1 checkpoint (RTL assumed unchanged)"
 } else {
+    v19_phase "synthesis started (visible in the GUI Design Runs window)"
     reset_run synth_1
     launch_runs synth_1 -jobs 12
     wait_on_run synth_1
+    v19_phase "synthesis complete"
 }
 set synth_status [get_property STATUS [get_runs synth_1]]
 puts "synth_1 status: $synth_status"
@@ -138,6 +174,7 @@ foreach ip_file $ip_files {
 foreach xdc_file $xdc_files {
     read_xdc $xdc_file
 }
+v19_phase "link_design"
 link_design -top $top -part $part
 
 # Placement directive, overridable from the command line:
@@ -152,6 +189,7 @@ set place_directive "Default"
 if {[llength $argv] > 0} { set place_directive [lindex $argv 0] }
 puts "place_design directive: $place_directive"
 
+v19_phase "opt_design"
 opt_design
 write_checkpoint -force $opt_dcp
 
@@ -161,21 +199,28 @@ if {$place_directive eq "Default"} {
     place_design -directive $place_directive
 }
 write_checkpoint -force $placed_dcp
+v19_phase "place_design complete"
 
+v19_phase "phys_opt_design"
 phys_opt_design
 write_checkpoint -force $physopt_dcp
 
+v19_phase "route_design (longest stage)"
 route_design
 write_checkpoint -force $routed_dcp
+v19_phase "route_design complete"
 report_route_status -file $route_rpt
 report_timing_summary -max_paths 10 -routable_nets -report_unconstrained \
     -file $timing_rpt -warn_on_violation
 report_bus_skew -file $bus_skew_rpt
+v19_phase "timing reports written"
 assert_nonnegative_timing $timing_rpt
 assert_bus_skew_clean $bus_skew_rpt
 
 write_debug_probes -force $ltx_out
+v19_phase "timing PASSED - writing bitstream"
 write_bitstream -force $bit_out
+v19_phase "BITSTREAM DONE"
 puts "GUARDED_BITSTREAM=$bit_out"
 puts "GUARDED_LTX=$ltx_out"
 

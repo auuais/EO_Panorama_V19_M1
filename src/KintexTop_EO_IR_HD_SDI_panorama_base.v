@@ -203,31 +203,48 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     // Stage-selected clock for the processed (panorama) video path.
     wire hd_path_clk = (HD_CLK_FROM_OSC27 != 0) ? hd_clk : CAM0_PCLK_bufg;
 
-    // Camera-1-STROBE-derived common-trigger diagnostic.
+    // Common exposure trigger for the five follower cameras.
     //
     // The board routes camera-1 STROBE_OUT into the FPGA and only follower
-    // cameras 2..6 have TRIG_IN nets driven back out.  This debug build uses
-    // camera 1 as the free-running master: synchronize STROBE_OUT0 into the
-    // camera-1 pixel-clock domain, edge-detect it, then stretch each edge to a
-    // 2 ms rising-active pulse for the five follower trigger inputs.  This
-    // applies the analysis recommendation in one hardware pass: no arbitrary
-    // free-running trigger phase, and no 13.8 us pulse that may be invisible to
-    // the EO camera's ms-granular trigger firmware.
+    // cameras 2..6 have TRIG_IN nets driven back out.  Each trigger edge is
+    // stretched to a 2 ms rising-active pulse: no arbitrary free-running phase,
+    // and no 13.8 us pulse that may be invisible to the EO camera's ms-granular
+    // trigger firmware.
+    //
+    // The EDGE used to come straight from STROBE_OUT0, which made camera 0 a
+    // single point of failure for the whole system: with it dark the trigger
+    // stopped, the global content-frame epoch stopped advancing, every writer
+    // discarded every raster and all six tiles froze.  EoV19TriggerSource
+    // follows that strobe when it is present and generates the trigger locally
+    // at the measured period when it is not, so losing camera 0 now costs only
+    // camera 0's tile.  It runs on hd_clk, sourced from the board's 27 MHz
+    // oscillator, so it depends on no camera clock.
     localparam [19:0] EO_TRIGGER_PULSE_CYCLES = 20'd148500;  // 2.0 ms at 74.25 MHz
 
-    reg [2:0]  eo_strobe0_cam0       = 3'b000;
     reg        eo_trigger_source_seen = 1'b0;
     reg [19:0] eo_trigger_pulse_ctr  = 20'd0;
-    wire       eo_fpga_trigger_start = eo_strobe0_cam0[1] && !eo_strobe0_cam0[2];
+    wire       eo_fpga_trigger_start;
+    wire       eo_trigger_free_running;
+    wire       eo_trigger_strobe_seen;
+    wire [23:0] eo_trigger_period_meas;
     wire       eo_fpga_trigger_common = (eo_trigger_pulse_ctr != 20'd0);
     wire       eo_trigger_to_cam1 = eo_fpga_trigger_common;
     wire       eo_trigger_to_cam2 = eo_fpga_trigger_common;
     wire       eo_trigger_to_cam3 = eo_fpga_trigger_common;
     wire       eo_trigger_to_cam4 = eo_fpga_trigger_common;
     wire       eo_trigger_to_cam5 = eo_fpga_trigger_common;
-    always @(posedge hd_clk) begin
-        eo_strobe0_cam0 <= {eo_strobe0_cam0[1:0], STROBE_OUT0};
 
+    EoV19TriggerSource u_eo_trigger_src (
+        .clk          (hd_clk),
+        .rst_n        (nRESET),
+        .strobe_in    (STROBE_OUT0),
+        .trigger_start(eo_fpga_trigger_start),
+        .free_running (eo_trigger_free_running),
+        .strobe_seen  (eo_trigger_strobe_seen),
+        .period_meas  (eo_trigger_period_meas)
+    );
+
+    always @(posedge hd_clk) begin
         if (eo_fpga_trigger_start) begin
             eo_trigger_source_seen <= 1'b1;
             eo_trigger_pulse_ctr <= EO_TRIGGER_PULSE_CYCLES;
@@ -368,7 +385,7 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     wire [10:0] eo_follow_probe7 = {eo_follow_wait, eo_follow_all_seen_pulse,
                                     eo_fpga_trigger_start, eo_fpga_trigger_common,
                                     eo_follow_seen,
-                                    eo_trigger_source_seen, eo_strobe0_cam0[1]};
+                                    eo_trigger_source_seen, eo_trigger_free_running};
     wire [11:0] eo_follow_probe9 = {eo_follow_span_cycles[21:20],
                                     eo_follow_seen, eo_follow_vsync_levels};
 
