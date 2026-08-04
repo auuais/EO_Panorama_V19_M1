@@ -1576,7 +1576,14 @@ module PanoramaBase_DdrBlackFrame(
                 // Row stride 640 = (by<<9) + (by<<7); no wide multiplier.
                 fb_rd_addr <= ({8'd0, ir_by} << 9) + ({8'd0, ir_by} << 7) +
                               {8'd0, ir_bx};
-                fb_rd_en   <= ir_in_box;
+                // Assert on EVERY advance, not just inside the image.  The
+                // buffer's output register and its byte-select pipeline are
+                // both gated by rd_en, so gating it on ir_in_box froze them
+                // at each edge of the box while this producer's own pipeline
+                // kept moving -- the three pixels either side of every row
+                // segment then took stale data.  Out-of-box reads are
+                // harmless: ir_box decides what is actually used.
+                fb_rd_en   <= 1'b1;
                 ir_vld     <= {ir_vld[2:0], 1'b1};
                 ir_box     <= {ir_box[2:0], ir_in_box};
                 // 1920 columns, then the other half of the same logical row,

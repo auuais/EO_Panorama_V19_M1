@@ -96,8 +96,26 @@ module IrSelectedFrameBuffer #(
         reg [FRAME_ADDR_W-1:0] wr_count;
         reg                    wr_vsync_d;
         reg                    ftog_wr;
+        reg                    sof_pending;
         wire wr_sof  = wvs && !wr_vsync_d;
         wire wr_take = wvs && whs && (wr_count < FRAME_PIXELS);
+
+        // The frame-start marker must ride on the first pixel that is actually
+        // pushed, NOT on the cycle vsync rises.  vsync rises during blanking,
+        // when hsync is low and wr_take is false, so marking only that cycle
+        // dropped the marker almost every frame: the packer's word address
+        // then free-ran and wrapped at WORDS, landing each frame at an
+        // arbitrary offset.  On hardware that displaced the image into offset
+        // blocks.  The BRAM buffer this replaced had no such problem because
+        // it reset its write address on the vsync edge directly, independent
+        // of hsync -- there was no marker to lose.
+        wire sof_now = wr_take && (sof_pending || wr_sof);
+
+        always @(posedge wclk) begin
+            if (!rst_n)        sof_pending <= 1'b0;
+            else if (sof_now)  sof_pending <= 1'b0;   // delivered with this pixel
+            else if (wr_sof)   sof_pending <= 1'b1;   // owed to the next pixel
+        end
 
         always @(posedge wclk) begin
             if (!rst_n) begin
@@ -132,7 +150,7 @@ module IrSelectedFrameBuffer #(
             .rst           (~rst_n),
             .wr_clk        (wclk),
             .wr_en         (wr_take),
-            .din           ({wr_sof, wpx}),
+            .din           ({sof_now, wpx}),
             .rd_clk        (rd_clk),
             .rd_en         (cam_pop[gi]),
             .dout          (cam_dout[gi]),
