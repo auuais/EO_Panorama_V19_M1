@@ -69,7 +69,7 @@ module IrSelectedFrameBuffer #(
     localparam integer CDC_DEPTH    = 64;
 
     wire [5:0] cam_empty;
-    wire [8:0] cam_dout [0:5];
+    wire [9:0] cam_dout [0:5];
     wire [5:0] cam_ftog;             // per-camera frame toggle, rd_clk synced
     reg  [5:0] cam_pop;
 
@@ -93,43 +93,78 @@ module IrSelectedFrameBuffer #(
                             (gi == 2) ? ir2_wr_pixel : (gi == 3) ? ir3_wr_pixel :
                             (gi == 4) ? ir4_wr_pixel : ir5_wr_pixel;
 
-        reg [FRAME_ADDR_W-1:0] wr_count;
-        reg                    wr_vsync_d;
-        reg                    ftog_wr;
-        reg                    sof_pending;
-        wire wr_sof  = wvs && !wr_vsync_d;
-        wire wr_take = wvs && whs && (wr_count < FRAME_PIXELS);
+        reg [10:0] x_cnt, y_cnt;
+        reg        wr_vsync_d, hs_d, first_line_seen;
+        reg        ftog_wr;
+        reg        sof_pending, sol_pending;
+        wire wr_sof   = wvs && !wr_vsync_d;
+        wire hs_rise  = whs && !hs_d;
+        // Bound BOTH axes.  A camera that puts one extra active clock on the
+        // end of a line is otherwise absorbed as a real pixel.
+        //
+        // The bound must be evaluated against where this pixel actually lands,
+        // not against the counters' stale values.  On the line-start edge
+        // x_cnt still holds the previous line's terminal count -- 640 once the
+        // line has been clamped -- so testing x_cnt directly rejected the
+        // FIRST pixel of every line and displaced each line by one.
+        wire [10:0] x_eff = hs_rise ? 11'd0 : x_cnt;
+        wire [10:0] y_eff = (hs_rise && first_line_seen) ? (y_cnt + 11'd1) : y_cnt;
+        wire wr_take  = wvs && whs && (x_eff < SRC_W) && (y_eff < SRC_H);
+        // A marker must also be deliverable on the very edge its own sync
+        // event occurs -- the pending flag is only set at the END of that
+        // cycle, so testing the flag alone put the line marker on pixel 1
+        // instead of pixel 0 and displaced every line by one.  Take the event
+        // and the pending flag together.
+        wire sof_event = wr_sof;
+        wire sol_event = hs_rise && first_line_seen;
+        wire mark_sof  = wr_take && (sof_pending || sof_event);
+        wire mark_sol  = wr_take && !(sof_pending || sof_event) &&
+                                    (sol_pending || sol_event);
 
-        // The frame-start marker must ride on the first pixel that is actually
-        // pushed, NOT on the cycle vsync rises.  vsync rises during blanking,
-        // when hsync is low and wr_take is false, so marking only that cycle
-        // dropped the marker almost every frame: the packer's word address
-        // then free-ran and wrapped at WORDS, landing each frame at an
-        // arbitrary offset.  On hardware that displaced the image into offset
-        // blocks.  The BRAM buffer this replaced had no such problem because
-        // it reset its write address on the vsync edge directly, independent
-        // of hsync -- there was no marker to lose.
-        wire sof_now = wr_take && (sof_pending || wr_sof);
-
-        always @(posedge wclk) begin
-            if (!rst_n)        sof_pending <= 1'b0;
-            else if (sof_now)  sof_pending <= 1'b0;   // delivered with this pixel
-            else if (wr_sof)   sof_pending <= 1'b1;   // owed to the next pixel
-        end
-
+        // Markers ride on the first pixel actually pushed, not on the cycle
+        // the sync edge occurs: vsync rises during blanking with hsync low, so
+        // marking that cycle dropped the marker and the frame lost its origin.
+        //
+        // A LINE marker is needed as well as a frame marker.  Resyncing only
+        // per frame means any per-line miscount accumulates down the whole
+        // image: on hardware an IR camera came back from a power cycle
+        // delivering 641 active clocks per line, and the picture sheared by
+        // exactly 1 pixel per line, 512 across the frame.  With a line marker
+        // each line is placed at its own address, so a miscount can only
+        // affect the line it happens on.
         always @(posedge wclk) begin
             if (!rst_n) begin
-                wr_count   <= {FRAME_ADDR_W{1'b0}};
-                wr_vsync_d <= 1'b0;
-                ftog_wr    <= 1'b0;
+                x_cnt <= 11'd0; y_cnt <= 11'd0;
+                wr_vsync_d <= 1'b0; hs_d <= 1'b0;
+                first_line_seen <= 1'b0;
+                sof_pending <= 1'b0; sol_pending <= 1'b0;
+                ftog_wr <= 1'b0;
             end else begin
                 wr_vsync_d <= wvs;
-                if (wr_sof)
-                    wr_count <= {FRAME_ADDR_W{1'b0}};
-                else if (wr_take)
-                    wr_count <= wr_count + {{(FRAME_ADDR_W-1){1'b0}}, 1'b1};
+                hs_d       <= whs;
+
+                if (wr_sof) begin
+                    y_cnt <= 11'd0;
+                    first_line_seen <= 1'b0;
+                    x_cnt <= wr_take ? 11'd1 : 11'd0;
+                end else if (hs_rise) begin
+                    // A pixel accepted on this same edge is pixel 0.
+                    x_cnt <= wr_take ? 11'd1 : 11'd0;
+                    if (!first_line_seen) first_line_seen <= 1'b1;  // line 0
+                    else if (y_cnt < SRC_H[10:0]) y_cnt <= y_cnt + 11'd1;
+                end else if (wr_take) begin
+                    x_cnt <= x_cnt + 11'd1;
+                end
+
+                // owed unless it was delivered on this very cycle
+                if (sof_event)      sof_pending <= !mark_sof;
+                else if (mark_sof)  sof_pending <= 1'b0;
+                if (sof_event)      sol_pending <= 1'b0;
+                else if (sol_event) sol_pending <= !mark_sol;
+                else if (mark_sol)  sol_pending <= 1'b0;
+
                 if (!wvs && wr_vsync_d) begin
-                    if (wr_count != {FRAME_ADDR_W{1'b0}})
+                    if (y_cnt != 11'd0 || x_cnt != 11'd0)
                         ftog_wr <= ~ftog_wr;
                 end
             end
@@ -139,8 +174,8 @@ module IrSelectedFrameBuffer #(
         xpm_fifo_async #(
             .FIFO_MEMORY_TYPE  ("distributed"),
             .FIFO_WRITE_DEPTH  (CDC_DEPTH),
-            .WRITE_DATA_WIDTH  (9),
-            .READ_DATA_WIDTH   (9),
+            .WRITE_DATA_WIDTH  (10),
+            .READ_DATA_WIDTH   (10),
             .READ_MODE         ("fwft"),
             .FIFO_READ_LATENCY (0),
             .CDC_SYNC_STAGES   (3),
@@ -150,7 +185,7 @@ module IrSelectedFrameBuffer #(
             .rst           (~rst_n),
             .wr_clk        (wclk),
             .wr_en         (wr_take),
-            .din           ({sof_now, wpx}),
+            .din           ({mark_sof, mark_sol, wpx}),
             .rd_clk        (rd_clk),
             .rd_en         (cam_pop[gi]),
             .dout          (cam_dout[gi]),
@@ -188,12 +223,12 @@ module IrSelectedFrameBuffer #(
     // The selected stream, one cycle behind the pop (fwft dout is valid while
     // not empty, so sample the pop decision alongside it).
     reg       sel_valid;
-    reg [8:0] sel_data;
+    reg [9:0] sel_data;
     reg [2:0] ir_sel_q;
     always @(posedge rd_clk) begin
         if (!rst_n) begin
             sel_valid <= 1'b0;
-            sel_data  <= 9'd0;
+            sel_data  <= 10'd0;
             ir_sel_q  <= 3'd0;
         end else begin
             ir_sel_q  <= ir_sel;
@@ -210,9 +245,12 @@ module IrSelectedFrameBuffer #(
     // while at 64 bits it is 10.  Both sides are sequential and 640 divides
     // by 8, so rows stay word-aligned.
     //------------------------------------------------------------------
+    localparam integer WORDS_PER_LINE = SRC_W / PIX_PER_WORD;   // 80
+
     reg [WORD_W-1:0]  pack;
     reg [2:0]         pack_n;
     reg [WORD_AW-1:0] w_addr;
+    reg [WORD_AW-1:0] line_base;
     reg               mem_we;
     reg [WORD_W-1:0]  mem_din;
     reg [WORD_AW-1:0] mem_waddr;
@@ -220,20 +258,31 @@ module IrSelectedFrameBuffer #(
 
     always @(posedge rd_clk) begin
         if (!rst_n) begin
-            pack   <= {WORD_W{1'b0}};
-            pack_n <= 3'd0;
-            w_addr <= {WORD_AW{1'b0}};
-            mem_we <= 1'b0;
+            pack      <= {WORD_W{1'b0}};
+            pack_n    <= 3'd0;
+            w_addr    <= {WORD_AW{1'b0}};
+            line_base <= {WORD_AW{1'b0}};
+            mem_we    <= 1'b0;
         end else begin
             mem_we <= 1'b0;
-            // A camera change re-syncs on the next start-of-frame below, so
-            // no explicit flush is needed: partial words from the previous
-            // camera are overwritten by the new camera's frame.
             if (sel_valid) begin
-                if (sel_data[8]) begin
-                    pack   <= pix_ext;
-                    pack_n <= 3'd1;
-                    w_addr <= {WORD_AW{1'b0}};
+                if (sel_data[9]) begin
+                    // Start of frame: this pixel is line 0, pixel 0.
+                    pack      <= pix_ext;
+                    pack_n    <= 3'd1;
+                    w_addr    <= {WORD_AW{1'b0}};
+                    line_base <= {WORD_AW{1'b0}};
+                end else if (sel_data[8]) begin
+                    // Start of a line: place it at its OWN address rather than
+                    // wherever the running count happens to be.  Any miscount
+                    // on the previous line dies here instead of shearing every
+                    // line below it.  SRC_W is a whole number of words, so a
+                    // line always starts on a word boundary and no partial
+                    // word is ever carried across.
+                    pack      <= pix_ext;
+                    pack_n    <= 3'd1;
+                    w_addr    <= line_base + WORDS_PER_LINE[WORD_AW-1:0];
+                    line_base <= line_base + WORDS_PER_LINE[WORD_AW-1:0];
                 end else if (pack_n == 3'd7) begin
                     mem_din   <= pack | (pix_ext << 56);
                     mem_waddr <= w_addr;

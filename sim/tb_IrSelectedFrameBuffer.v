@@ -56,6 +56,7 @@ module tb_IrSelectedFrameBuffer;
     // frame after power-up is routinely partial.
     task send_frame;
         input integer rows;
+        input integer pix_per_line;   // a camera may not give exactly W
         begin
             // Vertical blanking: vsync asserts here, with hsync LOW.  This is
             // the case that dropped the frame-start marker.
@@ -64,11 +65,11 @@ module tb_IrSelectedFrameBuffer;
             n = 0;
             for (y = 0; y < rows; y = y + 1) begin
                 repeat (8) begin @(posedge wr_clk); wr_hsync = 0; end   // h blanking
-                for (x = 0; x < W; x = x + 1) begin
+                for (x = 0; x < pix_per_line; x = x + 1) begin
                     @(posedge wr_clk);
                     wr_hsync = 1;
-                    wr_pixel = expect_at(n);
-                    n = n + 1;
+                    if (x < W) begin wr_pixel = expect_at(n); n = n + 1; end
+                    else        wr_pixel = 8'hA5;   // trailing junk
                 end
             end
             @(posedge wr_clk); wr_hsync = 0;
@@ -118,9 +119,11 @@ module tb_IrSelectedFrameBuffer;
         rst_n = 1;
         repeat (20) @(posedge rd_clk);
 
-        send_frame(H - 3);          // partial frame, as after power-up
-        send_frame(H);              // full frame: MUST realign regardless
-        send_frame(H);
+        send_frame(H - 3, W);       // partial frame, as after power-up
+        send_frame(H, W);           // full frame: MUST realign regardless
+        send_frame(H, W + 1);       // 641 px/line: measured on hardware after an
+                                    // IR camera power cycle, and it sheared the
+                                    // image by exactly 1 px per line
         repeat (200) @(posedge rd_clk);
 
         $display("frame_valid=%0b after two frames on the selected camera", frame_valid);
