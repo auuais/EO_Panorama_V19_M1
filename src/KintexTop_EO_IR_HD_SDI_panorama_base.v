@@ -268,8 +268,18 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
         .mode_out  (mode_current)
     );
 
-    localparam FORCE_IR_SLOT_EN = 1'b1;
-    localparam [2:0] FORCE_IR_SLOT = 3'd1; // User's IR1 corresponds to slot index 1.
+    // Bring-up override: pinned every IR single mode to one physical slot,
+    // from when a single IR camera was on the IRCAM1 connector.  Left enabled,
+    // it makes IR2..IR6 all display slot 1, which is exactly the reported
+    // "only IR1 outputs, no other IR mode works".  Selection now follows the
+    // commanded mode.
+    //
+    // IR_SLOT_OFFSET maps the ICD's IR camera number onto the physical IRCAM
+    // connector: 0 means ICD "IR camera 1" is IRCAM0.  If the cameras appear
+    // one connector off (ICD IR1 showing what IRCAM1 carries), set this to 1.
+    localparam FORCE_IR_SLOT_EN = 1'b0;
+    localparam [2:0] FORCE_IR_SLOT = 3'd1;
+    localparam [2:0] IR_SLOT_OFFSET = 3'd0;
 
     wire eo_single_mode_active = (mode_current >= 8'h07) && (mode_current <= 8'h0C);
     wire eo_stack_mode_active  = (mode_current == 8'h15);
@@ -279,7 +289,9 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     wire [2:0] ir_sel_raw = (mode_current <= 8'd5) ? mode_current[2:0] :
                             ((mode_current >= 8'h0D) && (mode_current <= 8'h12)) ? (mode_current - 8'h0D) :
                             3'd0;
-    wire [2:0] ir_sel = (FORCE_IR_SLOT_EN && ir_single_mode_active) ? FORCE_IR_SLOT : ir_sel_raw;
+    wire [2:0] ir_sel_mapped = ir_sel_raw + IR_SLOT_OFFSET;   // wraps within 0..7
+    wire [2:0] ir_sel = (FORCE_IR_SLOT_EN && ir_single_mode_active) ? FORCE_IR_SLOT
+                                                                   : ir_sel_mapped;
 
     wire [2:0] eo_sel = eo_single_mode_active ? (mode_current - 8'h07) : 3'd0;
 

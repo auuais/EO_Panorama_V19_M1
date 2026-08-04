@@ -107,7 +107,18 @@ module Kintex_top_I2C_test #(
     // expanded to 128 bytes we must prevent BRAM/LUTRAM inference so random
     // 8-bit address accesses continue to behave as a simple byte register file.
     //===========================================================
+    // EO panorama (see the mode decode in KintexTop_EO_IR_HD_SDI_panorama_base).
+    localparam [7:0] MODE_DEFAULT = 8'h15;
+
     (* ram_style = "registers" *) reg [7:0] regfile [0:REG_COUNT-1];
+    // Configuration INIT as well as the POR branch: the INIT value is what the
+    // device actually loads at configuration time.
+    integer init_i;
+    initial begin
+        for (init_i = 0; init_i < REG_COUNT; init_i = init_i + 1)
+            regfile[init_i] = 8'h00;
+        regfile[0] = MODE_DEFAULT;
+    end
     reg [7:0] reg_index;
 
     wire [7:0] mode_reg = regfile[8'h00];
@@ -230,6 +241,14 @@ module Kintex_top_I2C_test #(
 
             for (idx = 0; idx < REG_COUNT; idx = idx + 1)
                 regfile[idx] <= 8'h00;
+            // Register 0 is mode_current.  Zero decodes as IR single camera 0
+            // in the top level, so with a plain zeroing reset the FPGA came up
+            // in IR mode after every reconfiguration and stayed there until
+            // the MCU happened to push a mode -- which it only does on its own
+            // boot or on an operator command, not when the FPGA alone is
+            // reprogrammed.  That is why the panorama "did not come back"
+            // after programming.  Default to the panorama instead.
+            regfile[8'h00] <= MODE_DEFAULT;
 
             sda_oe <= 1'b0;
 
