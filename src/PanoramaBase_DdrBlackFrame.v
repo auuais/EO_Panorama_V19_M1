@@ -1549,12 +1549,12 @@ module PanoramaBase_DdrBlackFrame(
         reg  [10:0] ir_x;        // 0..1919, physical column
         reg         ir_half;     // 0 = physical row ir_l, 1 = physical row +480
         reg  [9:0]  ir_l;        // 0..479, logical row
-        // Stage k holds a pixel issued k cycles ago.  Four stages because the
-        // shared IR buffer is UltraRAM at READ_LATENCY 3 (block RAM was 2):
-        // the address presented in cycle T is sampled at the next edge and
-        // its data is valid in T+4, so the consume tap is [3].
-        reg  [3:0]  ir_vld;
-        reg  [3:0]  ir_box;      // ... and whether it came from the image
+        // Stage k holds a pixel issued k cycles ago.  The shared IR buffer is
+        // block RAM at READ_LATENCY 2: the address presented in cycle T is
+        // sampled at the next edge and its data is valid in T+3, so the
+        // consume tap is [2].
+        reg  [2:0]  ir_vld;
+        reg  [2:0]  ir_box;      // ... and whether it came from the image
         wire [10:0] ir_y      = {1'b0, ir_l} + (ir_half ? 11'd480 : 11'd0);
         wire        ir_mode   = (SRC_SEL == SRC_V19) && ir_single_ui;
         wire        ir_en     = copy_active && ir_mode && !fb_write_pending;
@@ -1568,8 +1568,8 @@ module PanoramaBase_DdrBlackFrame(
                 ir_x       <= 11'd0;
                 ir_half    <= 1'b0;
                 ir_l       <= 10'd0;
-                ir_vld     <= 4'd0;
-                ir_box     <= 4'd0;
+                ir_vld     <= 3'd0;
+                ir_box     <= 3'd0;
                 fb_rd_en   <= 1'b0;
                 fb_rd_addr <= 19'd0;
             end else if (ir_en) begin
@@ -1584,8 +1584,8 @@ module PanoramaBase_DdrBlackFrame(
                 // segment then took stale data.  Out-of-box reads are
                 // harmless: ir_box decides what is actually used.
                 fb_rd_en   <= 1'b1;
-                ir_vld     <= {ir_vld[2:0], 1'b1};
-                ir_box     <= {ir_box[2:0], ir_in_box};
+                ir_vld     <= {ir_vld[1:0], 1'b1};
+                ir_box     <= {ir_box[1:0], ir_in_box};
                 // 1920 columns, then the other half of the same logical row,
                 // then the next logical row: 1920*2*480 = 1,843,200 pixels,
                 // exactly BEATS_TOTAL*PIXELS_PER_BEAT.
@@ -1607,9 +1607,9 @@ module PanoramaBase_DdrBlackFrame(
 
         // Stage 2 lines up with the buffer's two-cycle read latency, exactly
         // where the stand-alone build consumed fb_rd_en_d2.
-        assign copy_px_valid = ir_mode ? (ir_vld[3] && ir_en) : v19_fifo_pop;
+        assign copy_px_valid = ir_mode ? (ir_vld[2] && ir_en) : v19_fifo_pop;
         assign copy_px_data  = ir_mode
-                             ? (ir_box[3] ? {sel_rd_pixel, 8'h80} : BLACK_PIXEL)
+                             ? (ir_box[2] ? {sel_rd_pixel, 8'h80} : BLACK_PIXEL)
                              : v19_fifo_mem[v19_fifo_rd_ptr];
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst || copy_start_accept) begin

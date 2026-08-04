@@ -13,7 +13,7 @@ module tb_IrSelectedFrameBuffer;
 
     localparam integer W = 640, H = 512;
     localparam integer FRAME_PIXELS = W * H;
-    localparam integer LAT = 3;
+    localparam integer LAT = 2;   // block RAM
 
     reg rd_clk = 0;  always #2  rd_clk = ~rd_clk;   // ~233 MHz
     reg wr_clk = 0;  always #18 wr_clk = ~wr_clk;   // ~27 MHz camera

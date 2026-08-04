@@ -21,8 +21,14 @@
 // Only one IR camera is ever displayed, so only one frame needs storing.  The
 // buffer holds whichever camera is selected; switching costs one frame while
 // the new camera fills it, which is far below the existing mode-change
-// latency.  (An IR *panorama* would need all six at once -- see the note on
-// UltraRAM at the bottom.)
+// latency.  One buffer is 80 RAMB36 and fits with room to spare.
+//
+// This was briefly UltraRAM, to leave headroom for an IR panorama that would
+// need all six cameras resident.  Block RAM is what the proven design used,
+// costs nothing here now that five of the six buffers are gone, and avoids
+// URAM's fixed 4096x72 shape -- which forces 8 pixels per word, an extra
+// cycle of read latency, and word-aligned addressing.  If the IR panorama
+// later needs six buffers at once, that is when URAM earns its complexity.
 //
 // Clocking
 // --------
@@ -40,8 +46,8 @@ module IrSelectedFrameBuffer #(
     parameter integer SRC_W        = 640,
     parameter integer SRC_H        = 512,
     parameter integer FRAME_ADDR_W = 19,
-    // UltraRAM read latency.  The byte-select pipeline below tracks it.
-    parameter integer READ_LATENCY = 3
+    // Block RAM read latency.
+    parameter integer READ_LATENCY = 2
 )(
     input  wire        rst_n,
 
@@ -62,10 +68,6 @@ module IrSelectedFrameBuffer #(
     output reg         frame_pulse      // ... and completed one this cycle
 );
     localparam integer FRAME_PIXELS = SRC_W * SRC_H;
-    localparam integer PIX_PER_WORD = 8;
-    localparam integer WORD_W       = PIX_PER_WORD * 8;             // 64
-    localparam integer WORDS        = FRAME_PIXELS / PIX_PER_WORD;  // 40960
-    localparam integer WORD_AW      = 16;
     localparam integer CDC_DEPTH    = 64;
 
     wire [5:0] cam_empty;
@@ -245,54 +247,47 @@ module IrSelectedFrameBuffer #(
     // while at 64 bits it is 10.  Both sides are sequential and 640 divides
     // by 8, so rows stay word-aligned.
     //------------------------------------------------------------------
-    localparam integer WORDS_PER_LINE = SRC_W / PIX_PER_WORD;   // 80
-
-    reg [WORD_W-1:0]  pack;
-    reg [2:0]         pack_n;
-    reg [WORD_AW-1:0] w_addr;
-    reg [WORD_AW-1:0] line_base;
-    reg               mem_we;
-    reg [WORD_W-1:0]  mem_din;
-    reg [WORD_AW-1:0] mem_waddr;
-    wire [WORD_W-1:0] pix_ext = {{(WORD_W-8){1'b0}}, sel_data[7:0]};
+    //------------------------------------------------------------------
+    // Write side: one pixel, one byte, at its own linear address.
+    //
+    // This was an UltraRAM packing 8 pixels into a 64-bit word, because URAM
+    // is fixed at 4096x72 and an 8-bit port costs 80 URAMs against 10 packed.
+    // Block RAM has no such penalty, one buffer fits with room to spare, and
+    // it is the arrangement the proven design used -- so the packing, the
+    // word alignment and the extra cycle of read latency are all gone.
+    //
+    // sol sets the address to the line's own base, so a camera that miscounts
+    // a line cannot shear everything below it.
+    //------------------------------------------------------------------
+    reg [FRAME_ADDR_W-1:0] w_addr;
+    reg [FRAME_ADDR_W-1:0] line_base;
+    reg                    mem_we;
+    reg [FRAME_ADDR_W-1:0] mem_waddr;
+    reg [7:0]              mem_din;
 
     always @(posedge rd_clk) begin
         if (!rst_n) begin
-            pack      <= {WORD_W{1'b0}};
-            pack_n    <= 3'd0;
-            w_addr    <= {WORD_AW{1'b0}};
-            line_base <= {WORD_AW{1'b0}};
+            w_addr    <= {FRAME_ADDR_W{1'b0}};
+            line_base <= {FRAME_ADDR_W{1'b0}};
             mem_we    <= 1'b0;
         end else begin
             mem_we <= 1'b0;
             if (sel_valid) begin
-                if (sel_data[9]) begin
-                    // Start of frame: this pixel is line 0, pixel 0.
-                    pack      <= pix_ext;
-                    pack_n    <= 3'd1;
-                    w_addr    <= {WORD_AW{1'b0}};
-                    line_base <= {WORD_AW{1'b0}};
-                end else if (sel_data[8]) begin
-                    // Start of a line: place it at its OWN address rather than
-                    // wherever the running count happens to be.  Any miscount
-                    // on the previous line dies here instead of shearing every
-                    // line below it.  SRC_W is a whole number of words, so a
-                    // line always starts on a word boundary and no partial
-                    // word is ever carried across.
-                    pack      <= pix_ext;
-                    pack_n    <= 3'd1;
-                    w_addr    <= line_base + WORDS_PER_LINE[WORD_AW-1:0];
-                    line_base <= line_base + WORDS_PER_LINE[WORD_AW-1:0];
-                end else if (pack_n == 3'd7) begin
-                    mem_din   <= pack | (pix_ext << 56);
-                    mem_waddr <= w_addr;
-                    mem_we    <= (w_addr < WORDS[WORD_AW-1:0]);
-                    w_addr    <= w_addr + {{(WORD_AW-1){1'b0}}, 1'b1};
-                    pack      <= {WORD_W{1'b0}};
-                    pack_n    <= 3'd0;
+                mem_din <= sel_data[7:0];
+                if (sel_data[9]) begin              // start of frame
+                    mem_waddr <= {FRAME_ADDR_W{1'b0}};
+                    mem_we    <= 1'b1;
+                    w_addr    <= {{(FRAME_ADDR_W-1){1'b0}}, 1'b1};
+                    line_base <= {FRAME_ADDR_W{1'b0}};
+                end else if (sel_data[8]) begin     // start of line
+                    mem_waddr <= line_base + SRC_W[FRAME_ADDR_W-1:0];
+                    mem_we    <= (line_base + SRC_W[FRAME_ADDR_W-1:0]) < FRAME_PIXELS[FRAME_ADDR_W-1:0];
+                    w_addr    <= line_base + SRC_W[FRAME_ADDR_W-1:0] + {{(FRAME_ADDR_W-1){1'b0}}, 1'b1};
+                    line_base <= line_base + SRC_W[FRAME_ADDR_W-1:0];
                 end else begin
-                    pack   <= pack | (pix_ext << (pack_n * 8));
-                    pack_n <= pack_n + 3'd1;
+                    mem_waddr <= w_addr;
+                    mem_we    <= (w_addr < FRAME_PIXELS[FRAME_ADDR_W-1:0]);
+                    w_addr    <= w_addr + {{(FRAME_ADDR_W-1){1'b0}}, 1'b1};
                 end
             end
         end
@@ -334,22 +329,20 @@ module IrSelectedFrameBuffer #(
     //    configurations require a common clock"
     // which is why the camera side crosses through the FIFOs above.
     //------------------------------------------------------------------
-    wire [WORD_W-1:0] rd_word;
-
     xpm_memory_sdpram #(
-        .ADDR_WIDTH_A            (WORD_AW),
-        .ADDR_WIDTH_B            (WORD_AW),
+        .ADDR_WIDTH_A            (FRAME_ADDR_W),
+        .ADDR_WIDTH_B            (FRAME_ADDR_W),
         .AUTO_SLEEP_TIME         (0),
-        .BYTE_WRITE_WIDTH_A      (WORD_W),
+        .BYTE_WRITE_WIDTH_A      (8),
         .CLOCKING_MODE           ("common_clock"),
         .ECC_MODE                ("no_ecc"),
         .MEMORY_INIT_FILE        ("none"),
         .MEMORY_INIT_PARAM       ("0"),
         .MEMORY_OPTIMIZATION     ("true"),
-        .MEMORY_PRIMITIVE        ("ultra"),
-        .MEMORY_SIZE             (WORDS * WORD_W),
+        .MEMORY_PRIMITIVE        ("block"),
+        .MEMORY_SIZE             (FRAME_PIXELS * 8),
         .MESSAGE_CONTROL         (0),
-        .READ_DATA_WIDTH_B       (WORD_W),
+        .READ_DATA_WIDTH_B       (8),
         .READ_LATENCY_B          (READ_LATENCY),
         .READ_RESET_VALUE_B      ("0"),
         .RST_MODE_B              ("SYNC"),
@@ -357,7 +350,7 @@ module IrSelectedFrameBuffer #(
         .USE_EMBEDDED_CONSTRAINT (0),
         .USE_MEM_INIT            (0),
         .WAKEUP_TIME             ("disable_sleep"),
-        .WRITE_DATA_WIDTH_A      (WORD_W),
+        .WRITE_DATA_WIDTH_A      (8),
         .WRITE_MODE_B            ("read_first")
     ) u_framebuf (
         .sleep          (1'b0),
@@ -372,24 +365,12 @@ module IrSelectedFrameBuffer #(
         .rstb           (1'b0),
         .enb            (rd_en),
         .regceb         (1'b1),
-        .addrb          (rd_addr[FRAME_ADDR_W-1:3]),
-        .doutb          (rd_word),
+        .addrb          (rd_addr),
+        .doutb          (rd_pixel),
         .sbiterrb       (),
         .dbiterrb       ()
     );
 
-    // Byte select delayed to match the memory latency and frozen by the same
-    // rd_en, so a stalled consumer sees the word and its select stay together.
-    reg [2:0] sel_pipe [0:READ_LATENCY-1];
-    integer   s;
-    always @(posedge rd_clk) begin
-        if (rd_en) begin
-            sel_pipe[0] <= rd_addr[2:0];
-            for (s = 1; s < READ_LATENCY; s = s + 1)
-                sel_pipe[s] <= sel_pipe[s-1];
-        end
-    end
-    assign rd_pixel = rd_word[sel_pipe[READ_LATENCY-1]*8 +: 8];
 
     //------------------------------------------------------------------
     // For the IR panorama: six cameras must then be resident at once, which
