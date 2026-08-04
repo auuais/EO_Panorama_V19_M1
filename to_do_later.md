@@ -1,5 +1,34 @@
 # To do later
 
+## 0. EO panorama regression check still owed (open)
+
+IR single mode is confirmed working on hardware (2026-08-04): one contiguous
+band at physical rows 283..794, 512 rows tall, 640 px wide at x=641 — the
+1 px offset is the capture card. The EO panorama has NOT been re-checked on
+the IR builds.
+
+The logic is unchanged for it — every mux added for IR collapses to the
+original expression when `ir_single_ui` is 0 — so this is a timing-confidence
+check, not a logic check.
+
+**Switch the mode from the operator UI, not over serial.**
+`icd_apply_panorama_camera_params()` runs unconditionally on every
+`PANORAMA_CONTROL`, so any mode change from that message also writes EO
+brightness and contrast to all six cameras. Echoing what STATUS reports does
+NOT make it a no-op: those bytes are the firmware's uninitialised cache (all
+zero on this rig), and brightness 0 is not ignored —
+`apply_eo_param_single()` enables exposure compensation and Direct-writes
+position 0. `scripts/eo_video_mode.py --show` is read-only and safe.
+
+Two related facts worth remembering:
+
+- The saved mode is **0x14 (IR stack)**, not 0x15. A firmware restart or STM32
+  reset re-pushes IR stack, not the panorama.
+- After any FPGA reprogram the board sits in IR single mode until the STM32
+  pushes a mode, because `mode_current` is the I2C register's reset value
+  0x00 and the FPGA decodes mode <= 5 as IR single. This explains a panorama
+  "not coming back" after programming.
+
 ## 1. Confirm the motion artifact is actually gone (open)
 
 **Symptom reported 2026-08-03:** `builds/trigfix_20260803` renders cleanly.
