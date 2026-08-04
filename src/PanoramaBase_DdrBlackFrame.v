@@ -573,45 +573,42 @@ module PanoramaBase_DdrBlackFrame(
     reg [18:0] fb_rd_addr;
     reg [2:0]  ir_sel_latched;
 
-    wire [7:0] irfb0_pixel, irfb1_pixel, irfb2_pixel, irfb3_pixel, irfb4_pixel, irfb5_pixel;
-    wire       irfb0_pulse, irfb1_pulse, irfb2_pulse, irfb3_pulse, irfb4_pulse, irfb5_pulse;
+    //------------------------------------------------------------------------
+    // One IR frame buffer shared by all six cameras (IrSelectedFrameBuffer).
+    //
+    // Six separate 640x512x8 buffers cost 80 RAMB36 each and did not fit: the
+    // device has 984 and the design needed 1111, so the placer refused to run
+    // with DRC UTLZ-1.  They only ever fitted because FORCE_IR_SLOT_EN pinned
+    // ir_sel to one slot and the tools trimmed four of the six as
+    // unreachable -- "only IR1 works" and "it fits" were the same fact.
+    //
+    // Only one IR camera is displayed at a time, so only one frame needs
+    // storing.  Selection happens inside, in ui_clk after a per-camera CDC,
+    // so no camera clock is ever muxed (they stop when a camera is powered
+    // off, and a BUFGMUX there would undo the camera-loss robustness).
+    //------------------------------------------------------------------------
+    wire [7:0] sel_rd_pixel_w;
+    wire       sel_pulse_w;
 
-    wire       irfb0_rd_en = fb_rd_en && (ir_sel_latched == 3'd0);
-    wire       irfb1_rd_en = fb_rd_en && (ir_sel_latched == 3'd1);
-    wire       irfb2_rd_en = fb_rd_en && (ir_sel_latched == 3'd2);
-    wire       irfb3_rd_en = fb_rd_en && (ir_sel_latched == 3'd3);
-    wire       irfb4_rd_en = fb_rd_en && (ir_sel_latched == 3'd4);
-    wire       irfb5_rd_en = fb_rd_en && (ir_sel_latched == 3'd5);
+    IrSelectedFrameBuffer u_ir_framebuf (
+        .rst_n(rst_n),
+        .ir0_wr_clk(ir0_wr_clk), .ir0_wr_hsync(ir0_wr_hsync), .ir0_wr_vsync(ir0_wr_vsync), .ir0_wr_pixel(ir0_wr_pixel),
+        .ir1_wr_clk(ir1_wr_clk), .ir1_wr_hsync(ir1_wr_hsync), .ir1_wr_vsync(ir1_wr_vsync), .ir1_wr_pixel(ir1_wr_pixel),
+        .ir2_wr_clk(ir2_wr_clk), .ir2_wr_hsync(ir2_wr_hsync), .ir2_wr_vsync(ir2_wr_vsync), .ir2_wr_pixel(ir2_wr_pixel),
+        .ir3_wr_clk(ir3_wr_clk), .ir3_wr_hsync(ir3_wr_hsync), .ir3_wr_vsync(ir3_wr_vsync), .ir3_wr_pixel(ir3_wr_pixel),
+        .ir4_wr_clk(ir4_wr_clk), .ir4_wr_hsync(ir4_wr_hsync), .ir4_wr_vsync(ir4_wr_vsync), .ir4_wr_pixel(ir4_wr_pixel),
+        .ir5_wr_clk(ir5_wr_clk), .ir5_wr_hsync(ir5_wr_hsync), .ir5_wr_vsync(ir5_wr_vsync), .ir5_wr_pixel(ir5_wr_pixel),
+        .ir_sel(ir_sel_ui),
+        .rd_clk(c0_ddr4_ui_clk),
+        .rd_en(fb_rd_en),
+        .rd_addr(fb_rd_addr),
+        .rd_pixel(sel_rd_pixel_w),
+        .frame_valid(),
+        .frame_pulse(sel_pulse_w)
+    );
 
-    IR640x512_GrayFrameBuffer_Single u_irfb0 (
-        .rst_n(rst_n), .wr_clk(ir0_wr_clk), .wr_hsync(ir0_wr_hsync), .wr_vsync(ir0_wr_vsync), .wr_pixel(ir0_wr_pixel),
-        .rd_clk(c0_ddr4_ui_clk), .rd_en(irfb0_rd_en), .rd_addr(fb_rd_addr), .rd_pixel(irfb0_pixel), .frame_valid(), .frame_pulse(irfb0_pulse));
-    IR640x512_GrayFrameBuffer_Single u_irfb1 (
-        .rst_n(rst_n), .wr_clk(ir1_wr_clk), .wr_hsync(ir1_wr_hsync), .wr_vsync(ir1_wr_vsync), .wr_pixel(ir1_wr_pixel),
-        .rd_clk(c0_ddr4_ui_clk), .rd_en(irfb1_rd_en), .rd_addr(fb_rd_addr), .rd_pixel(irfb1_pixel), .frame_valid(), .frame_pulse(irfb1_pulse));
-    IR640x512_GrayFrameBuffer_Single u_irfb2 (
-        .rst_n(rst_n), .wr_clk(ir2_wr_clk), .wr_hsync(ir2_wr_hsync), .wr_vsync(ir2_wr_vsync), .wr_pixel(ir2_wr_pixel),
-        .rd_clk(c0_ddr4_ui_clk), .rd_en(irfb2_rd_en), .rd_addr(fb_rd_addr), .rd_pixel(irfb2_pixel), .frame_valid(), .frame_pulse(irfb2_pulse));
-    IR640x512_GrayFrameBuffer_Single u_irfb3 (
-        .rst_n(rst_n), .wr_clk(ir3_wr_clk), .wr_hsync(ir3_wr_hsync), .wr_vsync(ir3_wr_vsync), .wr_pixel(ir3_wr_pixel),
-        .rd_clk(c0_ddr4_ui_clk), .rd_en(irfb3_rd_en), .rd_addr(fb_rd_addr), .rd_pixel(irfb3_pixel), .frame_valid(), .frame_pulse(irfb3_pulse));
-    IR640x512_GrayFrameBuffer_Single u_irfb4 (
-        .rst_n(rst_n), .wr_clk(ir4_wr_clk), .wr_hsync(ir4_wr_hsync), .wr_vsync(ir4_wr_vsync), .wr_pixel(ir4_wr_pixel),
-        .rd_clk(c0_ddr4_ui_clk), .rd_en(irfb4_rd_en), .rd_addr(fb_rd_addr), .rd_pixel(irfb4_pixel), .frame_valid(), .frame_pulse(irfb4_pulse));
-    IR640x512_GrayFrameBuffer_Single u_irfb5 (
-        .rst_n(rst_n), .wr_clk(ir5_wr_clk), .wr_hsync(ir5_wr_hsync), .wr_vsync(ir5_wr_vsync), .wr_pixel(ir5_wr_pixel),
-        .rd_clk(c0_ddr4_ui_clk), .rd_en(irfb5_rd_en), .rd_addr(fb_rd_addr), .rd_pixel(irfb5_pixel), .frame_valid(), .frame_pulse(irfb5_pulse));
-
-    wire [7:0] sel_rd_pixel = (ir_sel_latched == 3'd0) ? irfb0_pixel :
-                              (ir_sel_latched == 3'd1) ? irfb1_pixel :
-                              (ir_sel_latched == 3'd2) ? irfb2_pixel :
-                              (ir_sel_latched == 3'd3) ? irfb3_pixel :
-                              (ir_sel_latched == 3'd4) ? irfb4_pixel : irfb5_pixel;
-    wire       sel_pulse    = (ir_sel_latched == 3'd0) ? irfb0_pulse :
-                              (ir_sel_latched == 3'd1) ? irfb1_pulse :
-                              (ir_sel_latched == 3'd2) ? irfb2_pulse :
-                              (ir_sel_latched == 3'd3) ? irfb3_pulse :
-                              (ir_sel_latched == 3'd4) ? irfb4_pulse : irfb5_pulse;
+    wire [7:0] sel_rd_pixel = sel_rd_pixel_w;
+    wire       sel_pulse    = sel_pulse_w;
 
     // sel_pulse is one cycle wide, and copy_bank_available can be low at that
     // instant (a finished bank still waiting for its frame_edge commit), which
@@ -1552,8 +1549,12 @@ module PanoramaBase_DdrBlackFrame(
         reg  [10:0] ir_x;        // 0..1919, physical column
         reg         ir_half;     // 0 = physical row ir_l, 1 = physical row +480
         reg  [9:0]  ir_l;        // 0..479, logical row
-        reg  [2:0]  ir_vld;      // stage k holds a pixel issued k cycles ago
-        reg  [2:0]  ir_box;      // ... and whether it came from the image
+        // Stage k holds a pixel issued k cycles ago.  Four stages because the
+        // shared IR buffer is UltraRAM at READ_LATENCY 3 (block RAM was 2):
+        // the address presented in cycle T is sampled at the next edge and
+        // its data is valid in T+4, so the consume tap is [3].
+        reg  [3:0]  ir_vld;
+        reg  [3:0]  ir_box;      // ... and whether it came from the image
         wire [10:0] ir_y      = {1'b0, ir_l} + (ir_half ? 11'd480 : 11'd0);
         wire        ir_mode   = (SRC_SEL == SRC_V19) && ir_single_ui;
         wire        ir_en     = copy_active && ir_mode && !fb_write_pending;
@@ -1567,8 +1568,8 @@ module PanoramaBase_DdrBlackFrame(
                 ir_x       <= 11'd0;
                 ir_half    <= 1'b0;
                 ir_l       <= 10'd0;
-                ir_vld     <= 3'd0;
-                ir_box     <= 3'd0;
+                ir_vld     <= 4'd0;
+                ir_box     <= 4'd0;
                 fb_rd_en   <= 1'b0;
                 fb_rd_addr <= 19'd0;
             end else if (ir_en) begin
@@ -1576,8 +1577,8 @@ module PanoramaBase_DdrBlackFrame(
                 fb_rd_addr <= ({8'd0, ir_by} << 9) + ({8'd0, ir_by} << 7) +
                               {8'd0, ir_bx};
                 fb_rd_en   <= ir_in_box;
-                ir_vld     <= {ir_vld[1:0], 1'b1};
-                ir_box     <= {ir_box[1:0], ir_in_box};
+                ir_vld     <= {ir_vld[2:0], 1'b1};
+                ir_box     <= {ir_box[2:0], ir_in_box};
                 // 1920 columns, then the other half of the same logical row,
                 // then the next logical row: 1920*2*480 = 1,843,200 pixels,
                 // exactly BEATS_TOTAL*PIXELS_PER_BEAT.
@@ -1599,9 +1600,9 @@ module PanoramaBase_DdrBlackFrame(
 
         // Stage 2 lines up with the buffer's two-cycle read latency, exactly
         // where the stand-alone build consumed fb_rd_en_d2.
-        assign copy_px_valid = ir_mode ? (ir_vld[2] && ir_en) : v19_fifo_pop;
+        assign copy_px_valid = ir_mode ? (ir_vld[3] && ir_en) : v19_fifo_pop;
         assign copy_px_data  = ir_mode
-                             ? (ir_box[2] ? {sel_rd_pixel, 8'h80} : BLACK_PIXEL)
+                             ? (ir_box[3] ? {sel_rd_pixel, 8'h80} : BLACK_PIXEL)
                              : v19_fifo_mem[v19_fifo_rd_ptr];
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst || copy_start_accept) begin
