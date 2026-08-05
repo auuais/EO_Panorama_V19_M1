@@ -1,0 +1,6 @@
+name	file	entries	bytes	element_type	dimensions	notes
+angle_legacy_q15	angle_legacy_q15_lut.bin	41	164	AngleLUTEntry{int16 cos_q15,int16 sin_q15}	41 x 2	roll legacy range -5..+5 deg step 0.25 deg
+angle_centi_q15	angle_centi_q15_lut.bin	36000	144000	AngleLUTEntry{int16 cos_q15,int16 sin_q15}	36000 x 2	full circle range 0..359.99 deg step 0.01 deg
+atan_ratio_centi	atan_ratio_centi_lut.bin	4097	8194	int16 centi_deg	4097 x 1	atan(ratio) for ratio 0..1 indexed by Q0.12 ratio
+ir_blend_alpha_y_q16	ir_blend_alpha_y_q16_lut.bin	29	58	uint16 alpha_q16	overlap_target x 1	overlap_px=30; overlap_target=29; target_w=3576; feather_strength=1.000000
+ir_blend_alpha_c_q16	ir_blend_alpha_c_q16_lut.bin	14	28	uint16 alpha_q16	(overlap_target/2) x 1	overlap_px=30; overlap_target=29; target_w=3576; feather_strength=1.000000

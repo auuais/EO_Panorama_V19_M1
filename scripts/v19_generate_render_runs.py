@@ -13,11 +13,21 @@ import argparse
 import struct
 from pathlib import Path
 
-W = 681
-H = 378
 N = 6
 SEG = 64
-SEGS = (W + SEG - 1) // SEG
+
+# Package geometry is NOT a constant of the design -- it is a property of the
+# generated map package, and it has already changed once underneath this tool
+# (681 x 378 -> 655 x 480 when the EO INI moved to panorama_crop_height_scale
+# 0.888).  The 2026-06-22 package and the 2026-08-06 one differ in both axes.
+#
+# So take it from the command line and cross-check it against the file size,
+# rather than hardcoding.  The old hardcoded W/H at least failed loudly via the
+# entry-count assert; silently trusting a size would not.
+#
+# Known packages:
+#   EO 2026-08-06  655 x 480, source 1920x1080 -> qy clamp 1078
+#   IR 2026-08-06  621 x 480, source  640x 512 -> qy clamp  510
 
 
 def q12_4(delta_q16: int) -> int:
@@ -38,12 +48,29 @@ def div_round_signed(value: int, divisor: int) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runtime-dir", type=Path, default=Path("assets/maps"))
-    ap.add_argument("--out", type=Path, default=Path("assets/rowruns/eo_v19_render_runs.mem"))
-    ap.add_argument("--row-max-out", type=Path, default=Path("assets/rowruns/eo_v19_render_row_max_y0.mem"))
-    ap.add_argument("--row-min-out", type=Path, default=Path("assets/rowruns/eo_v19_render_row_min_y0.mem"))
+    ap.add_argument("--prefix", default="eo", choices=("eo", "ir"))
+    ap.add_argument("--width", type=int, required=True, help="per-camera map width")
+    ap.add_argument("--height", type=int, required=True, help="per-camera map height")
+    ap.add_argument("--qy-clamp", type=int, required=True,
+                    help="max addressable source row (source_h - 2)")
+    ap.add_argument("--out", type=Path)
+    ap.add_argument("--row-max-out", type=Path)
+    ap.add_argument("--row-min-out", type=Path)
     args = ap.parse_args()
-    x_path = args.runtime_dir / "eo_base_x_q16.bin"
-    y_path = args.runtime_dir / "eo_base_y_q16.bin"
+
+    global W, H, SEGS
+    W, H = args.width, args.height
+    SEGS = (W + SEG - 1) // SEG
+    rr = Path("assets/rowruns")
+    if args.out is None:
+        args.out = rr / f"{args.prefix}_v19_render_runs.mem"
+    if args.row_max_out is None:
+        args.row_max_out = rr / f"{args.prefix}_v19_render_row_max_y0.mem"
+    if args.row_min_out is None:
+        args.row_min_out = rr / f"{args.prefix}_v19_render_row_min_y0.mem"
+
+    x_path = args.runtime_dir / f"{args.prefix}_base_x_q16.bin"
+    y_path = args.runtime_dir / f"{args.prefix}_base_y_q16.bin"
     x = list(struct.unpack("<" + "i" * (x_path.stat().st_size // 4), x_path.read_bytes()))
     y = list(struct.unpack("<" + "i" * (y_path.stat().st_size // 4), y_path.read_bytes()))
     if len(x) != W * H or len(y) != W * H:
@@ -89,18 +116,19 @@ def main() -> int:
                     #   cy = ay0 + ((lx - ox0) * day_q12_4) << 12 ; qy = cy >> 16
                     for lx in range(ox0, ox0 + length):
                         cy = ay0 + (((lx - ox0) * day) << 12)
-                        qy = 0 if cy < 0 else min(1078, cy >> 16)
+                        qy = 0 if cy < 0 else min(args.qy_clamp, cy >> 16)
                         recon_hi = max(recon_hi, qy)
                         recon_lo = min(recon_lo, qy)
             row_max.append(recon_hi)
             row_min.append(recon_lo)
     with args.row_max_out.open("w", encoding="ascii", newline="\n") as f:
         for v in row_max:
-            f.write(f"{max(0, min(1078, v)):04x}\n")
+            f.write(f"{max(0, min(args.qy_clamp, v)):04x}\n")
     with args.row_min_out.open("w", encoding="ascii", newline="\n") as f:
         for v in row_min:
-            f.write(f"{max(0, min(1078, v)):04x}\n")
-    print({"records": H * N * SEGS, "segments_per_row": SEGS,
+            f.write(f"{max(0, min(args.qy_clamp, v)):04x}\n")
+    print({"prefix": args.prefix, "map": f"{W}x{H}", "records": H * N * SEGS,
+           "segments_per_row": SEGS, "qy_clamp": args.qy_clamp,
            "max_row_y0": max(row_max), "min_row_y0": min(row_min)})
     return 0
 
