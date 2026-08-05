@@ -70,9 +70,21 @@ module IrGenlockSkewMonitor #(
     reg [2:0]  hold_rr;
     reg [2:0]  epoch_lo;
 
+    // Running earliest/latest, updated as cameras report rather than reduced
+    // over all six at the epoch boundary.  The first version did the reduction
+    // combinationally in one cycle: a six-deep chain of 16-bit compare+select,
+    // then a subtract, then a compare against the sticky worst case.  At
+    // 233.4 MHz that is 4.28 ns for the lot, and it missed by a mile --
+    // WNS -1.112, TNS -56.872, with physopt replicating delay_reg trying to
+    // save it.
+    //
+    // The chain is unnecessary: every camera that pulses in a given cycle
+    // shares the SAME timestamp, so one 16-bit compare per cycle is enough.
+    reg [15:0] mn_r, mx_r;
+    reg        any_r;
+    reg        upd_max;      // defer the sticky-max compare by one cycle
+
     integer i;
-    reg [15:0] mn, mx;
-    reg        any;
 
     always @(posedge clk) begin
         if (rst) begin
@@ -81,6 +93,7 @@ module IrGenlockSkewMonitor #(
             seen <= 6'd0; rr <= 3'd0;
             hold_delay <= 16'd0; hold_seen <= 6'd0; hold_spread <= 16'd0;
             max_spread <= 16'd0; hold_rr <= 3'd0; epoch_lo <= 3'd0;
+            mn_r <= 16'hFFFF; mx_r <= 16'd0; any_r <= 1'b0; upd_max <= 1'b0;
             for (i = 0; i < 6; i = i + 1) delay[i] <= 16'd0;
             dbg <= 64'd0;
         end else begin
@@ -97,16 +110,11 @@ module IrGenlockSkewMonitor #(
                 // a missing camera into the spread would report a huge skew
                 // for what is really an absent frame.
                 //--------------------------------------------------------
-                mn = 16'hFFFF; mx = 16'd0; any = 1'b0;
-                for (i = 0; i < 6; i = i + 1) begin
-                    if (seen[i]) begin
-                        any = 1'b1;
-                        if (delay[i] < mn) mn = delay[i];
-                        if (delay[i] > mx) mx = delay[i];
-                    end
-                end
-                hold_spread <= any ? (mx - mn) : 16'd0;
-                if (any && ((mx - mn) > max_spread)) max_spread <= mx - mn;
+                hold_spread <= any_r ? (mx_r - mn_r) : 16'd0;
+                upd_max     <= any_r;      // compared next cycle, not this one
+                mn_r        <= 16'hFFFF;
+                mx_r        <= 16'd0;
+                any_r       <= 1'b0;
                 hold_seen  <= seen;
                 hold_delay <= delay[rr];
                 hold_rr    <= rr;
@@ -117,7 +125,15 @@ module IrGenlockSkewMonitor #(
                 free_cnt <= 22'd0;
                 for (i = 0; i < 6; i = i + 1) delay[i] <= 16'd0;
             end else begin
+                upd_max <= 1'b0;
                 if (!saturated) free_cnt <= free_cnt + 22'd1;
+                // Every camera reporting THIS cycle carries the same
+                // timestamp, so the running extremes cost one compare each.
+                if (|(cam_frame_pulse & ~seen)) begin
+                    if (!any_r || (scaled < mn_r)) mn_r <= scaled;
+                    if (!any_r || (scaled > mx_r)) mx_r <= scaled;
+                    any_r <= 1'b1;
+                end
                 for (i = 0; i < 6; i = i + 1) begin
                     // First frame start after the edge wins; a second one in
                     // the same epoch means that camera is running fast, which
@@ -129,6 +145,10 @@ module IrGenlockSkewMonitor #(
                     end
                 end
             end
+
+            // One cycle after the epoch closed, so this compare is not in
+            // series with the subtract that produced hold_spread.
+            if (upd_max && (hold_spread > max_spread)) max_spread <= hold_spread;
 
             dbg <= {4'hE,          // signature
                     hold_seen,     // [59:54] cameras that produced a frame
