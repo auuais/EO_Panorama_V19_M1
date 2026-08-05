@@ -285,7 +285,10 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     wire eo_stack_mode_active  = (mode_current == 8'h15);
     wire ir_single_mode_active = (mode_current <= 8'd5) || ((mode_current >= 8'h0D) && (mode_current <= 8'h12));
     wire ir_stack_mode_active  = (mode_current == 8'h14);
-    wire processed_mode_active = eo_stack_mode_active || ir_single_mode_active || ir_stack_mode_active;
+    // EO single is now served from the DDR capture like the panorama, so it is a
+    // processed mode: its pixels come from proc_hd_* on hd_path_clk.
+    wire processed_mode_active = eo_stack_mode_active || ir_single_mode_active ||
+                                 ir_stack_mode_active || eo_single_mode_active;
     wire [2:0] ir_sel_raw = (mode_current <= 8'd5) ? mode_current[2:0] :
                             ((mode_current >= 8'h0D) && (mode_current <= 8'h12)) ? (mode_current - 8'h0D) :
                             3'd0;
@@ -435,13 +438,16 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
         end
     end
 
-    wire eo_sel_pclk_mux = (eo_sel == 3'd0) ? eo0_pclk :
-                           (eo_sel == 3'd1) ? eo1_pclk :
-                           (eo_sel == 3'd2) ? eo2_pclk :
-                           (eo_sel == 3'd3) ? eo3_pclk :
-                           (eo_sel == 3'd4) ? eo4_pclk : eo5_pclk;
-    wire EO_SEL_PCLK_BUFG;
-    BUFG u_eo_sel_pclk_bufg (.I(eo_sel_pclk_mux), .O(EO_SEL_PCLK_BUFG));
+    // The six camera pixel clocks used to be muxed HERE, in fabric LUTs, into
+    // a BUFG that became HD_PCLK -- and the output pin clock was then muxed in
+    // fabric a second time.  Two cascaded LUT clock muxes on the HD-SDI output
+    // clock is not glitch-free and is not a clock-dedicated route, which is
+    // why every EO camera flickered and blacked intermittently and why 4:2:2
+    // chroma phase drifted per camera.  The panorama, driving HD_PCLK from the
+    // MMCM, never showed any of it.
+    //
+    // EO single now comes from the DDR capture instead, so no camera clock
+    // reaches the output at all and HD_PCLK is hd_path_clk in every mode.
 
     wire        EO_SEL_HSYNC = (eo_sel == 3'd0) ? eo0_hsync :
                                (eo_sel == 3'd1) ? eo1_hsync :
@@ -469,6 +475,8 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
         .rd_clk               (hd_path_clk),
         .ir_single_mode       (ir_single_mode_active),
         .ir_sel               (ir_sel),
+        .eo_single_mode       (eo_single_mode_active),
+        .eo_sel               (eo_sel),
         .ir0_wr_clk           (IRCAM0_PCLK),
         .ir0_wr_hsync         (IRCAM0_HSYNC),
         .ir0_wr_vsync         (IRCAM0_VSYNC),
@@ -541,11 +549,11 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
         .hd_dout              (proc_hd_dout)
     );
 
-    assign HD_PCLK  = eo_single_mode_active ? EO_SEL_PCLK_BUFG : processed_mode_active ? hd_path_clk : 1'b0;
-    assign HD_DE    = eo_single_mode_active ? EO_SEL_HSYNC     : processed_mode_active ? proc_hd_de    : 1'b0;
-    assign HD_HSYNC = eo_single_mode_active ? EO_SEL_HSYNC     : processed_mode_active ? proc_hd_hsync : 1'b0;
-    assign HD_VSYNC = eo_single_mode_active ? EO_SEL_VSYNC     : processed_mode_active ? proc_hd_vsync : 1'b0;
-    assign HD_DOUT  = eo_single_mode_active ? EO_SEL_DOUT      : processed_mode_active ? proc_hd_dout  : 20'h0;
+    assign HD_PCLK  = processed_mode_active ? hd_path_clk : 1'b0;
+    assign HD_DE    = processed_mode_active ? proc_hd_de : 1'b0;
+    assign HD_HSYNC = processed_mode_active ? proc_hd_hsync : 1'b0;
+    assign HD_VSYNC = processed_mode_active ? proc_hd_vsync : 1'b0;
+    assign HD_DOUT  = processed_mode_active ? proc_hd_dout : 20'h0;
 
     // Bring-up ILA: post-mux HD output visibility.  This answers whether the
     // top-level output selection is actually driving active BT.1120/YCbCr data

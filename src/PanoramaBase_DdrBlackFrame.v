@@ -35,6 +35,10 @@ module PanoramaBase_DdrBlackFrame(
     input  wire        rd_clk,
     input  wire        ir_single_mode,
     input  wire [2:0]  ir_sel,
+    // EO single is served from the DDR capture that already runs for the
+    // panorama, so it needs the same mode/selection the IR path takes.
+    input  wire        eo_single_mode,
+    input  wire [2:0]  eo_sel,
     input  wire        ir0_wr_clk,
     input  wire        ir0_wr_hsync,
     input  wire        ir0_wr_vsync,
@@ -546,15 +550,15 @@ module PanoramaBase_DdrBlackFrame(
     // Control deglitch: synchronize {ir_single_mode, ir_sel} into ui_clk and
     // only accept a value once it has been stable for 2 ui_clk cycles.
     //------------------------------------------------------------------------
-    reg [3:0] mode_meta, mode_sync, mode_sync_d, mode_stable;
+    reg [7:0] mode_meta, mode_sync, mode_sync_d, mode_stable;
     always @(posedge c0_ddr4_ui_clk) begin
         if (ui_rst) begin
-            mode_meta   <= 4'd0;
-            mode_sync   <= 4'd0;
-            mode_sync_d <= 4'd0;
-            mode_stable <= 4'd0;
+            mode_meta   <= 8'd0;
+            mode_sync   <= 8'd0;
+            mode_sync_d <= 8'd0;
+            mode_stable <= 8'd0;
         end else begin
-            mode_meta   <= {ir_single_mode, ir_sel};
+            mode_meta   <= {eo_single_mode, eo_sel, ir_single_mode, ir_sel};
             mode_sync   <= mode_meta;
             mode_sync_d <= mode_sync;
             if (mode_sync == mode_sync_d)
@@ -563,6 +567,8 @@ module PanoramaBase_DdrBlackFrame(
     end
     wire       ir_single_ui = mode_stable[3];
     wire [2:0] ir_sel_ui    = mode_stable[2:0];
+    wire       eo_single_ui = mode_stable[7];
+    wire [2:0] eo_sel_ui    = mode_stable[6:4];
 
     //------------------------------------------------------------------------
     // Per-camera BRAM capture buffers (proven IR640x512_GrayFrameBuffer_Single,
@@ -795,6 +801,16 @@ module PanoramaBase_DdrBlackFrame(
     wire        v19_replay_banks_ready;
     wire        v19_src_rd_valid;
     wire [28:0] v19_src_rd_addr;
+    // The source-read port is shared: the six-camera panorama replay owns it
+    // normally, the single-camera reader owns it in EO single.  Only one is
+    // ever enabled, so this is a select rather than an arbiter.
+    wire        v19_replay_rd_valid;
+    wire [28:0] v19_replay_rd_addr;
+    // Declared at module scope because copy_start_trig references them and it
+    // appears before the generate block; Vivado's elaborator binds a forward
+    // reference inside a generate to an implicit local net otherwise.
+    wire        v19_eo_start_pending;
+    wire        v19_eo_stale;
     wire        v19_src_rd_ready;
     reg         v19_src_rd_data_valid;
     reg [DDR_APP_DATA_W-1:0] v19_src_rd_data;
@@ -1080,6 +1096,7 @@ module PanoramaBase_DdrBlackFrame(
         // bank lease.
         : (SRC_SEL == SRC_V19)
         ? (ir_single_ui ? (ir_start_pending || (ir_stale && frame_edge))
+         : eo_single_ui ? (v19_eo_start_pending || (v19_eo_stale && frame_edge))
                         : v19_replay_banks_ready)
         : (SRC_SEL == SRC_EOSTK || SRC_SEL == SRC_EO0)
         ? (frame_edge && (eo_frames_valid || eo_frames_ready_seen))
@@ -1481,7 +1498,7 @@ module PanoramaBase_DdrBlackFrame(
             .source_need_valid(v19_source_need_valid),
             .source_need_row(v19_source_need_row),
             .source_start_row(v19_source_start_row),
-            .rd_req_valid(v19_src_rd_valid), .rd_req_addr(v19_src_rd_addr),
+            .rd_req_valid(v19_replay_rd_valid), .rd_req_addr(v19_replay_rd_addr),
             .rd_req_ready(v19_src_rd_ready), .rd_data_valid(v19_src_rd_data_valid),
             .rd_data(v19_src_rd_data), .replay_clk(v19_replay_clk),
             .replay_hsync0(v19_cam0_hsync), .replay_vsync0(v19_cam0_vsync), .replay_pixel0(v19_cam0_pixel),
@@ -1500,7 +1517,7 @@ module PanoramaBase_DdrBlackFrame(
             // Never run the panorama replay/renderer for an IR-mode copy:
             // it would issue source reads and hold DDR bandwidth for pixels
             // the IR producer is supplying instead.
-            else if (copy_start_accept && !ir_single_ui)
+            else if (copy_start_accept && !ir_single_ui && !eo_single_ui)
                 v19_render_active <= 1'b1;
             else if (v19_frame_done || !copy_active)
                 v19_render_active <= 1'b0;
@@ -1614,10 +1631,108 @@ module PanoramaBase_DdrBlackFrame(
 
         // Stage 2 lines up with the buffer's two-cycle read latency, exactly
         // where the stand-alone build consumed fb_rd_en_d2.
-        assign copy_px_valid = ir_mode ? (ir_vld[2] && ir_en) : v19_fifo_pop;
+        //--------------------------------------------------------------------
+        // EO single, served from the DDR capture already running.
+        //
+        // The frame-set manager only issues a SET lease: it waits for a common
+        // epoch across all six cameras and hands out six banks together.  EO
+        // single must not inherit that -- one powered-off camera would black a
+        // working one -- so track the newest published bank PER camera from the
+        // writers' own descriptors.  Those are clean ui_clk pulses already
+        // fanned out to presence detection and the rejoin supervisor, so
+        // tapping them changes no handshake.
+        //--------------------------------------------------------------------
+        reg  [1:0] cam_last_bank [0:5];
+        reg  [5:0] cam_has_frame;
+        reg [25:0] cam_stale_cnt [0:5];      // ~0.29 s at 233 MHz, as for IR
+        wire [5:0] cam_desc = v19_cap_desc_valid;
+        wire [1:0] cam_desc_bank [0:5];
+        assign cam_desc_bank[0] = v19_cap0_desc_bank;
+        assign cam_desc_bank[1] = v19_cap1_desc_bank;
+        assign cam_desc_bank[2] = v19_cap2_desc_bank;
+        assign cam_desc_bank[3] = v19_cap3_desc_bank;
+        assign cam_desc_bank[4] = v19_cap4_desc_bank;
+        assign cam_desc_bank[5] = v19_cap5_desc_bank;
+
+        integer bi;
+        always @(posedge c0_ddr4_ui_clk) begin
+            if (ui_rst) begin
+                cam_has_frame <= 6'd0;
+                for (bi = 0; bi < 6; bi = bi + 1) begin
+                    cam_last_bank[bi] <= 2'd0;
+                    cam_stale_cnt[bi] <= 26'd0;
+                end
+            end else begin
+                for (bi = 0; bi < 6; bi = bi + 1) begin
+                    if (cam_desc[bi]) begin
+                        cam_last_bank[bi] <= cam_desc_bank[bi];
+                        cam_has_frame[bi] <= 1'b1;
+                        cam_stale_cnt[bi] <= 26'd0;
+                    end else if (!(&cam_stale_cnt[bi])) begin
+                        cam_stale_cnt[bi] <= cam_stale_cnt[bi] + 1'b1;
+                    end else begin
+                        cam_has_frame[bi] <= 1'b0;   // camera has stopped
+                    end
+                end
+            end
+        end
+
+        wire       eo_mode      = (SRC_SEL == SRC_V19) && eo_single_ui;
+        wire       eo_cam_ready = cam_has_frame[eo_sel_ui];
+        wire       eo_stale     = !eo_cam_ready;
+        reg  [1:0] eo_bank_q;                       // latched for the whole pass
+        reg        eo_start_pending;
+        assign v19_eo_start_pending = eo_start_pending;
+        assign v19_eo_stale         = eo_stale;
+
+        always @(posedge c0_ddr4_ui_clk) begin
+            if (ui_rst || !eo_mode)          eo_start_pending <= 1'b0;
+            else if (cam_desc[eo_sel_ui])    eo_start_pending <= 1'b1;
+            else if (copy_start_accept)      eo_start_pending <= 1'b0;
+            if (copy_start_accept) eo_bank_q <= cam_last_bank[eo_sel_ui];
+        end
+
+        wire        eo_rd_valid;
+        wire [28:0] eo_rd_addr;
+        assign v19_src_rd_valid = eo_mode ? eo_rd_valid : v19_replay_rd_valid;
+        assign v19_src_rd_addr  = eo_mode ? eo_rd_addr  : v19_replay_rd_addr;
+        wire        eo_px_valid;
+        wire [15:0] eo_px_data;
+        // The reader is stalled by exactly what stalls the packer, so its
+        // credit accounting matches the copy it feeds.
+        wire        eo_px_ready = copy_active && !fb_write_pending;
+
+        EoV19SingleCamReader #(
+            .SRC_BASE_ADDR (V19_SRC_BASE_ADDR),
+            .CAM_STRIDE    (V19_SRC_CAM_STRIDE),
+            .FRAME_STRIDE  (V19_SRC_FRAME_STRIDE),
+            .ROW_STRIDE    (V19_SRC_ROW_STRIDE),
+            .BEAT_STRIDE   (29'd8),
+            .BEATS_PER_ROW (120),
+            .OUT_ROWS      (SRC_H),
+            .FOLD_HALF_ROWS(SRC_H/2),
+            .ROW_CROP      ((1080 - SRC_H) / 2)
+        ) u_eo_single_reader (
+            .clk(c0_ddr4_ui_clk), .rst_n(rst_n), .ui_rst(ui_rst),
+            .run_enable(eo_mode && copy_active && !eo_stale),
+            .cam_sel(eo_sel_ui), .bank_sel(eo_bank_q),
+            .rd_req_valid(eo_rd_valid), .rd_req_addr(eo_rd_addr),
+            .rd_req_ready(v19_src_rd_ready),
+            .rd_data_valid(v19_src_rd_data_valid),
+            .rd_data(v19_src_rd_data[255:0]),
+            .px_valid(eo_px_valid), .px_data(eo_px_data),
+            .px_ready(eo_px_ready),
+            .frame_done(), .dbg()
+        );
+
+        assign copy_px_valid = ir_mode ? (ir_vld[2] && ir_en)
+                             : eo_mode ? (eo_stale ? eo_px_ready : eo_px_valid)
+                             : v19_fifo_pop;
         assign copy_px_data  = ir_mode
                              ? ((ir_box[2] && !ir_stale) ? {sel_rd_pixel, 8'h80}
                                                         : BLACK_PIXEL)
+                             : eo_mode
+                             ? (eo_stale ? BLACK_PIXEL : eo_px_data)
                              : v19_fifo_mem[v19_fifo_rd_ptr];
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst || copy_start_accept) begin
