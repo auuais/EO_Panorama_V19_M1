@@ -3,9 +3,25 @@
 `include "EoV19PanoramaParams.vh"
 
 // Camera-side native-MIG beat writer for the V19 DDR de-skew path.
-// Each EO BT.1120 stream is packed into 16-pixel / 256-bit payload beats and
-// queued across the camera clock boundary with its final DDR app address.
+// Each camera stream is packed into 256-bit payload beats and queued across
+// the camera clock boundary with its final DDR app address.
+//
+// Two sample widths are supported, because the IR panorama reuses this writer
+// rather than growing a second copy of the atomic-overflow, marker-ordering,
+// bank-token and epoch machinery that took this module several hardware
+// debugging rounds to get right:
+//
+//   PIX_W = 16  EO: BT.1120 YUV422, 16 pixels per beat.  The default, so
+//               every existing instantiation is unchanged.
+//   PIX_W = 8   IR: 8-bit luma, 32 pixels per beat.  The caller aligns the
+//               sample to cam_pixel[19:12]; chroma is synthesised downstream
+//               and never stored.
+//
+// A beat is 256 bits either way, so the FIFO record, the address arithmetic
+// and the DDR side are identical.  Only the packing lane count differs.
 module EoV19DdrCamWriter #(
+    parameter integer PIX_W = 16,               // 16 = EO YUV422, 8 = IR luma
+    parameter integer INPUT_W = `EO_V19_INPUT_W,
     parameter [28:0] CAM_BASE_ADDR = 29'd0,
     parameter [28:0] FRAME_STRIDE_ADDR = 29'd1036800,
     parameter [28:0] ROW_STRIDE_ADDR = 29'd960,
@@ -74,7 +90,11 @@ module EoV19DdrCamWriter #(
     localparam integer FIFO_W = 29 + 1 + 2 + EPOCH_W + 256;
     localparam integer FIFO_COUNT_W = $clog2(FIFO_WRITE_DEPTH) + 1;
 
-    wire [15:0] cam_packed = {cam_pixel[19:12], cam_pixel[9:2]};
+    // EO takes the two active bytes of the BT.1120 word; IR takes the single
+    // luma byte the caller has aligned to the top of cam_pixel.
+    wire [PIX_W-1:0] cam_packed = (PIX_W == 16)
+                                  ? {cam_pixel[19:12], cam_pixel[9:2]}
+                                  : cam_pixel[19 -: PIX_W];
     wire        cam_active = cam_hsync && !cam_vsync;
     reg         hsync_d;
     reg         vsync_d;
@@ -87,7 +107,9 @@ module EoV19DdrCamWriter #(
     reg [EPOCH_W-1:0] frame_epoch;
     reg [10:0] row_y;
     reg [10:0] pix_x;
-    reg [3:0]  pack_count;
+    localparam integer PIX_PER_BEAT = 256 / PIX_W;      // 16 (EO) or 32 (IR)
+    localparam integer PACK_CW = (PIX_PER_BEAT == 32) ? 5 : 4;
+    reg [PACK_CW-1:0] pack_count;
     reg [28:0] row_base_addr;
     reg [28:0] beat_addr;
     reg [255:0] pack_buf;
@@ -336,26 +358,10 @@ module EoV19DdrCamWriter #(
         end
     end
 
+    // Indexed rather than a 16-way case, so the lane count follows PIX_W.
     always @* begin
         pack_buf_next = pack_buf;
-        case (pack_count)
-            4'd0:  pack_buf_next[15:0]     = cam_packed;
-            4'd1:  pack_buf_next[31:16]    = cam_packed;
-            4'd2:  pack_buf_next[47:32]    = cam_packed;
-            4'd3:  pack_buf_next[63:48]    = cam_packed;
-            4'd4:  pack_buf_next[79:64]    = cam_packed;
-            4'd5:  pack_buf_next[95:80]    = cam_packed;
-            4'd6:  pack_buf_next[111:96]   = cam_packed;
-            4'd7:  pack_buf_next[127:112]  = cam_packed;
-            4'd8:  pack_buf_next[143:128]  = cam_packed;
-            4'd9:  pack_buf_next[159:144]  = cam_packed;
-            4'd10: pack_buf_next[175:160]  = cam_packed;
-            4'd11: pack_buf_next[191:176]  = cam_packed;
-            4'd12: pack_buf_next[207:192]  = cam_packed;
-            4'd13: pack_buf_next[223:208]  = cam_packed;
-            4'd14: pack_buf_next[239:224]  = cam_packed;
-            default: pack_buf_next[255:240] = cam_packed;
-        endcase
+        pack_buf_next[pack_count*PIX_W +: PIX_W] = cam_packed;
     end
 
     always @(posedge cam_clk) begin
@@ -368,7 +374,7 @@ module EoV19DdrCamWriter #(
             frame_epoch <= {EPOCH_W{1'b0}};
             row_y <= 11'd0;
             pix_x <= 11'd0;
-            pack_count <= 4'd0;
+            pack_count <= {PACK_CW{1'b0}};
             row_base_addr <= CAM_BASE_ADDR;
             beat_addr <= CAM_BASE_ADDR;
             pack_buf <= 256'd0;
@@ -387,7 +393,7 @@ module EoV19DdrCamWriter #(
                 frame_seen <= 1'b1;
                 row_y <= 11'd0;
                 pix_x <= 11'd0;
-                pack_count <= 4'd0;
+                pack_count <= {PACK_CW{1'b0}};
                 pack_buf <= 256'd0;
 
                 if (frame_seen && !drop_frame && have_bank) begin
@@ -453,7 +459,7 @@ module EoV19DdrCamWriter #(
                     drop_frame <= 1'b1;
                 end
             end else if (!drop_frame && have_bank && fifo_prog_full &&
-                         cam_active && (pix_x < `EO_V19_INPUT_W)) begin
+                         cam_active && (pix_x < INPUT_W)) begin
                 // A frame can be admitted with comfortable headroom and still
                 // encounter a rare DDR-service stall while its 129,600 payload
                 // beats are in flight.  Do not wait for hard FIFO full: stop
@@ -464,16 +470,16 @@ module EoV19DdrCamWriter #(
                 // published to the six-camera frame-set manager.
                 drop_frame <= 1'b1;
                 pix_x <= 11'd0;
-                pack_count <= 4'd0;
+                pack_count <= {PACK_CW{1'b0}};
                 pack_buf <= 256'd0;
                 row_base_addr <= bank_base_addr(wr_bank);
                 beat_addr <= bank_base_addr(wr_bank);
             end else if (!drop_frame && have_bank && cam_active &&
-                         (pix_x < `EO_V19_INPUT_W)) begin
+                         (pix_x < INPUT_W)) begin
                 pack_buf <= pack_buf_next;
                 pix_x <= pix_x + 11'd1;
-                if (pack_count == 4'd15) begin
-                    pack_count <= 4'd0;
+                if (pack_count == PIX_PER_BEAT[PACK_CW-1:0] - 1'b1) begin
+                    pack_count <= {PACK_CW{1'b0}};
                     pack_buf <= 256'd0;
                     // beat_in_bank is belt-and-braces against the same
                     // runaway the line_end guard above stops: never emit a
@@ -493,11 +499,11 @@ module EoV19DdrCamWriter #(
                     end
                     beat_addr <= beat_addr + BEAT_STRIDE_ADDR;
                 end else begin
-                    pack_count <= pack_count + 4'd1;
+                    pack_count <= pack_count + 1'b1;
                 end
             end else if (line_end) begin
                 pix_x <= 11'd0;
-                pack_count <= 4'd0;
+                pack_count <= {PACK_CW{1'b0}};
                 pack_buf <= 256'd0;
                 // Address containment.  row_y saturates at 1079, but the
                 // address used to keep advancing on every further line_end, so
