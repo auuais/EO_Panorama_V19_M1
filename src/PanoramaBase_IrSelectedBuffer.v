@@ -112,14 +112,22 @@ module IrSelectedFrameBuffer #(
     // rd_clk, so this is only an edge detect.  Used to measure how closely the
     // six IR cameras actually follow the genlock edge, which decides whether
     // the panorama needs DDR frame de-skew or can run from small line caches.
-    output wire [5:0]  cam_frame_pulse
+    output wire [5:0]  cam_frame_pulse,
+    // Frame START, from vsync RISING.  cam_frame_pulse above is frame END
+    // (ftog_wr toggles on vsync falling), which is the wrong event to measure
+    // ingress skew with: aligned frame ends only imply aligned frame starts if
+    // every camera's raster is the same length, and a camera on this rig has
+    // already been seen returning from a power cycle with 641 active clocks per
+    // line (see the line-marker comment below).
+    output wire [5:0]  cam_sof_pulse
 );
     localparam integer FRAME_PIXELS = SRC_W * SRC_H;
     localparam integer CDC_DEPTH    = 64;
 
     wire [5:0] cam_empty;
     wire [9:0] cam_dout [0:5];
-    wire [5:0] cam_ftog;             // per-camera frame toggle, rd_clk synced
+    wire [5:0] cam_ftog;             // per-camera frame-END toggle, rd_clk synced
+    wire [5:0] cam_stog;             // per-camera frame-START toggle, rd_clk synced
     reg  [5:0] cam_pop;
     wire [5:0] cam_alive_tgl;        // free-running beacon from each camera
     wire [5:0] cam_wr_rst_busy;
@@ -171,6 +179,7 @@ module IrSelectedFrameBuffer #(
         reg [10:0] x_cnt, y_cnt;
         reg        wr_vsync_d, hs_d, first_line_seen;
         reg        ftog_wr;
+        reg        stog_wr;
         reg        sof_pending, sol_pending;
         wire wr_sof   = wvs && !wr_vsync_d;
         wire hs_rise  = whs && !hs_d;
@@ -217,6 +226,7 @@ module IrSelectedFrameBuffer #(
                 first_line_seen <= 1'b0;
                 sof_pending <= 1'b0; sol_pending <= 1'b0;
                 ftog_wr <= 1'b0;
+                stog_wr <= 1'b0;
             end else begin
                 wr_vsync_d <= wvs;
                 hs_d       <= whs;
@@ -225,6 +235,11 @@ module IrSelectedFrameBuffer #(
                     y_cnt <= 11'd0;
                     first_line_seen <= 1'b0;
                     x_cnt <= wr_take ? 11'd1 : 11'd0;
+                    // Unconditional, unlike ftog_wr's "did this frame have any
+                    // content" guard: a start is a start, and gating it on
+                    // counter state would suppress the very first frame after
+                    // a rejoin -- exactly the one worth timing.
+                    stog_wr <= ~stog_wr;
                 end else if (hs_rise) begin
                     // A pixel accepted on this same edge is pixel 0.
                     x_cnt <= wr_take ? 11'd1 : 11'd0;
@@ -280,11 +295,18 @@ module IrSelectedFrameBuffer #(
         // Frame-completion toggle into rd_clk, one per camera so the selected
         // camera's pulse is available the moment it is selected.
         (* ASYNC_REG = "TRUE" *) reg ftog_meta, ftog_sync;
+        (* ASYNC_REG = "TRUE" *) reg stog_meta, stog_sync;
         always @(posedge rd_clk) begin
-            if (!rst_n) begin ftog_meta <= 1'b0; ftog_sync <= 1'b0; end
-            else          begin ftog_meta <= ftog_wr;  ftog_sync <= ftog_meta; end
+            if (!rst_n) begin
+                ftog_meta <= 1'b0; ftog_sync <= 1'b0;
+                stog_meta <= 1'b0; stog_sync <= 1'b0;
+            end else begin
+                ftog_meta <= ftog_wr;  ftog_sync <= ftog_meta;
+                stog_meta <= stog_wr;  stog_sync <= stog_meta;
+            end
         end
         assign cam_ftog[gi] = ftog_sync;
+        assign cam_stog[gi] = stog_sync;
     end
     endgenerate
 
@@ -369,6 +391,13 @@ module IrSelectedFrameBuffer #(
             end
         end
     end
+
+    reg [5:0] cam_stog_d;
+    always @(posedge rd_clk) begin
+        if (!rst_n) cam_stog_d <= 6'd0;
+        else        cam_stog_d <= cam_stog;
+    end
+    assign cam_sof_pulse = cam_stog ^ cam_stog_d;
 
     reg [5:0] cam_ftog_d;
     always @(posedge rd_clk) begin

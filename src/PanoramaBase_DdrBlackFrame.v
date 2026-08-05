@@ -617,7 +617,8 @@ module PanoramaBase_DdrBlackFrame(
     wire       sel_pulse_w;
     wire       sel_frame_valid_w;   // low once the selected camera stops
     wire [5:0] ir_rejoin_busy;      // per IR camera, high while re-baselining
-    wire [5:0] ir_cam_frame_pulse;  // per IR camera frame start, ui_clk
+    wire [5:0] ir_cam_frame_pulse;  // per IR camera frame END (vsync fall), ui_clk
+    wire [5:0] ir_cam_sof_pulse;    // per IR camera frame START (vsync rise), ui_clk
     wire [63:0] ir_skew_dbg;
 
     IrSelectedFrameBuffer u_ir_framebuf (
@@ -641,22 +642,27 @@ module PanoramaBase_DdrBlackFrame(
         // was rejected (V19_TEMPORAL_INTEGRITY_VALIDATION_20260728.md).  Wire
         // it to a probe only if an IR camera fails to return after this fix.
         .rejoin_busy(ir_rejoin_busy),
-        .cam_frame_pulse(ir_cam_frame_pulse)
+        .cam_frame_pulse(ir_cam_frame_pulse),
+        .cam_sof_pulse(ir_cam_sof_pulse)
     );
 
     //------------------------------------------------------------------------
-    // How closely do the six IR cameras follow the genlock edge?
+    // How far apart do the six IR cameras START their frames?
     //
-    // This has never been measured on these cameras, and it decides the IR
-    // panorama's ingress: a few rows of spread means small line caches are
-    // enough, tens or hundreds means the frames have to be de-skewed through
-    // DDR the way EO is.  Measurement only -- nothing in the datapath reads it.
+    // This decides the IR panorama's ingress: a few rows of spread means the
+    // direct line-cache path is viable, tens or hundreds means the frames have
+    // to be de-skewed through DDR the way EO is.  Measurement only -- nothing
+    // in the datapath reads it.
+    //
+    // Fed from cam_sof_pulse (vsync RISING), not cam_frame_pulse (vsync
+    // falling): frame ends only align with frame starts if every camera's
+    // raster is the same length, which is not guaranteed on this rig.
     //------------------------------------------------------------------------
     IrGenlockSkewMonitor u_ir_skew (
         .clk             (c0_ddr4_ui_clk),
         .rst             (ui_rst),
         .genlock_pulse   (ir_genlock_pulse),
-        .cam_frame_pulse (ir_cam_frame_pulse),
+        .cam_sof_pulse   (ir_cam_sof_pulse),
         .dbg             (ir_skew_dbg)
     );
 
