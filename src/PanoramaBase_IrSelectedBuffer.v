@@ -265,16 +265,32 @@ module IrSelectedFrameBuffer #(
     reg [FRAME_ADDR_W-1:0] mem_waddr;
     reg [7:0]              mem_din;
 
+    // A newly selected camera is part-way down its raster -- the operator's
+    // mode change is not synchronised to anyone's vsync -- and its pixels
+    // carry no origin until its next start-of-frame marker.  Writing them
+    // straight away places them at whatever address the PREVIOUS camera left
+    // behind, so the buffer becomes a blend of the two.  Measured on the
+    // switch bench: 138,877 of 327,680 pixels still belonged to the old
+    // camera.  Hold writes off until the new camera's own frame starts.
+    reg armed;
+
     always @(posedge rd_clk) begin
         if (!rst_n) begin
             w_addr    <= {FRAME_ADDR_W{1'b0}};
             line_base <= {FRAME_ADDR_W{1'b0}};
             mem_we    <= 1'b0;
+            armed     <= 1'b0;
+        end else if (ir_sel != ir_sel_q) begin
+            mem_we    <= 1'b0;
+            armed     <= 1'b0;
+            w_addr    <= {FRAME_ADDR_W{1'b0}};
+            line_base <= {FRAME_ADDR_W{1'b0}};
         end else begin
             mem_we <= 1'b0;
-            if (sel_valid) begin
+            if (sel_valid && (armed || sel_data[9])) begin
                 mem_din <= sel_data[7:0];
                 if (sel_data[9]) begin              // start of frame
+                    armed     <= 1'b1;
                     mem_waddr <= {FRAME_ADDR_W{1'b0}};
                     mem_we    <= 1'b1;
                     w_addr    <= {{(FRAME_ADDR_W-1){1'b0}}, 1'b1};
@@ -325,6 +341,14 @@ module IrSelectedFrameBuffer #(
                 frame_valid <= 1'b0;
                 cam_seen    <= 6'd0;
                 stale_cnt   <= {STALE_BITS{1'b0}};
+            end else if (!armed) begin
+                // Waiting for the newly selected camera's start-of-frame.  Its
+                // completion toggle will fire at the end of the frame it was
+                // already part-way through -- that frame was never written
+                // here, so it must NOT publish.  Restart the staleness window
+                // from the switch so a slow camera cannot look dead while it
+                // finishes the raster it was in the middle of.
+                stale_cnt <= {STALE_BITS{1'b0}};
             end else if (cam_ftog[ir_sel] != ftog_d) begin
                 cam_seen[ir_sel] <= 1'b1;
                 frame_valid      <= 1'b1;
