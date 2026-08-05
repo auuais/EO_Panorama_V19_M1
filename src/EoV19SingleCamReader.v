@@ -28,8 +28,10 @@
 // directly: for each logical row, the whole of physical row L, then the whole
 // of physical row L+480.
 //
-// The 1080-line camera frame is cropped to the 960-line window, centred, so
-// output row r reads source row r + ROW_CROP.
+// Output row r reads source row r + ROW_CROP, so a shorter output window can
+// be taken from the middle of the camera frame.  EO single now instantiates
+// this at the camera's full native 1920x1080 with ROW_CROP = 0 -- the earlier
+// 960-row window silently discarded 60 rows top and bottom.
 //
 module EoV19SingleCamReader #(
     parameter [28:0] SRC_BASE_ADDR   = 29'd2100000,
@@ -68,14 +70,16 @@ module EoV19SingleCamReader #(
     localparam integer FIFO_AW    = 5;
 
     // ---- issue side -----------------------------------------------------
-    reg [8:0]  iss_row;      // logical row, 0..FOLD_HALF_ROWS-1
+    // 10 bits: the tall (1080-row) geometry folds into 540 logical rows, which
+    // does not fit the 9 bits the 960-row geometry needed.
+    reg [9:0]  iss_row;      // logical row, 0..FOLD_HALF_ROWS-1
     reg        iss_half;
     reg [6:0]  iss_beat;     // 0..BEATS_PER_ROW-1
     reg        iss_done;
     reg [2:0]  cam_q;
     reg [1:0]  bank_q;
 
-    wire [10:0] iss_out_row = {2'b0, iss_row} + (iss_half ? FOLD_HALF_ROWS[10:0] : 11'd0);
+    wire [10:0] iss_out_row = {1'b0, iss_row} + (iss_half ? FOLD_HALF_ROWS[10:0] : 11'd0);
     wire [10:0] iss_src_row = iss_out_row + ROW_CROP[10:0];
 
     // row_offset = src_row * 960 = (r<<10) - (r<<6); no wide multiplier.
@@ -104,14 +108,14 @@ module EoV19SingleCamReader #(
     assign px_valid = shift_live && px_ready;
     assign px_data  = shift[15:0];
 
-    reg [18:0] px_count;      // pixels emitted this frame
+    reg [20:0] px_count;      // pixels emitted this frame (up to 1920*1080)
 
     assign dbg = {iss_done, iss_half, frame_done, shift_live,
                   count[4:0], iss_beat};
 
     always @(posedge clk) begin
         if (ui_rst || !rst_n || !run_enable) begin
-            iss_row      <= 9'd0;
+            iss_row      <= 10'd0;
             iss_half     <= 1'b0;
             iss_beat     <= 7'd0;
             iss_done     <= 1'b0;
@@ -122,7 +126,7 @@ module EoV19SingleCamReader #(
             count        <= {(FIFO_AW+1){1'b0}};
             credits      <= CREDITS[5:0];
             shift_n      <= 5'd0;
-            px_count     <= 19'd0;
+            px_count     <= 21'd0;
             frame_done   <= 1'b0;
             cam_q        <= cam_sel;
             bank_q       <= bank_sel;
@@ -142,8 +146,8 @@ module EoV19SingleCamReader #(
                         iss_half <= 1'b1;
                     end else begin
                         iss_half <= 1'b0;
-                        if (iss_row == FOLD_HALF_ROWS[8:0] - 9'd1) iss_done <= 1'b1;
-                        else                                       iss_row  <= iss_row + 9'd1;
+                        if (iss_row == FOLD_HALF_ROWS[9:0] - 10'd1) iss_done <= 1'b1;
+                        else                                        iss_row  <= iss_row + 10'd1;
                     end
                 end else begin
                     iss_beat <= iss_beat + 7'd1;
@@ -178,7 +182,7 @@ module EoV19SingleCamReader #(
                 if (px_ready) begin
                     shift   <= {16'd0, shift[255:16]};
                     shift_n <= shift_n - 5'd1;
-                    px_count <= px_count + 19'd1;
+                    px_count <= px_count + 21'd1;
                 end
             end else if (!fifo_empty) begin
                 shift   <= fifo[rd_ptr];
@@ -192,9 +196,9 @@ module EoV19SingleCamReader #(
                 default: ;
             endcase
 
-            if (iss_done && fifo_empty && !shift_live && (px_count != 19'd0)) begin
+            if (iss_done && fifo_empty && !shift_live && (px_count != 21'd0)) begin
                 frame_done <= 1'b1;
-                px_count   <= 19'd0;
+                px_count   <= 21'd0;
             end
         end
     end

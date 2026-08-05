@@ -15,7 +15,14 @@
 // order, a dropped frame marker and per-line drift.  This bench exists so
 // the EO path does not repeat that.
 //
-module tb_EoV19SingleCamReader;
+// OUT_ROWS/HALF/CROP are parameters so the same checker runs against both
+// deployed geometries: the 960-row panorama window and the 1080-row full-frame
+// window EO single now uses.  Elaborate tb_eo_reader_960 or tb_eo_reader_1080.
+module tb_EoV19SingleCamReader #(
+    parameter integer OUT_ROWS    = 960,
+    parameter integer HALF        = 480,
+    parameter integer CROP        = 60
+);
 
     localparam [28:0] BASE         = 29'd2100000;
     localparam [28:0] CAM_STRIDE   = 29'd4147208;
@@ -23,9 +30,6 @@ module tb_EoV19SingleCamReader;
     localparam [28:0] ROW_STRIDE   = 29'd960;
     localparam [28:0] BEAT_STRIDE  = 29'd8;
     localparam integer BPR         = 120;
-    localparam integer OUT_ROWS    = 960;
-    localparam integer HALF        = 480;
-    localparam integer CROP        = 60;
     localparam integer LAT         = 17;   // DDR return latency
 
     localparam [2:0] CAM  = 3'd4;
@@ -155,4 +159,14 @@ module tb_EoV19SingleCamReader;
         $display("FAIL - timeout, frame never completed (emitted %0d)", checked);
         $finish;
     end
+endmodule
+
+// Concrete tops, one per deployed geometry.  Wrappers rather than
+// -generic_top because xelab drops the '=' in generic overrides here.
+module tb_eo_reader_960;
+    tb_EoV19SingleCamReader #(.OUT_ROWS(960),  .HALF(480), .CROP(60)) u();
+endmodule
+
+module tb_eo_reader_1080;
+    tb_EoV19SingleCamReader #(.OUT_ROWS(1080), .HALF(540), .CROP(0))  u();
 endmodule

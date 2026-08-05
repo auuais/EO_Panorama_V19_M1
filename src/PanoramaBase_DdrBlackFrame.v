@@ -180,9 +180,25 @@ module PanoramaBase_DdrBlackFrame(
     localparam [5:0]   PIXELS_PER_BEAT_LAST  = PIXELS_PER_BEAT - 1;
     localparam [20:0]  FRAME_PIXELS  = SRC_W * SRC_H;      // 1,843,200 (EO) / 327,680 (ramp) / 2,073,600 (EO0RAW)
     localparam [17:0]  BEATS_TOTAL   = FRAME_PIXELS / PIXELS_PER_BEAT; // 115,200 low-256-bit beats for EO V19
+    // EO single must present the camera's full native 1920x1080, while the
+    // panorama stays 1920x960 -- growing the panorama to 1080 would add 12.5%
+    // to both the framebuffer write and the scan-out read on a compositor
+    // that is already starved.  So the height is per-mode.
+    //
+    // The ADDRESS MAP is sized for the taller of the two and never changes:
+    // the ping-pong banks must sit at fixed bases, because a bank written at
+    // one height and scanned at another is read as garbage.  Only the number
+    // of rows actually written and scanned varies, so the panorama still
+    // moves exactly the traffic it moves today.
+    localparam integer OUT_ROWS_TALL = 1080;
+    localparam integer OUT_ROWS_MAX  = (SRC_SEL == SRC_V19) ? OUT_ROWS_TALL : SRC_H;
+    localparam [17:0]  BEATS_TOTAL_MAX = (SRC_W * OUT_ROWS_MAX) / PIXELS_PER_BEAT;
+    localparam [17:0]  BEATS_TOTAL_TALL = (SRC_W * OUT_ROWS_TALL) / PIXELS_PER_BEAT; // 129,600
     localparam [28:0]  ADDR_STRIDE   = 29'd8;              // app_addr units per BL8 beat
     localparam [28:0]  BANK0_BASE    = 29'd0;
-    localparam [28:0]  BANK1_BASE    = BEATS_TOTAL * ADDR_STRIDE; // 921,600 (EO) / 163,840 (ramp) / 153,600 (EO0) / 1,036,800 (EO0RAW)
+    // 1,036,800 for V19 (two banks span 0..2,073,600, clear of
+    // V19_SRC_BASE_ADDR at 2,100,000); unchanged for every other source.
+    localparam [28:0]  BANK1_BASE    = BEATS_TOTAL_MAX * ADDR_STRIDE;
     localparam [28:0]  V19_SRC_BASE_ADDR    = 29'd2100000;
     localparam [28:0]  V19_SRC_FRAME_STRIDE = 29'd1036800;  // 1920*1080*2 bytes, low-256 payload: 129600 beats * 8
     // Four leased frame banks per camera (4 * 1,036,800 = 4,147,200), plus a
@@ -300,6 +316,7 @@ module PanoramaBase_DdrBlackFrame(
                                     // read (see docs/DDR_READ_CADENCE_VT_TRACKING_FIX_PLAN.md),
                                     // not real scan data
     reg          cmd_is_src_read;  // V19 DDR source replay read, returned to the de-skew engine
+    reg          cmd_src_is_eo;    // ...and which reader issued it (EO single vs panorama replay)
     reg  [28:0]  cmd_addr_q;
     reg          wdf_pend;
     reg  [DDR_APP_DATA_W-1:0] wdf_data_q;
@@ -668,15 +685,35 @@ module PanoramaBase_DdrBlackFrame(
     reg [5:0]  fb_pack_count;
     reg [17:0] fb_burst_count;
     reg [DDR_APP_DATA_W-1:0] fb_pack_buf;
+    //------------------------------------------------------------------------
+    // Active output geometry.  geom_1080 is a REGISTER that only ever changes
+    // while the pipeline is drained and the picture is blanked (see the
+    // geometry-change quiesce at the end of the main ui_clk block), so
+    // everything derived from it is stable for the whole of any frame.
+    //------------------------------------------------------------------------
+    reg  geom_1080;
+    reg  geom_quiesce;
+    wire want_geom_1080 = (SRC_SEL == SRC_V19) && eo_single_ui;
+    wire [17:0] active_beats = (SRC_SEL != SRC_V19) ? BEATS_TOTAL :
+                               geom_1080 ? BEATS_TOTAL_TALL : BEATS_TOTAL;
+    // Fold address jumps, in app_addr units, for the 3840xN logical -> 1920x2N
+    // physical fold.  Rows are 120 beats either way, so only the half-height
+    // differs: forward = (half*120 - 119)*8, back = ((half-1)*120 + 119)*8.
+    //   960 rows (half 480): 57481*8 = 459,848   57599*8 = 460,792
+    //  1080 rows (half 540): 64681*8 = 517,448   64799*8 = 518,392
+    wire [28:0] fold_jump_fwd  = geom_1080 ? 29'd517448 : 29'd459848;
+    wire [28:0] fold_jump_back = geom_1080 ? 29'd518392 : 29'd460792;
+
     wire v19_consumer_done = (SRC_SEL == SRC_V19) && write_retiring &&
                              !cmd_write_capture &&
-                             (fb_burst_count == BEATS_TOTAL - 1);
+                             (fb_burst_count == active_beats - 18'd1);
     reg [28:0] wr_addr;
-    // Logical V19 stream is 3840x480 (240 beats per row); the deployable
-    // framebuffer is 1920x960 (120 beats per row).  These counters drive the
-    // fold-on-write address map without a divider in the pixel pack path.
+    // Logical V19 stream is 3840xN (240 beats per row); the deployable
+    // framebuffer is 1920x2N (120 beats per row), N being 480 for the panorama
+    // and 540 for full-frame EO single.  These counters drive the fold-on-write
+    // address map without a divider in the pixel pack path.
     reg [7:0] fb_fold_beat_x;
-    reg [8:0] fb_fold_row;
+    reg [9:0] fb_fold_row;   // 10 bits: counts to 540 in the tall geometry
 
 
     // ping-pong bank bookkeeping
@@ -707,32 +744,26 @@ module PanoramaBase_DdrBlackFrame(
     // FIFO directly on c0_ddr4_app_rd_data_valid and is the leading
     // suspect for the blank-screen regression it caused (a FWFT dout
     // timing mismatch could silently misclassify real scan completions as
-    // keepalive-discard). One bit per accepted read command (0=real scan,
-    // 1=keepalive dummy), pushed on read_retiring, classified+popped on
-    // c0_ddr4_app_rd_data_valid -- the native interface returns
-    // completions strictly in issue order, so a plain in-order ring
-    // buffer is an exact match, no reordering to account for. Depth 32
-    // gives 2x margin over MAX_OUTSTANDING so it can never overflow in
-    // normal operation; rd_tag_overflow/underflow are sticky hardware
-    // bring-up alarms, not expected to ever fire.
+    // keepalive-discard). Two bits per accepted read command (scan, keepalive
+    // dummy, panorama-replay source, EO-single source), pushed on
+    // read_retiring, classified+popped on c0_ddr4_app_rd_data_valid -- the
+    // native interface returns completions strictly in issue order, so a
+    // plain in-order ring buffer is an exact match, no reordering to account
+    // for. Depth 32 gives 2x margin over MAX_OUTSTANDING so it can never
+    // overflow in normal operation; the queue's overflow/underflow outputs
+    // are sticky bring-up alarms, not expected to ever fire.
     localparam integer RD_TAG_DEPTH  = 32;
     localparam integer RD_TAG_AWIDTH = 5;   // log2(RD_TAG_DEPTH)
-    localparam [1:0] RD_TAG_SCAN      = 2'd0;
-    localparam [1:0] RD_TAG_KEEPALIVE = 2'd1;
-    localparam [1:0] RD_TAG_V19_SRC   = 2'd2;
-    reg [1:0]               rd_tag_mem [0:RD_TAG_DEPTH-1];
-    reg [RD_TAG_AWIDTH-1:0] rd_tag_head;
-    reg [RD_TAG_AWIDTH-1:0] rd_tag_tail;
-    reg [RD_TAG_AWIDTH:0]   rd_tag_count;   // 0..32, one extra bit vs the index width
-    reg                     rd_tag_overflow;
-    reg                     rd_tag_underflow;
-    // Classification of the return CURRENTLY completing (valid the same
-    // cycle as c0_ddr4_app_rd_data_valid, read from the queue tail BEFORE
-    // it advances this same cycle -- ordinary synchronous-FIFO
-    // read-before-pop semantics, not FWFT).
-    wire [1:0] rd_return_tag = rd_tag_mem[rd_tag_tail];
-    wire rd_return_is_keepalive = (rd_return_tag == RD_TAG_KEEPALIVE);
-    wire rd_return_is_v19_src   = (rd_return_tag == RD_TAG_V19_SRC);
+    // The queue itself lives in EoV19ReadTagQueue so the ownership routing can
+    // be exercised by a testbench; see that file for why ownership has to be
+    // recorded at issue time rather than inferred at return time.
+    wire [RD_TAG_AWIDTH:0] rd_tag_count;
+    wire rd_return_is_keepalive;
+    wire rd_return_is_v19_src;
+    wire rd_return_is_eo_src;
+    // Either owner's return still bypasses beat_fifo (that path is scan-out
+    // only); only the destination differs.
+    wire rd_return_is_src       = rd_return_is_v19_src || rd_return_is_eo_src;
 
     // frame-boundary flush/resync: see flush_active state machine below
     reg        flush_active;
@@ -812,7 +843,13 @@ module PanoramaBase_DdrBlackFrame(
     wire        v19_eo_start_pending;
     wire        v19_eo_stale;
     wire        v19_src_rd_ready;
-    reg         v19_src_rd_data_valid;
+    // Which reader owns the port right now.  eo_single_ui is the deglitched
+    // mode, already at module scope, so this needs no cross-generate binding.
+    wire        v19_src_owner_is_eo = (SRC_SEL == SRC_V19) && eo_single_ui;
+    // One data register, two valids: only one owner's return can complete in
+    // a given cycle, and each reader samples the data on its own valid.
+    reg         v19_replay_rd_data_valid;
+    reg         eo_src_rd_data_valid;
     reg [DDR_APP_DATA_W-1:0] v19_src_rd_data;
     wire        v19_frames_valid;
     wire        v19_frame_done;
@@ -1110,8 +1147,9 @@ module PanoramaBase_DdrBlackFrame(
     // rd_bank and produced the motion-dependent horizontal frame split.
     wire copy_bank_available = !pending_valid &&
                                (!frame_valid || (wr_bank != rd_bank));
+    // No new copy may start into a bank whose geometry is about to change.
     wire copy_start_accept = copy_start_trig && !copy_active &&
-                             copy_bank_available;
+                             copy_bank_available && !geom_quiesce;
     wire v19_output_bank_conflict = (SRC_SEL == SRC_V19) && copy_active &&
                                     frame_valid && (wr_bank == rd_bank);
 
@@ -1499,7 +1537,11 @@ module PanoramaBase_DdrBlackFrame(
             .source_need_row(v19_source_need_row),
             .source_start_row(v19_source_start_row),
             .rd_req_valid(v19_replay_rd_valid), .rd_req_addr(v19_replay_rd_addr),
-            .rd_req_ready(v19_src_rd_ready), .rd_data_valid(v19_src_rd_data_valid),
+            // Gate the accept with ownership too, so the replay's in-flight
+            // accounting can never be advanced by an accept meant for the EO
+            // reader (it is held in reset then, but this makes it structural).
+            .rd_req_ready(v19_src_rd_ready && !v19_src_owner_is_eo),
+            .rd_data_valid(v19_replay_rd_data_valid),
             .rd_data(v19_src_rd_data), .replay_clk(v19_replay_clk),
             .replay_hsync0(v19_cam0_hsync), .replay_vsync0(v19_cam0_vsync), .replay_pixel0(v19_cam0_pixel),
             .replay_hsync1(v19_cam1_hsync), .replay_vsync1(v19_cam1_vsync), .replay_pixel1(v19_cam1_pixel),
@@ -1709,16 +1751,18 @@ module PanoramaBase_DdrBlackFrame(
             .ROW_STRIDE    (V19_SRC_ROW_STRIDE),
             .BEAT_STRIDE   (29'd8),
             .BEATS_PER_ROW (120),
-            .OUT_ROWS      (SRC_H),
-            .FOLD_HALF_ROWS(SRC_H/2),
-            .ROW_CROP      ((1080 - SRC_H) / 2)
+            // Full native frame, no crop: EO single runs the output window at
+            // OUT_ROWS_TALL while the panorama stays at SRC_H.
+            .OUT_ROWS      (OUT_ROWS_TALL),
+            .FOLD_HALF_ROWS(OUT_ROWS_TALL/2),
+            .ROW_CROP      (0)
         ) u_eo_single_reader (
             .clk(c0_ddr4_ui_clk), .rst_n(rst_n), .ui_rst(ui_rst),
             .run_enable(eo_mode && copy_active && !eo_stale),
             .cam_sel(eo_sel_ui), .bank_sel(eo_bank_q),
             .rd_req_valid(eo_rd_valid), .rd_req_addr(eo_rd_addr),
-            .rd_req_ready(v19_src_rd_ready),
-            .rd_data_valid(v19_src_rd_data_valid),
+            .rd_req_ready(v19_src_rd_ready && v19_src_owner_is_eo),
+            .rd_data_valid(eo_src_rd_data_valid),
             .rd_data(v19_src_rd_data[255:0]),
             .px_valid(eo_px_valid), .px_data(eo_px_data),
             .px_ready(eo_px_ready),
@@ -2590,6 +2634,9 @@ module PanoramaBase_DdrBlackFrame(
             cmd_is_rd        <= 1'b0;
             cmd_is_keepalive <= 1'b0;
             cmd_is_src_read  <= 1'b0;
+            cmd_src_is_eo    <= 1'b0;
+            geom_1080        <= 1'b0;
+            geom_quiesce     <= 1'b0;
             cmd_addr_q       <= 29'd0;
             wdf_pend         <= 1'b0;
             wdf_data_q       <= BLACK_BURST;
@@ -2604,7 +2651,7 @@ module PanoramaBase_DdrBlackFrame(
             fb_pack_count    <= 6'd0;
             fb_burst_count   <= 18'd0;
             fb_fold_beat_x   <= 8'd0;
-            fb_fold_row      <= 9'd0;
+            fb_fold_row      <= 10'd0;
             fb_pack_buf      <= {DDR_APP_DATA_W{1'b0}};
             wr_addr          <= BANK0_BASE;
             copy_active      <= 1'b0;
@@ -2648,7 +2695,8 @@ module PanoramaBase_DdrBlackFrame(
             v19_cap4_pop     <= 1'b0;
             v19_cap5_pop     <= 1'b0;
             v19_cap_marker_pop_pending <= 1'b0;
-            v19_src_rd_data_valid <= 1'b0;
+            v19_replay_rd_data_valid <= 1'b0;
+            eo_src_rd_data_valid     <= 1'b0;
             v19_src_rd_data <= {DDR_APP_DATA_W{1'b0}};
         end else begin
             // --- default strobes (single-cycle) ---
@@ -2663,7 +2711,8 @@ module PanoramaBase_DdrBlackFrame(
             v19_cap5_pop         <= 1'b0;
             if (v19_cap_marker_pop_pending)
                 v19_cap_marker_pop_pending <= 1'b0;
-            v19_src_rd_data_valid <= 1'b0;
+            v19_replay_rd_data_valid <= 1'b0;
+            eo_src_rd_data_valid     <= 1'b0;
 
             // renderer frame-toggle CDC (rd_clk -> ui_clk)
             ftog_meta   <= renderer_frame_toggle;
@@ -2707,8 +2756,14 @@ module PanoramaBase_DdrBlackFrame(
                 // keepalive dummy completion is discarded here (v1's
                 // suspected bug was exactly this classification going
                 // wrong; see rd_return_is_keepalive's declaration comment).
-                if (rd_return_is_v19_src) begin
-                    v19_src_rd_data_valid <= 1'b1;
+                if (rd_return_is_src) begin
+                    // Route by the tag pushed when the read was ISSUED, not by
+                    // who owns the port now: at a mode change the previous
+                    // owner's reads are still in flight, and they must land on
+                    // a reader that is held in reset rather than on the one
+                    // just starting.
+                    v19_replay_rd_data_valid <= rd_return_is_v19_src;
+                    eo_src_rd_data_valid     <= rd_return_is_eo_src;
                     v19_src_rd_data <= c0_ddr4_app_rd_data;
                 end else if (!rd_return_is_keepalive && !beat_fifo_full) begin
                     beat_fifo_wr_en <= 1'b1;
@@ -2809,7 +2864,7 @@ module PanoramaBase_DdrBlackFrame(
                     fb_pack_count    <= 6'd0;
                     fb_burst_count   <= 18'd0;
                     fb_fold_beat_x   <= 8'd0;
-                    fb_fold_row      <= 9'd0;
+                    fb_fold_row      <= 10'd0;
                     fb_write_pending <= 1'b0;
                     fb_pack_buf      <= {DDR_APP_DATA_W{1'b0}};
                 end
@@ -2913,7 +2968,7 @@ module PanoramaBase_DdrBlackFrame(
                     // must never consume scan progress.
                     if (!cmd_is_keepalive && !cmd_is_src_read) begin
                         dbg_scan_issue_seen <= 1'b1;
-                        if (rd_issue_count == BEATS_TOTAL - 1) begin
+                        if (rd_issue_count == active_beats - 18'd1) begin
                             scan_active    <= 1'b0;
                             rd_issue_count <= 18'd0;
                         end else begin
@@ -2932,7 +2987,7 @@ module PanoramaBase_DdrBlackFrame(
                     end else begin
                         fb_write_pending <= 1'b0;
                         fb_pack_count    <= 6'd0;
-                        if (fb_burst_count == BEATS_TOTAL - 1) begin
+                        if (fb_burst_count == active_beats - 18'd1) begin
                             // copy complete: publish this bank, flip write bank
                             copy_active   <= 1'b0;
                             pending_bank  <= wr_bank;
@@ -2944,16 +2999,16 @@ module PanoramaBase_DdrBlackFrame(
                             if (SRC_SEL == SRC_V19) begin
                                 if (fb_fold_beat_x == 8'd119) begin
                                     // Logical beat 120 starts the right half at
-                                    // physical row 480+y: 57600-119 beats ahead.
+                                    // physical row (half)+y, one half-frame
+                                    // minus the 119 beats already walked.
                                     fb_fold_beat_x <= 8'd120;
-                                    wr_addr <= wr_addr + 29'd459848;
+                                    wr_addr <= wr_addr + fold_jump_fwd;
                                 end else if (fb_fold_beat_x == 8'd239) begin
                                     // Next logical row returns to physical row
-                                    // y+1: 57599 beats back from the right-half
-                                    // row end.
+                                    // y+1, back from the right-half row end.
                                     fb_fold_beat_x <= 8'd0;
-                                    fb_fold_row    <= fb_fold_row + 9'd1;
-                                    wr_addr <= wr_addr - 29'd460792;
+                                    fb_fold_row    <= fb_fold_row + 10'd1;
+                                    wr_addr <= wr_addr - fold_jump_back;
                                 end else begin
                                     fb_fold_beat_x <= fb_fold_beat_x + 8'd1;
                                     wr_addr <= wr_addr + ADDR_STRIDE;
@@ -2990,6 +3045,9 @@ module PanoramaBase_DdrBlackFrame(
                         cmd_is_rd        <= 1'b1;
                         cmd_is_keepalive <= 1'b0;
                         cmd_is_src_read  <= 1'b1;
+                        // Capture the owner with the command: by the time this
+                        // read returns the mode may already have changed.
+                        cmd_src_is_eo    <= v19_src_owner_is_eo;
                         cmd_addr_q       <= v19_src_rd_addr;
                     end else if (output_write_want) begin
                         // Drain the renderer push FIFO into the inactive
@@ -3069,52 +3127,91 @@ module PanoramaBase_DdrBlackFrame(
             end
 
             outstanding <= outstanding_next;
+
+            //----------------------------------------------------------------
+            // Geometry-change quiesce.
+            //
+            // The output height differs per mode (1080 for EO single, 960 for
+            // everything else), but the ping-pong bank bases do not.  A bank
+            // written at one height and scanned at the other is read as
+            // garbage, so the switch may only happen with the whole output
+            // pipeline empty.
+            //
+            // Deliberately LAST in this block: it overrides frame_valid and
+            // pending_valid set earlier by the commit and write-retire logic,
+            // which is what holds the renderer black and stops the commit path
+            // restarting a scan (the scan only starts when one of those two is
+            // set).  Verilog's last-assignment-wins is doing real work here.
+            //
+            // Keyed on the height alone, not on any mode change, so switching
+            // between EO cameras -- same geometry -- costs nothing.
+            //----------------------------------------------------------------
+            if (SRC_SEL == SRC_V19) begin
+                if (geom_quiesce) begin
+                    // Blank and discard: anything completing during the drain
+                    // belongs to the old geometry.
+                    frame_valid   <= 1'b0;
+                    pending_valid <= 1'b0;
+
+                    // The producer feeding an in-flight copy was torn down by
+                    // the mode change itself, so that copy can never finish --
+                    // abandon it at a clean beat boundary (no output write
+                    // outstanding) rather than wait for it.  Nothing is
+                    // committed, so this cannot show a torn frame.
+                    if (copy_active && !fb_write_pending) begin
+                        copy_active    <= 1'b0;
+                        fb_pack_count  <= 6'd0;
+                        fb_burst_count <= 18'd0;
+                        fb_fold_beat_x <= 8'd0;
+                        fb_fold_row    <= 10'd0;
+                    end
+
+                    if (!copy_active && !scan_active && !flush_active &&
+                        (outstanding_next == 7'd0) && beat_fifo_empty &&
+                        (unpack_count == 6'd0)) begin
+                        geom_1080      <= want_geom_1080;
+                        geom_quiesce   <= 1'b0;
+                        // Restart both banks from a known state: their
+                        // contents are meaningless in the new geometry.
+                        wr_bank        <= 1'b0;
+                        rd_bank        <= 1'b0;
+                        wr_addr        <= BANK0_BASE;
+                        rd_addr        <= BANK0_BASE;
+                        rd_issue_count <= 18'd0;
+                    end
+                end else if (want_geom_1080 != geom_1080) begin
+                    geom_quiesce  <= 1'b1;
+                    frame_valid   <= 1'b0;
+                    pending_valid <= 1'b0;
+                end
+            end
         end
     end
 
     //------------------------------------------------------------------------
-    // Read-return tag queue push/pop (see the rd_tag_* declarations above
-    // for why this is a plain explicit ring buffer, not an XPM FWFT FIFO).
-    // Push happens on read_retiring (any accepted read, real or
-    // keepalive); pop happens on c0_ddr4_app_rd_data_valid -- the native
-    // interface returns completions strictly in issue order, so a plain
-    // FIFO in issue order is an exact match. Handles push+pop landing on
-    // the same cycle correctly (net count unchanged, both pointers
-    // advance independently).
+    // Read-return tag queue.  Push on read_retiring (any accepted read, real
+    // or keepalive); pop on c0_ddr4_app_rd_data_valid.  See EoV19ReadTagQueue
+    // for the ordering argument and for why source-read OWNERSHIP has to be
+    // recorded here at issue time rather than inferred when the beat lands.
     //------------------------------------------------------------------------
-    always @(posedge c0_ddr4_ui_clk) begin
-        if (ui_rst) begin
-            rd_tag_head      <= {RD_TAG_AWIDTH{1'b0}};
-            rd_tag_tail      <= {RD_TAG_AWIDTH{1'b0}};
-            rd_tag_count     <= {(RD_TAG_AWIDTH+1){1'b0}};
-            rd_tag_overflow  <= 1'b0;
-            rd_tag_underflow <= 1'b0;
-        end else begin
-            if (read_retiring) begin
-                if (rd_tag_count == RD_TAG_DEPTH) begin
-                    rd_tag_overflow <= 1'b1;   // sticky -- should never happen
-                end else begin
-                    rd_tag_mem[rd_tag_head] <= cmd_is_src_read ? RD_TAG_V19_SRC :
-                                               cmd_is_keepalive ? RD_TAG_KEEPALIVE :
-                                               RD_TAG_SCAN;
-                    rd_tag_head <= (rd_tag_head == RD_TAG_DEPTH-1) ? {RD_TAG_AWIDTH{1'b0}} : rd_tag_head + 5'd1;
-                end
-            end
-            if (c0_ddr4_app_rd_data_valid) begin
-                if (rd_tag_count == 0) begin
-                    rd_tag_underflow <= 1'b1;  // sticky -- should never happen
-                end else begin
-                    rd_tag_tail <= (rd_tag_tail == RD_TAG_DEPTH-1) ? {RD_TAG_AWIDTH{1'b0}} : rd_tag_tail + 5'd1;
-                end
-            end
-            case ({read_retiring && (rd_tag_count != RD_TAG_DEPTH),
-                   c0_ddr4_app_rd_data_valid && (rd_tag_count != 0)})
-                2'b10:   rd_tag_count <= rd_tag_count + 6'd1;
-                2'b01:   rd_tag_count <= rd_tag_count - 6'd1;
-                default: rd_tag_count <= rd_tag_count;   // 00 (idle) or 11 (push+pop cancel out)
-            endcase
-        end
-    end
+    EoV19ReadTagQueue #(
+        .DEPTH (RD_TAG_DEPTH),
+        .AWIDTH(RD_TAG_AWIDTH)
+    ) u_rd_tag_queue (
+        .clk             (c0_ddr4_ui_clk),
+        .ui_rst          (ui_rst),
+        .push            (read_retiring),
+        .cmd_is_src_read (cmd_is_src_read),
+        .cmd_src_is_eo   (cmd_src_is_eo),
+        .cmd_is_keepalive(cmd_is_keepalive),
+        .pop             (c0_ddr4_app_rd_data_valid),
+        .is_keepalive    (rd_return_is_keepalive),
+        .is_v19_src      (rd_return_is_v19_src),
+        .is_eo_src       (rd_return_is_eo_src),
+        .count           (rd_tag_count),
+        .overflow        (),
+        .underflow       ()
+    );
 
     // In the EO panorama and cam0-only diagnostic builds the copy trigger is
     // free-running on eo_frames_valid rather than gated by ir_single_ui, so
@@ -3216,9 +3313,14 @@ module PanoramaBase_DdrBlackFrame(
         .probe24 ((SRC_SEL == SRC_V19) ? v19_dbg_rows_word2_strobe : dbg_bus[255:192]),
         // V19 DDR replay bring-up visibility: distinguish "source read not
         // requested", "request not accepted", and "return misclassified".
+        // The two return valids are probed separately -- a return landing on
+        // the wrong owner across a mode change is the failure this has to be
+        // able to show.  probe25 is 7 bits wide in the IP, so this displaces
+        // v19_src_rd_ready (a plain wire; accepts remain inferable from
+        // v19_src_rd_valid together with rd_tag_count on probe27).
         .probe25 ({v19_content_row51, v19_frame_done, pending_valid,
                    frame_valid, v19_src_rd_valid,
-                   v19_src_rd_ready, v19_src_rd_data_valid}),
+                   v19_replay_rd_data_valid, eo_src_rd_data_valid}),
         .probe26 (read_gap_counter),
         .probe27 (rd_tag_count)
     );
@@ -3232,12 +3334,14 @@ module PanoramaBase_DdrBlackFrame(
     PanoramaBase_HdDdrRenderer #(
         .SRC_W (SRC_W),
         .SRC_H (SRC_H),
+        .SRC_H_ALT (OUT_ROWS_MAX),
         .X_OFF (WIN_X_OFF),
         .Y_OFF (WIN_Y_OFF)
     ) u_hd_renderer (
         .rst_n          (rst_n),
         .rd_clk         (rd_clk),
         .mode_enabled   (renderer_mode_enabled),
+        .win_tall       (geom_1080),
         .dbg_pulse_seen (dbg_pulse_seen),
         .dbg_wpend_seen (dbg_wpend_seen),
         .dbg_grant_seen (dbg_grant_seen),
@@ -3274,12 +3378,19 @@ endmodule
 module PanoramaBase_HdDdrRenderer #(
     parameter integer SRC_W = 640,
     parameter integer SRC_H = 512,
+    // Alternate (taller) window height, selected at runtime by win_tall.  Set
+    // equal to SRC_H on sources that have only one geometry.
+    parameter integer SRC_H_ALT = 512,
     parameter integer X_OFF = (1920 - 640) / 2,
     parameter integer Y_OFF = (1080 - 512) / 2
 )(
     input  wire        rst_n,
     input  wire        rd_clk,
     input  wire        mode_enabled,
+    // Window height select, ui_clk domain.  A single bit rather than a row
+    // count on purpose: a multi-bit value crossing clock domains can be
+    // sampled mid-change, and this one picks the frame geometry.
+    input  wire        win_tall,
     input  wire        dbg_pulse_seen,
     input  wire        dbg_wpend_seen,
     input  wire        dbg_grant_seen,
@@ -3326,6 +3437,11 @@ module PanoramaBase_HdDdrRenderer #(
     reg        stream_started;
     reg        frame_valid_meta, frame_valid_sync;
     reg [11:0] dbg_meta, dbg_sync;
+    // Latched at the frame boundary so the window height can never change
+    // part-way down a frame.  The ui_clk side only moves win_tall while the
+    // picture is blanked, so this is belt and braces.
+    reg        win_tall_meta, win_tall_sync, win_tall_hold;
+    wire [11:0] win_rows = win_tall_hold ? SRC_H_ALT[11:0] : SRC_H[11:0];
 
     wire cur_vblank = (v_cnt >= HD_ACTIVE_H);
     wire cur_sav    = (h_cnt < SAV_WORDS);
@@ -3339,7 +3455,7 @@ module PanoramaBase_HdDdrRenderer #(
     wire [11:0] cur_x = h_cnt - SAV_WORDS;
     wire        cur_inside_window = cur_active &&
                                     (cur_x >= X_OFF) && (cur_x < (X_OFF + SRC_W)) &&
-                                    (v_cnt >= Y_OFF) && (v_cnt < (Y_OFF + SRC_H));
+                                    (v_cnt >= Y_OFF) && (v_cnt < (Y_OFF + win_rows));
     wire        vblank_drain_window = (v_cnt >= VBLANK_DRAIN_START[10:0]) && (v_cnt <= VBLANK_DRAIN_END[10:0]);
     wire        frame_toggle_line   = end_line && (v_cnt == FRAME_TOGGLE_LINE[10:0]);
 
@@ -3384,6 +3500,9 @@ module PanoramaBase_HdDdrRenderer #(
             stream_started <= 1'b0;
             frame_valid_meta <= 1'b0;
             frame_valid_sync <= 1'b0;
+            win_tall_meta <= 1'b0;
+            win_tall_sync <= 1'b0;
+            win_tall_hold <= 1'b0;
             dbg_meta <= 12'd0;
             dbg_sync <= 12'd0;
         end else begin
@@ -3392,6 +3511,8 @@ module PanoramaBase_HdDdrRenderer #(
             // CDC: ui_clk frame_valid -> rd_clk
             frame_valid_meta <= frame_valid;
             frame_valid_sync <= frame_valid_meta;
+            win_tall_meta    <= win_tall;
+            win_tall_sync    <= win_tall_meta;
             dbg_meta <= {dbg_beat_overflow, mode_enabled, dbg_pulse_seen, dbg_wpend_seen, dbg_grant_seen,
                          dbg_copydone_seen, dbg_scan_issue_seen, dbg_rddata_seen,
                          dbg_pixwrite_seen, copy_active, pending_valid, scan_active};
@@ -3425,6 +3546,8 @@ module PanoramaBase_HdDdrRenderer #(
             if (frame_toggle_line) begin
                 frame_toggle   <= ~frame_toggle;
                 stream_started <= 1'b0;
+                // Adopt any new window height only between frames.
+                win_tall_hold  <= win_tall_sync;
             end
 
             if (cur_sav) begin
