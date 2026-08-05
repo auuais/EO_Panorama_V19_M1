@@ -15,8 +15,23 @@ brightness, EO contrast, IR polarity, stabilization, stabilization method,
 blending area).  Sending arbitrary values there would reprogram the cameras,
 so this tool first reads the STATUS frame the board streams continuously --
 whose bytes 14..20 are those same fields in the same order -- and echoes them
-back unchanged.  Only the video-select byte differs, which makes the
-camera-parameter part of the write a genuine no-op.
+back unchanged.  Only the video-select byte differs.
+
+*** Echoing those params back is NOT a no-op. ***
+
+An earlier version of this comment claimed it was, and that claim was wrong.
+The firmware acts on the parameter bytes whenever it receives the message,
+regardless of whether their values changed: handling PANORAMA_CONTROL
+broadcasts an EO camera parameter write to all six EO cameras.  Values that
+merely match what STATUS already reports still get applied -- STATUS
+reflecting a value is not evidence the camera was ever written with it, and
+a brightness of 0 in particular is a meaningful setting rather than "leave
+alone".
+
+So this tool changes camera state as a side effect of changing the video
+mode.  That is usually acceptable when a human is at the bench and can see
+the result, but it must not be run unattended or treated as read-only.
+--show is genuinely read-only and is the safe way to query the mode.
 
 Note that the firmware persists the resulting mode to flash, and only acts on
 the request while it is in Basic operation, so this sends MODE_CONTROL first.

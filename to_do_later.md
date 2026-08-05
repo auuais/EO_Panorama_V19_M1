@@ -114,3 +114,28 @@ roughly half the slots the controller offers go unused.
 A back-to-back launch path on `cmd_fire` is the targeted fix; the
 write-capture fast path at `:2735` already does exactly this for one case, so
 the pattern is established.
+
+## 4. Reprogramming the FPGA desynchronises the mode from the STM32
+
+After `program_hw_devices`, the FPGA's I2C register file resets to
+`MODE_DEFAULT = 8'h15` (EO panorama, `Kintex_top_I2C_test.v`). The STM32 only
+writes that register when the mode *changes*, so if it believed the mode was
+something else before the reprogram, it goes on believing it: it keeps
+reporting the old value in STATUS and never rewrites the register.
+
+Observed 2026-08-05 straight after programming the EO-single-from-DDR build:
+`eo_video_mode.py --show` reported video select 8 (IR single, camera 2) while
+the ILA showed the panorama frame-set machinery running the composite
+(`cam_present=3f`, `free_ready=3f`, `descriptor_valid_map=444444`,
+`replay_banks_ready=1`, `rejoin_state=ST_RUN`).
+
+Consequence: after any reprogram, the UI's reported mode and the picture on
+the SDI output can disagree until someone changes the mode, and any bring-up
+measurement taken in that interval is being taken in a different mode than
+the operator thinks. Not a functional defect in the RTL, but it has already
+cost one confusing capture, so re-select the mode after every reprogram
+before drawing conclusions.
+
+Fix options, if it becomes worth closing: have the STM32 re-push the mode on
+FPGA `DONE`, or have the FPGA raise a "register file is at reset" bit the
+STM32 polls.
