@@ -106,7 +106,13 @@ module IrSelectedFrameBuffer #(
     // re-baselined after its clock came back.  Exported for bring-up
     // visibility: a camera that never leaves this state is not coming back on
     // its own and the reason is worth capturing.
-    output wire [5:0]  rejoin_busy
+    output wire [5:0]  rejoin_busy,
+    // Per-camera frame-start pulse, one rd_clk wide, for ALL six cameras --
+    // not just the selected one.  cam_ftog is already synchronised into
+    // rd_clk, so this is only an edge detect.  Used to measure how closely the
+    // six IR cameras actually follow the genlock edge, which decides whether
+    // the panorama needs DDR frame de-skew or can run from small line caches.
+    output wire [5:0]  cam_frame_pulse
 );
     localparam integer FRAME_PIXELS = SRC_W * SRC_H;
     localparam integer CDC_DEPTH    = 64;
@@ -363,6 +369,13 @@ module IrSelectedFrameBuffer #(
             end
         end
     end
+
+    reg [5:0] cam_ftog_d;
+    always @(posedge rd_clk) begin
+        if (!rst_n) cam_ftog_d <= 6'd0;
+        else        cam_ftog_d <= cam_ftog;
+    end
+    assign cam_frame_pulse = cam_ftog ^ cam_ftog_d;
 
     integer ci;
     always @* begin

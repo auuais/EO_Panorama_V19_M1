@@ -33,6 +33,9 @@ module PanoramaBase_DdrBlackFrame(
     input  wire        rst_n,
     input  wire        clk_for_por,
     input  wire        rd_clk,
+    // IR genlock pulse from the hd_clk generator, synchronised inside for the
+    // skew monitor.  Measurement only -- nothing in the datapath uses it yet.
+    input  wire        ir_genlock_pulse,
     input  wire        ir_single_mode,
     input  wire [2:0]  ir_sel,
     // EO single is served from the DDR capture that already runs for the
@@ -614,6 +617,8 @@ module PanoramaBase_DdrBlackFrame(
     wire       sel_pulse_w;
     wire       sel_frame_valid_w;   // low once the selected camera stops
     wire [5:0] ir_rejoin_busy;      // per IR camera, high while re-baselining
+    wire [5:0] ir_cam_frame_pulse;  // per IR camera frame start, ui_clk
+    wire [63:0] ir_skew_dbg;
 
     IrSelectedFrameBuffer u_ir_framebuf (
         .rst_n(rst_n),
@@ -635,7 +640,24 @@ module PanoramaBase_DdrBlackFrame(
         // telemetry forced a regeneration the design routed at WNS -0.192 and
         // was rejected (V19_TEMPORAL_INTEGRITY_VALIDATION_20260728.md).  Wire
         // it to a probe only if an IR camera fails to return after this fix.
-        .rejoin_busy(ir_rejoin_busy)
+        .rejoin_busy(ir_rejoin_busy),
+        .cam_frame_pulse(ir_cam_frame_pulse)
+    );
+
+    //------------------------------------------------------------------------
+    // How closely do the six IR cameras follow the genlock edge?
+    //
+    // This has never been measured on these cameras, and it decides the IR
+    // panorama's ingress: a few rows of spread means small line caches are
+    // enough, tens or hundreds means the frames have to be de-skewed through
+    // DDR the way EO is.  Measurement only -- nothing in the datapath reads it.
+    //------------------------------------------------------------------------
+    IrGenlockSkewMonitor u_ir_skew (
+        .clk             (c0_ddr4_ui_clk),
+        .rst             (ui_rst),
+        .genlock_pulse   (ir_genlock_pulse),
+        .cam_frame_pulse (ir_cam_frame_pulse),
+        .dbg             (ir_skew_dbg)
     );
 
     wire [7:0] sel_rd_pixel = sel_rd_pixel_w;
@@ -3382,7 +3404,12 @@ module PanoramaBase_DdrBlackFrame(
         .probe21 ((SRC_SEL == SRC_V19) ? v19_replay_dbg_word : c0_ddr4_app_rd_data[63:0]),
         .probe22 ((SRC_SEL == SRC_V19) ? v19_dbg_rows_word0_strobe : dbg_bus[127:64]),
         .probe23 ((SRC_SEL == SRC_V19) ? v19_capture_dbg : dbg_bus[191:128]),
-        .probe24 ((SRC_SEL == SRC_V19) ? v19_dbg_rows_word2_strobe : dbg_bus[255:192]),
+        // Was v19_dbg_rows_word2_strobe -- RowRun row-window diagnostics from
+        // an investigation that closed on 2026-07-29.  The underlying wires
+        // stay load-bearing (v19_dbg_rows_word2[50:40] still feeds
+        // v19_rows_start_aligned); only the probe assignment moves, so the
+        // ILA IP is not regenerated.  Layout in IrGenlockSkewMonitor.
+        .probe24 (ir_skew_dbg),
         // V19 DDR replay bring-up visibility: distinguish "source read not
         // requested", "request not accepted", and "return misclassified".
         // The two return valids are probed separately -- a return landing on

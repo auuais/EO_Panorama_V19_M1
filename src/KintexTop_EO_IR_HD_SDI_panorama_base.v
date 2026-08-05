@@ -469,10 +469,20 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     wire        proc_hd_hsync;
     wire        proc_hd_vsync;
     wire [19:0] proc_hd_dout;
+    // Declared here, before the compositor uses ir_genlock_pulse: the
+    // generator itself is instantiated further down, but a wire referenced
+    // before its declaration binds to an implicit net in this file.
+    wire [5:0]  ir_genlock;
+    wire        ir_genlock_pulse;
+    wire        ir_genlock_epoch_strobe;
+    wire [15:0] ir_genlock_epoch;
+    wire [23:0] ir_genlock_measured_period;
+
     PanoramaBase_DdrBlackFrame u_ddr_black_frame (
         .rst_n                (nRESET),
         .clk_for_por          (hd_path_clk),
         .rd_clk               (hd_path_clk),
+        .ir_genlock_pulse     (ir_genlock_pulse),
         .ir_single_mode       (ir_single_mode_active),
         .ir_sel               (ir_sel),
         .eo_single_mode       (eo_single_mode_active),
@@ -601,12 +611,6 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     // frames belong to the same moment.  Unused until the IR panorama ingress
     // lands; declared here so the generator has one owner.
     //------------------------------------------------------------------------
-    wire [5:0]  ir_genlock;
-    wire        ir_genlock_pulse;
-    wire        ir_genlock_epoch_strobe;
-    wire [15:0] ir_genlock_epoch;
-    wire [23:0] ir_genlock_measured_period;
-
     IrGenlockGenerator u_ir_genlock (
         .clk             (hd_clk),
         .rst_n           (nRESET),
