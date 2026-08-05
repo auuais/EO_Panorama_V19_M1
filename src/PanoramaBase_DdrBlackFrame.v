@@ -613,6 +613,7 @@ module PanoramaBase_DdrBlackFrame(
     wire [7:0] sel_rd_pixel_w;
     wire       sel_pulse_w;
     wire       sel_frame_valid_w;   // low once the selected camera stops
+    wire [5:0] ir_rejoin_busy;      // per IR camera, high while re-baselining
 
     IrSelectedFrameBuffer u_ir_framebuf (
         .rst_n(rst_n),
@@ -628,7 +629,13 @@ module PanoramaBase_DdrBlackFrame(
         .rd_addr(fb_rd_addr),
         .rd_pixel(sel_rd_pixel_w),
         .frame_valid(sel_frame_valid_w),
-        .frame_pulse(sel_pulse_w)
+        .frame_pulse(sel_pulse_w),
+        // Left unprobed on purpose.  probe25 is 7 bits in the ILA IP and the
+        // core would have to be regenerated to carry this; the last time
+        // telemetry forced a regeneration the design routed at WNS -0.192 and
+        // was rejected (V19_TEMPORAL_INTEGRITY_VALIDATION_20260728.md).  Wire
+        // it to a probe only if an IR camera fails to return after this fix.
+        .rejoin_busy(ir_rejoin_busy)
     );
 
     wire [7:0] sel_rd_pixel = sel_rd_pixel_w;

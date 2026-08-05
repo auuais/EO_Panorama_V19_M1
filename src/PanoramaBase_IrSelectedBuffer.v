@@ -42,12 +42,48 @@
 // selection happens in rd_clk after the crossing.  No clock is ever muxed,
 // gated or stopped: a powered-off camera simply stops filling its FIFO.
 //
+// Power cycling a camera
+// ----------------------
+// A collapsing camera supply does not stop its clock cleanly.  Runt edges can
+// latch a metastable, non-Gray write pointer into the CDC FIFO, after which
+// the two sides disagree about occupancy permanently -- that camera then never
+// delivers a coherent frame again.  The FIFO's rst lives in the camera's own
+// write domain, so it is unreachable while the camera is dark.
+//
+// Measured 2026-08-05: after an IR power cycle some cameras returned and some
+// did not, a different subset each time, and only reprogramming the FPGA
+// recovered them.  That is the same fault EoV19CamRejoin was written for on
+// the EO capture path, whose header records the identical signature; the IR
+// path simply never got the equivalent.
+//
+// So each camera carries a free-running clock beacon, and a small per-camera
+// supervisor in rd_clk resets that camera's FIFO after its clock has come back
+// and been steady for T_STABLE (an XPM async FIFO cannot complete a reset
+// unless both of its clocks run).  Entered only from a clock-loss event: at
+// FPGA configuration every pointer flop holds its INIT value, so the domain is
+// coherent by construction and needs no help.
+//
 module IrSelectedFrameBuffer #(
     parameter integer SRC_W        = 640,
     parameter integer SRC_H        = 512,
     parameter integer FRAME_ADDR_W = 19,
     // Block RAM read latency.
-    parameter integer READ_LATENCY = 2
+    parameter integer READ_LATENCY = 2,
+    // Rejoin timeouts.  Parameters, not localparams, so a testbench can shrink
+    // them -- the deployed STABLE window is 58 M cycles, which no simulation
+    // is going to sit through.
+    //
+    // LOST: rd_clk cycles with no beacon edge before the camera clock is
+    // declared dead.  ~17.5 us at 233.4 MHz; the beacon toggles every camera
+    // clock, so roughly every 9 rd_clk cycles when healthy at 27 MHz.
+    parameter integer LOST_BITS   = 12,
+    // STABLE: clock steady before touching the FIFO.  Matches EoV19CamRejoin's
+    // proven 250 ms, ~58.4 M cycles at 233.4 MHz.
+    parameter integer STABLE_BITS = 26,
+    // RSTA: FIFO reset assertion width in rd_clk cycles.  ~4.4 us covers well
+    // over the handful of write-domain clocks XPM needs even at the slowest IR
+    // pixel clock.
+    parameter integer RSTA_BITS   = 10
 )(
     input  wire        rst_n,
 
@@ -65,7 +101,12 @@ module IrSelectedFrameBuffer #(
     input  wire [FRAME_ADDR_W-1:0] rd_addr,
     output wire [7:0]  rd_pixel,
     output reg         frame_valid,     // selected camera has delivered a frame
-    output reg         frame_pulse      // ... and completed one this cycle
+    output reg         frame_pulse,     // ... and completed one this cycle
+    // One bit per camera, high while that camera's CDC FIFO is being
+    // re-baselined after its clock came back.  Exported for bring-up
+    // visibility: a camera that never leaves this state is not coming back on
+    // its own and the reason is worth capturing.
+    output wire [5:0]  rejoin_busy
 );
     localparam integer FRAME_PIXELS = SRC_W * SRC_H;
     localparam integer CDC_DEPTH    = 64;
@@ -74,6 +115,10 @@ module IrSelectedFrameBuffer #(
     wire [9:0] cam_dout [0:5];
     wire [5:0] cam_ftog;             // per-camera frame toggle, rd_clk synced
     reg  [5:0] cam_pop;
+    wire [5:0] cam_alive_tgl;        // free-running beacon from each camera
+    wire [5:0] cam_wr_rst_busy;
+    wire [5:0] cam_rd_rst_busy;
+    reg  [5:0] cam_fifo_rst;         // rd_clk level, synced into each wr domain
 
     //------------------------------------------------------------------
     // One capture front-end per camera: frame framing in the camera's own
@@ -94,6 +139,28 @@ module IrSelectedFrameBuffer #(
         wire [7:0]  wpx   = (gi == 0) ? ir0_wr_pixel : (gi == 1) ? ir1_wr_pixel :
                             (gi == 2) ? ir2_wr_pixel : (gi == 3) ? ir3_wr_pixel :
                             (gi == 4) ? ir4_wr_pixel : ir5_wr_pixel;
+
+        // Clock-alive beacon.  Reset only by rst_n, never by the rejoin reset,
+        // or a camera would look dead exactly while it is being recovered.
+        reg alive_tgl;
+        always @(posedge wclk) begin
+            if (!rst_n) alive_tgl <= 1'b0;
+            else        alive_tgl <= ~alive_tgl;
+        end
+        assign cam_alive_tgl[gi] = alive_tgl;
+
+        // The FIFO's rst is in its WRITE domain, so the rd_clk request has to
+        // be synchronised into the camera's clock before it is used.
+        (* ASYNC_REG = "TRUE" *) reg rst_meta, rst_cam;
+        always @(posedge wclk) begin
+            if (!rst_n) begin
+                rst_meta <= 1'b0;
+                rst_cam  <= 1'b0;
+            end else begin
+                rst_meta <= cam_fifo_rst[gi];
+                rst_cam  <= rst_meta;
+            end
+        end
 
         reg [10:0] x_cnt, y_cnt;
         reg        wr_vsync_d, hs_d, first_line_seen;
@@ -134,8 +201,11 @@ module IrSelectedFrameBuffer #(
         // exactly 1 pixel per line, 512 across the frame.  With a line marker
         // each line is placed at its own address, so a miscount can only
         // affect the line it happens on.
+        // The framing counters straddle the camera's clock too: they freeze
+        // mid-raster when it stops and would resume against a rebooting ISP
+        // with stale state.  Re-baseline them with the FIFO.
         always @(posedge wclk) begin
-            if (!rst_n) begin
+            if (!rst_n || rst_cam) begin
                 x_cnt <= 11'd0; y_cnt <= 11'd0;
                 wr_vsync_d <= 1'b0; hs_d <= 1'b0;
                 first_line_seen <= 1'b0;
@@ -184,9 +254,10 @@ module IrSelectedFrameBuffer #(
             .RELATED_CLOCKS    (0),
             .USE_ADV_FEATURES  ("0000")
         ) u_cdc (
-            .rst           (~rst_n),
+            .rst           (~rst_n | rst_cam),
             .wr_clk        (wclk),
-            .wr_en         (wr_take),
+            // Never push while the reset is propagating through this domain.
+            .wr_en         (wr_take && !rst_cam),
             .din           ({mark_sof, mark_sol, wpx}),
             .rd_clk        (rd_clk),
             .rd_en         (cam_pop[gi]),
@@ -194,7 +265,8 @@ module IrSelectedFrameBuffer #(
             .empty         (cam_empty[gi]),
             .full          (), .almost_full (), .almost_empty (), .data_valid (),
             .overflow      (), .underflow   (), .prog_full    (), .prog_empty (),
-            .rd_data_count (), .wr_data_count(), .rd_rst_busy (), .wr_rst_busy(),
+            .rd_data_count (), .wr_data_count(),
+            .rd_rst_busy   (cam_rd_rst_busy[gi]), .wr_rst_busy(cam_wr_rst_busy[gi]),
             .wr_ack        (), .sbiterr     (), .dbiterr      (),
             .injectsbiterr (1'b0), .injectdbiterr(1'b0), .sleep(1'b0)
         );
@@ -216,10 +288,86 @@ module IrSelectedFrameBuffer #(
     // overflow -- unselected cameras are simply popped and discarded rather
     // than being allowed to jam.
     //------------------------------------------------------------------
+    //------------------------------------------------------------------
+    // Per-camera rejoin supervisor (rd_clk, which always runs).
+    //
+    // Deliberately NOT clocked by the camera: a powered-down camera has no
+    // clock at all, so anything clocked by it freezes and can never report its
+    // own absence.
+    //------------------------------------------------------------------
+    localparam [1:0] RJ_RUN = 2'd0, RJ_LOST = 2'd1, RJ_RSTA = 2'd2, RJ_RSTD = 2'd3;
+    reg [1:0]              rj_state   [0:5];
+    reg [LOST_BITS-1:0]    lost_ctr   [0:5];
+    reg [STABLE_BITS-1:0]  stable_ctr [0:5];
+    reg [RSTA_BITS-1:0]    rsta_ctr   [0:5];
+    (* ASYNC_REG = "TRUE" *) reg [5:0] tgl_meta, tgl_sync, tgl_q;
+
+    genvar rb;
+    generate
+    for (rb = 0; rb < 6; rb = rb + 1) begin : gen_rejoin_busy
+        assign rejoin_busy[rb] = (rj_state[rb] != RJ_RUN);
+    end
+    endgenerate
+
+    integer r;
+    always @(posedge rd_clk) begin
+        if (!rst_n) begin
+            tgl_meta <= 6'd0; tgl_sync <= 6'd0; tgl_q <= 6'd0;
+            cam_fifo_rst <= 6'd0;
+            for (r = 0; r < 6; r = r + 1) begin
+                rj_state[r]   <= RJ_RUN;
+                lost_ctr[r]   <= {LOST_BITS{1'b0}};
+                stable_ctr[r] <= {STABLE_BITS{1'b0}};
+                rsta_ctr[r]   <= {RSTA_BITS{1'b0}};
+            end
+        end else begin
+            tgl_meta <= cam_alive_tgl;
+            tgl_sync <= tgl_meta;
+            tgl_q    <= tgl_sync;
+
+            for (r = 0; r < 6; r = r + 1) begin
+                if (tgl_sync[r] != tgl_q[r])   lost_ctr[r] <= {LOST_BITS{1'b0}};
+                else if (!(&lost_ctr[r]))      lost_ctr[r] <= lost_ctr[r] + 1'b1;
+
+                case (rj_state[r])
+                    RJ_RUN:
+                        if (&lost_ctr[r]) begin
+                            rj_state[r]   <= RJ_LOST;
+                            stable_ctr[r] <= {STABLE_BITS{1'b0}};
+                        end
+                    RJ_LOST: begin
+                        // Wait for the clock back AND steady: XPM cannot
+                        // complete a reset unless both its clocks run, and a
+                        // supply still ramping produces exactly the runt edges
+                        // that corrupted the pointer in the first place.
+                        if (&lost_ctr[r])
+                            stable_ctr[r] <= {STABLE_BITS{1'b0}};
+                        else if (!(&stable_ctr[r]))
+                            stable_ctr[r] <= stable_ctr[r] + 1'b1;
+                        else begin
+                            cam_fifo_rst[r] <= 1'b1;
+                            rsta_ctr[r]     <= {RSTA_BITS{1'b0}};
+                            rj_state[r]     <= RJ_RSTA;
+                        end
+                    end
+                    RJ_RSTA:
+                        if (!(&rsta_ctr[r])) rsta_ctr[r] <= rsta_ctr[r] + 1'b1;
+                        else begin
+                            cam_fifo_rst[r] <= 1'b0;
+                            rj_state[r]     <= RJ_RSTD;
+                        end
+                    default:   // RJ_RSTD
+                        if (!cam_wr_rst_busy[r] && !cam_rd_rst_busy[r])
+                            rj_state[r] <= RJ_RUN;
+                endcase
+            end
+        end
+    end
+
     integer ci;
     always @* begin
         for (ci = 0; ci < 6; ci = ci + 1)
-            cam_pop[ci] = !cam_empty[ci];
+            cam_pop[ci] = !cam_empty[ci] && !cam_rd_rst_busy[ci];
     end
 
     // The selected stream, one cycle behind the pop (fwft dout is valid while
@@ -238,6 +386,12 @@ module IrSelectedFrameBuffer #(
             sel_data  <= cam_dout[ir_sel];
         end
     end
+
+    // Treat a rejoin of the SELECTED camera exactly like selecting a different
+    // camera: the buffer still holds the old image, the FIFO is being
+    // re-baselined, and nothing may publish until that camera has delivered a
+    // whole frame of its own again.
+    wire sel_resync = (ir_sel != ir_sel_q) || rejoin_busy[ir_sel];
 
     //------------------------------------------------------------------
     // Pack 8 pixels into one 64-bit word.
@@ -280,7 +434,7 @@ module IrSelectedFrameBuffer #(
             line_base <= {FRAME_ADDR_W{1'b0}};
             mem_we    <= 1'b0;
             armed     <= 1'b0;
-        end else if (ir_sel != ir_sel_q) begin
+        end else if (sel_resync) begin
             mem_we    <= 1'b0;
             armed     <= 1'b0;
             w_addr    <= {FRAME_ADDR_W{1'b0}};
@@ -335,7 +489,7 @@ module IrSelectedFrameBuffer #(
         end else begin
             frame_pulse <= 1'b0;
             ftog_d      <= cam_ftog[ir_sel];
-            if (ir_sel != ir_sel_q) begin
+            if (sel_resync) begin
                 // Re-arm on a camera change: the buffer still holds the old
                 // image until the new camera has written a full frame.
                 frame_valid <= 1'b0;

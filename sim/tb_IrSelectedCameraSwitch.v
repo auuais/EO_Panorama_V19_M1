@@ -149,7 +149,14 @@ module tb_IrSelectedCameraSwitch;
         // switch with camera 2 PART-WAY down its raster -- the only case that
         // occurs on hardware
         wait (b_vs === 1'b1 && by > 150 && by < 350);
-        @(posedge rd_clk);
+        // Driven off the NEGEDGE.  Assigning ir_sel on the posedge races the
+        // DUT's own `ir_sel_q <= ir_sel` at that same edge: if the bench's
+        // blocking assignment happens to run first, ir_sel_q captures the NEW
+        // value and the selection change is never observed at all.  That race
+        // silently passed until an unrelated RTL edit changed elaboration
+        // order and flipped it, at which point the bench reported an RTL
+        // regression that did not exist.
+        @(negedge rd_clk);
         ir_sel = 3'd2;
         $display("switched to camera 2 while it was at line %0d of %0d", by, H);
 
