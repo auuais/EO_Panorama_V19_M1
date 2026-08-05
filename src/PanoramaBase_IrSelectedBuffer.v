@@ -299,6 +299,14 @@ module IrSelectedFrameBuffer #(
     // so a consumer triggered by frame_pulse never composites a buffer that
     // still holds the previous camera's image.
     //------------------------------------------------------------------
+    // Staleness: a camera that is switched off simply stops delivering, and
+    // the buffer keeps whatever it last held.  Showing that stale frame makes
+    // a dead camera look live.  Drop frame_valid if the selected camera has
+    // not completed a frame recently, so the consumer can black the output.
+    localparam integer STALE_BITS = 26;          // ~0.29 s at 233 MHz
+    reg [STALE_BITS-1:0] stale_cnt;
+    wire stale_now = &stale_cnt;
+
     reg       ftog_d;
     reg [5:0] cam_seen;
     always @(posedge rd_clk) begin
@@ -307,6 +315,7 @@ module IrSelectedFrameBuffer #(
             cam_seen    <= 6'd0;
             frame_valid <= 1'b0;
             frame_pulse <= 1'b0;
+            stale_cnt   <= {STALE_BITS{1'b0}};
         end else begin
             frame_pulse <= 1'b0;
             ftog_d      <= cam_ftog[ir_sel];
@@ -315,10 +324,16 @@ module IrSelectedFrameBuffer #(
                 // image until the new camera has written a full frame.
                 frame_valid <= 1'b0;
                 cam_seen    <= 6'd0;
+                stale_cnt   <= {STALE_BITS{1'b0}};
             end else if (cam_ftog[ir_sel] != ftog_d) begin
                 cam_seen[ir_sel] <= 1'b1;
                 frame_valid      <= 1'b1;
                 frame_pulse      <= 1'b1;
+                stale_cnt        <= {STALE_BITS{1'b0}};
+            end else if (!stale_now) begin
+                stale_cnt <= stale_cnt + 1'b1;
+            end else begin
+                frame_valid <= 1'b0;      // camera has stopped
             end
         end
     end

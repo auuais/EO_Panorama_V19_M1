@@ -589,6 +589,7 @@ module PanoramaBase_DdrBlackFrame(
     //------------------------------------------------------------------------
     wire [7:0] sel_rd_pixel_w;
     wire       sel_pulse_w;
+    wire       sel_frame_valid_w;   // low once the selected camera stops
 
     IrSelectedFrameBuffer u_ir_framebuf (
         .rst_n(rst_n),
@@ -603,12 +604,17 @@ module PanoramaBase_DdrBlackFrame(
         .rd_en(fb_rd_en),
         .rd_addr(fb_rd_addr),
         .rd_pixel(sel_rd_pixel_w),
-        .frame_valid(),
+        .frame_valid(sel_frame_valid_w),
         .frame_pulse(sel_pulse_w)
     );
 
     wire [7:0] sel_rd_pixel = sel_rd_pixel_w;
     wire       sel_pulse    = sel_pulse_w;
+    // A camera that is switched off stops producing frame pulses, so nothing
+    // would start another copy and the output bank would hold its last image
+    // indefinitely -- a dead camera looking live.  While stale, keep copying
+    // at the display rate and feed black, so the picture goes black instead.
+    wire       ir_stale     = !sel_frame_valid_w;
 
     // sel_pulse is one cycle wide, and copy_bank_available can be low at that
     // instant (a finished bank still waiting for its frame_edge commit), which
@@ -1073,7 +1079,8 @@ module PanoramaBase_DdrBlackFrame(
         // on the selected IR camera's frame pulse rather than on a panorama
         // bank lease.
         : (SRC_SEL == SRC_V19)
-        ? (ir_single_ui ? ir_start_pending : v19_replay_banks_ready)
+        ? (ir_single_ui ? (ir_start_pending || (ir_stale && frame_edge))
+                        : v19_replay_banks_ready)
         : (SRC_SEL == SRC_EOSTK || SRC_SEL == SRC_EO0)
         ? (frame_edge && (eo_frames_valid || eo_frames_ready_seen))
         : ((PATTERN_TEST && frame_edge) || (!PATTERN_TEST && sel_pulse && ir_single_ui));
@@ -1609,7 +1616,8 @@ module PanoramaBase_DdrBlackFrame(
         // where the stand-alone build consumed fb_rd_en_d2.
         assign copy_px_valid = ir_mode ? (ir_vld[2] && ir_en) : v19_fifo_pop;
         assign copy_px_data  = ir_mode
-                             ? (ir_box[2] ? {sel_rd_pixel, 8'h80} : BLACK_PIXEL)
+                             ? ((ir_box[2] && !ir_stale) ? {sel_rd_pixel, 8'h80}
+                                                        : BLACK_PIXEL)
                              : v19_fifo_mem[v19_fifo_rd_ptr];
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst || copy_start_accept) begin
