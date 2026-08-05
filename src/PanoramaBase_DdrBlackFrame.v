@@ -1020,12 +1020,27 @@ module PanoramaBase_DdrBlackFrame(
     wire v19_cap5_selectable = !v19_cap5_empty && !v19_rejoin_busy[5];
 
     // Consecutive capture beats served from one camera before the arbiter
-    // rotates.  One beat is 8 app_addr units and a DRAM row spans 128, so 32
-    // beats is two rows' worth of sequential traffic per activation pair --
-    // long enough to amortise the row miss, short enough that a camera's FIFO
-    // cannot build a backlog while it waits its turn (32 beats is ~0.7 us at
-    // the measured command rate, against a 33 ms frame period).
-    localparam integer V19_CAP_BATCH = 32;
+    // rotates.
+    //
+    // This was 32, to keep each camera's writes address-sequential and amortise
+    // the DRAM row activation across a batch.  Set to 1 as the single
+    // controlled change of the artifact investigation (reanalysis Stage C):
+    //
+    //   * batching is the first change that produced the motion artifact
+    //     (bisect: aa5ed47 clean, d5c7078 artifacted, one commit apart);
+    //   * it bought nothing measurable.  Recomputed from the true event
+    //     counters in bandwidth_{un,}batched.json -- write_retiring and
+    //     rd_data_valid, not the cmd_is_rd LEVEL the original comparison
+    //     used -- total accepted commands went 230.4 -> 230.5 per 1k cycles,
+    //     a change of 0.04%.  The advertised "+11.2% reads" was occupancy
+    //     moving, not throughput;
+    //   * 1 most closely resembles the pre-regression request behaviour, and
+    //     bounds the damage of any per-beat address or accounting error to a
+    //     single beat rather than a run of 32.
+    //
+    // Restore only after per-bank capture sequencing is instrumented and
+    // batch 1 and batch 32 are proven to produce identical bank contents.
+    localparam integer V19_CAP_BATCH = 1;
     reg  [5:0]  v19_cap_batch_ctr;
     reg  [2:0]  v19_cap_rr;
     reg         v19_cap_sel_valid;
