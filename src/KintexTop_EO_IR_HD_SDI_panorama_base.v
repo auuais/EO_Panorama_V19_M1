@@ -582,32 +582,51 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     assign IEG1_VSYNC = 1'b0;
     assign IEG1_DOUT  = 20'h0;
 
-    reg sig_60hz;
-    localparam integer CLK_HZ        = 74_250_000;
-    localparam integer FRAME_HZ_X10  = 600;
-    localparam integer PERIOD_CYCLES = (CLK_HZ * 10) / FRAME_HZ_X10;
-    localparam integer HIGH_CYCLES   = (PERIOD_CYCLES * 1) / 100;
-    localparam integer CW = 22;
-    reg [CW-1:0] cnt;
+    //------------------------------------------------------------------------
+    // IR GENLOCK.
+    //
+    // Was a fixed divider producing exactly 60.000 Hz with a pulse high for 1%
+    // of the period (~167 us).  The Tenum 640 electrical ICD asks for an input
+    // slightly SLOWER than 60 Hz -- an asynchronous genlock edge is missed
+    // entirely if a camera has not finished the frame it is already in -- and
+    // ~167 us sits on the floor of the permitted 166 us..16 ms window.  A
+    // missed edge is a missed frame epoch, which the frame-set manager cannot
+    // distinguish from that camera failing to publish.
+    //
+    // Runs on hd_clk, which is derived from the 27 MHz oscillator and keeps
+    // running with every camera powered down.  Never from a camera clock.
+    //
+    // ir_genlock_epoch is the IR analogue of the EO exposure-strobe epoch: the
+    // number that lets the frame-set manager decide whether six captured IR
+    // frames belong to the same moment.  Unused until the IR panorama ingress
+    // lands; declared here so the generator has one owner.
+    //------------------------------------------------------------------------
+    wire [5:0]  ir_genlock;
+    wire        ir_genlock_pulse;
+    wire        ir_genlock_epoch_strobe;
+    wire [15:0] ir_genlock_epoch;
+    wire [23:0] ir_genlock_measured_period;
 
-    always @(posedge hd_clk or negedge nRESET) begin
-        if (!nRESET) begin
-            cnt      <= {CW{1'b0}};
-            sig_60hz <= 1'b0;
-        end else begin
-            if (cnt == PERIOD_CYCLES-1)
-                cnt <= {CW{1'b0}};
-            else
-                cnt <= cnt + {{(CW-1){1'b0}}, 1'b1};
-            sig_60hz <= (cnt < HIGH_CYCLES[CW-1:0]);
-        end
-    end
+    IrGenlockGenerator u_ir_genlock (
+        .clk             (hd_clk),
+        .rst_n           (nRESET),
+        .enable          (1'b1),
+        // 0 = 59.94 Hz.  The 60.000 Hz and 59.5 Hz alternatives are selectable
+        // for the characterisation run without a rebuild.
+        .rate_sel        (2'd0),
+        .cam_mask        (6'h3f),
+        .genlock         (ir_genlock),
+        .genlock_pulse   (ir_genlock_pulse),
+        .epoch_strobe    (ir_genlock_epoch_strobe),
+        .epoch           (ir_genlock_epoch),
+        .measured_period (ir_genlock_measured_period)
+    );
 
-    assign IRCAM0_GENLOCK = sig_60hz;
-    assign IRCAM1_GENLOCK = sig_60hz;
-    assign IRCAM2_GENLOCK = sig_60hz;
-    assign IRCAM3_GENLOCK = sig_60hz;
-    assign IRCAM4_GENLOCK = sig_60hz;
-    assign IRCAM5_GENLOCK = sig_60hz;
+    assign IRCAM0_GENLOCK = ir_genlock[0];
+    assign IRCAM1_GENLOCK = ir_genlock[1];
+    assign IRCAM2_GENLOCK = ir_genlock[2];
+    assign IRCAM3_GENLOCK = ir_genlock[3];
+    assign IRCAM4_GENLOCK = ir_genlock[4];
+    assign IRCAM5_GENLOCK = ir_genlock[5];
 
 endmodule
