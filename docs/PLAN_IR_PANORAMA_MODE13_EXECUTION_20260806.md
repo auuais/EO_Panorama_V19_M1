@@ -30,7 +30,7 @@ live. Checked claim by claim against this repo:
 | Genlock: exactly 60.000 Hz, 1% pulse | **True here too** (`sig_60hz` on `hd_clk`, `FRAME_HZ_X10=600`, 1% ≈ 167 µs — the ICD *minimum* pulse at the *worst* rate). The generator rework is real work and stays in the plan. |
 | IR sample is `IRCAMn_DOUT[13:6]` | Correct here (top-level line 483). |
 | Mode map: 0x14 = IR panorama | Correct here (`ir_stack_mode_active = (mode_current == 8'h14)`). |
-| IR asset package incoherent (target_w 3576 vs 621x480 maps vs 3240x480 INI) | Not re-verified here; adopted as blocking. Stage 0 stands. |
+| IR asset package incoherent (target_w 3576 vs 3240) | **Explained, see section 7.** Two INIs disagree; the IR INI's 3576 is authoritative. The real issue is a per-run manifest, not a corrupt package. |
 
 Consequences the plan could not have known:
 
@@ -187,7 +187,7 @@ which their own text half-concedes.
                               owns V19_SRC port in mode 0x14 (quiesced handover)
    └─ IrV19StreamingRenderer: RowRun ROM (IR package) → 6 line caches →
                               bilinear luma → alpha-LUT seam blend →
-                              3240 valid + 600 black = 3840×480 logical
+                              3576 valid + 264 black = 3840x480 logical
    └─ existing fold/copy/scan back-end, 960 geometry, chroma 0x80 at pack
 ```
 
@@ -204,8 +204,9 @@ moving-scene gate.
 ## 5. Adopted from the reviewed plan unchanged
 
 - Stage 0 asset freeze: one versioned package, CRC + config-hash validated,
-  from one frozen C revision + INI; the flagged incoherence (3576 / 621×480 /
-  3240) blocks everything downstream of ingress.
+  from one frozen C revision + INI. The flagged incoherence is resolved in
+  section 7 (3576 is authoritative); what still blocks is that the manifest is
+  per-run, so the asset directory currently mixes two generator runs.
 - Mode/register contract of their §2.5 (matches this repo already).
 - Missing-camera policy verbatim (black unique region, full-weight valid
   neighbour at seams, rejoin only at a frame boundary).
@@ -234,12 +235,62 @@ Stage 2's hardware step doubles as the EO regression gate: mode 0x14 must not
 disturb EO panorama / EO single / IR single, and the 3.4 wedge check is
 explicit (sit in IR panorama 60 s, switch to EO panorama, verify lease).
 
-## 7. Open questions (blocking Stage 0, not Stage 1)
+## 7. Open questions
 
-1. **Where are the IR map package, INI and generator script?** The reviewed
-   plan references the incoherent saved package and a C reference at
-   `C:\SVNProjects\IMU_Stabilize_v40\...`. Stage 0 needs the generator run
-   against a frozen INI — is that tooling available to run here?
+### RESOLVED 2026-08-06: assets, INI and generator located
+
+Generator and outputs: `C:\SVNProjects\IMU_Stabilize_v40\x64\Release\`
+(`IMU_stabilize_GYRO.exe`, plus the `eo_*`/`ir_*` map, base and alpha `.bin`
+files and `lut_manifest.tsv`).
+
+Authoritative INIs, one per direction:
+
+- EO: `...\EO_IR_TestCases\EO_Test4C_R_0.75_P_-5\Cam_rig\parameters_unified.ini`
+- IR: `...\EO_IR_TestCases\EO_Test4C_R_0.75_P_-5\Cam_rig\IR\parameters_unified.ini`
+
+**The reviewed plan's "asset incoherence" is explained — and the width it
+settled on was the wrong one.** The package is not corrupt. There are two
+INIs, each carries an `[ir_camera]` section, and they disagree:
+
+| | IR INI (authoritative for IR) | EO INI |
+|---|---:|---:|
+| IR `pano_width` | **3576** | 3240 |
+| IR `pano_height` | 480 | 480 |
+| IR `overlap_px` | 30 | 30 |
+
+The plan compared the manifest (`target_w = 3576`, left over from an IR run)
+against the EO INI's IR section (3240) and concluded the package was mixed.
+Using the IR INI for IR, as directed, **3576 x 480 is the IR panorama
+geometry**.
+
+Consequence for this plan: the valid panorama is 3576 wide, not 3240, so the
+black logical tail is x = 3576..3839 instead of 3240..3839. The 3840 x 480
+logical stream, the fold to 1920 x 960 and the HD padding are unchanged — only
+the valid/black boundary moves. Every "3240" in the reviewed plan's sections 1
+and 4 should read 3576.
+
+IR source geometry confirmed from the same INI: 640 x 512, six cameras,
+`resize_factor = 1.0`, `panorama_crop_height_scale = 0.9375` (512 x 0.9375 =
+480, the panorama height), cylindrical FOV 54.5 x 45.0 deg. The IR luma alpha
+LUT on disk is 58 bytes = 29 entries, consistent with `overlap_px = 30` at
+resize 1.0.
+
+**Stage 0's real blocker is now visible, and it is not the width.**
+`lut_manifest.tsv` is written per RUN, not per asset set: it currently
+describes only the EO run of 2026-08-06 04:12 (`target_w = 3840`), while the
+`ir_*.bin` files date from 2026-07-30 and no longer have any manifest
+describing them. The output directory is a partially-overwritten mixture of
+two generator runs — exactly the failure mode Stage 0's "one atomic versioned
+package" exists to prevent. Regenerate IR from the IR INI and capture the
+manifest together with the binaries as one set, copied into this repo, before
+any ROM or loader is built from them.
+
+### Open
+
+1. **Confirm before running the IR generator.** It overwrites
+   `lut_manifest.tsv` in the SVN working copy, so it should be run
+   deliberately and its output copied here as a versioned set, not referenced
+   in place.
 2. **Is the STM32 firmware modifiable soon** for genlock slave config +
    readback (§5.1)? Answer changes nothing in stages 1-4, only when stage 5
    can conclude.
