@@ -974,17 +974,27 @@ module PanoramaBase_DdrBlackFrame(
     //    published and unconsumed), frameset state ST_WAIT, copy_active=1,
     //    copy_px_valid=0.
     //
-    // So release the lease when the panorama is not the consumer, and also
-    // when no camera is present -- the one moment holding it can only deadlock.
-    // Both terms cost nothing when the panorama is running normally.
+    // So release the lease whenever the panorama is not the consumer.  In IR
+    // single and EO single v19_render_active is held low, so the replay is in
+    // reset and cannot have a read outstanding against the leased banks --
+    // releasing them is unconditionally safe there.
+    //
+    // A release keyed on (v19_cam_present == 0) would additionally let the
+    // wedge above unstick itself in place, and was tried.  It is NOT used:
+    // with cam_present low the replay may still be enabled with reads in
+    // flight, so that release would hand banks back to the writers without any
+    // proof of replay quiescence -- exactly the unfenced release called out as
+    // a ranked risk in docs/HANDOFF_PANORAMA_MOTION_ARTIFACT_REANALYSIS_20260805.md
+    // section 7.  Recovering from an already-wedged board therefore still needs
+    // a trip through a single mode and back, which costs one mode change and
+    // introduces no new ownership hazard.  Doing it in place needs the explicit
+    // per-camera/bank/epoch outstanding-read fence that document specifies.
     //------------------------------------------------------------------------
     wire v19_panorama_consuming = !ir_single_ui && !eo_single_ui;
     wire v19_copy_frame_done    = write_retiring && !cmd_write_capture &&
                                   (fb_burst_count == active_beats - 18'd1);
     wire v19_consumer_done = (SRC_SEL == SRC_V19) &&
-                             (v19_copy_frame_done ||
-                              !v19_panorama_consuming ||
-                              (v19_cam_present == 6'd0));
+                             (v19_copy_frame_done || !v19_panorama_consuming);
 
     wire [10:0] v19_cap0_row, v19_cap1_row, v19_cap2_row;
     wire [10:0] v19_cap3_row, v19_cap4_row, v19_cap5_row;
