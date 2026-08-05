@@ -2,30 +2,51 @@
 //
 // GENLOCK generator for the six IR cameras, with a frame epoch.
 //
-// Why the previous generator has to be replaced
-// ---------------------------------------------
-// It produced exactly 60.000 Hz with a pulse high for 1% of the period
-// (12,375 cycles at 74.25 MHz, ~167 us).  Both numbers sit on the wrong edge
-// of the Tenum 640 electrical ICD:
+// THE RATE IS 30 Hz, NOT 60
+// -------------------------
+// The cameras are configured by the STM32 as 30 Hz genlock SLAVES:
 //
-//   * the ICD recommends an input slightly SLOWER than 60 Hz, because the
-//     asynchronous genlock input can be missed entirely if a camera has not
-//     finished the frame it is already in.  At exactly 60.000 Hz a camera
-//     running fractionally slow misses an edge periodically -- and a missed
-//     edge is a missed frame epoch, which the frame-set manager sees as that
-//     camera failing to publish;
-//   * ~167 us is the bottom of the permitted 166 us .. 16 ms high window,
-//     leaving no margin at all for skew or input filtering.
+//   IR_SetNV(16,1);   // NV#16 Frame Rate = 1 => 30 Hz
+//   IR_SetNV(17,1);   // NV#17 Genlock Direction = input (slave mode)
+//   IR_SetNV(18,0);   // NV#18 Genlock Mode = 0 (slave)
+//   -- Core/Src/main.c:2404
 //
-// So the default here is 59.94005994 Hz (60000/1001) with a 0.5 ms pulse.
+// Driving 30 Hz slaves from a ~60 Hz generator does not merely waste edges: a
+// camera locks to every SECOND edge, and WHICH of the two it picks depends on
+// when it happened to power up.  The cameras then split into groups a full
+// genlock period apart.  That is what the skew monitor measured on 2026-08-06:
 //
-// The period is fractional: 74,250,000 / (60000/1001) = 1,238,737.5 cycles
-// exactly.  A phase accumulator alternates 1,238,737 and 1,238,738 so the
-// AVERAGE rate is exact and there is no slow drift against the cameras.
+//   seen=001111 (cams 0-3) and seen=110000 (cams 4-5), never together, with
+//   every window timing out at 9 ms and spread 0 inside each group.
 //
-// Rates are selectable at runtime so the alternatives in the plan can be tried
-// without a rebuild -- a rebuild is 45 minutes and the whole point of the
-// characterisation stage is to find which rate every camera follows.
+// Within each group the six-camera start spread was under one 274 ns unit --
+// under 1/119th of an IR row, so the cameras were locking perfectly. They were
+// locking perfectly to two different edges. The defect was here, not in the
+// cameras and not in their sync.
+//
+// Rate choices at 74.25 MHz
+// -------------------------
+// 29.97002997 Hz (30000/1001) is 74,250,000 x 1001 / 30000 = 2,477,475 cycles
+// EXACTLY.  At 60 Hz the same ratio gave 1,238,737.5 and needed a phase
+// accumulator alternating +0/+1 to hold the average; at 30 Hz that machinery
+// is simply unnecessary and has been deleted.  One less source of period
+// jitter feeding an asynchronous input.
+//
+// 29.97 stays the default for the ICD reason that applied before: the
+// asynchronous genlock input is missed entirely if a camera has not finished
+// the frame it is already in, so run slightly SLOWER than the camera's nominal
+// rate, never faster.  A missed edge is a missed frame epoch, which the
+// frame-set manager sees as that camera failing to publish.  These cameras are
+// RS-170 heritage, so their "30 Hz" is very likely 29.97 too -- driving 30.000
+// would be the faster-than-native case.
+//
+// 30.000 Hz (2,475,000 cycles) is selectable and is the interesting one: it is
+// exactly the HD raster period (PERIOD_DEFAULT = 2,475,000 on the same 74.25
+// MHz), so genlock, cameras and display would be phase-locked with zero drift
+// and no rate conversion anywhere.  Worth measuring once the cameras are
+// confirmed to hold 29.97 without missing edges.
+//
+// Rates stay runtime-selectable: a rebuild is 45 minutes.
 //
 // Clocking
 // --------
@@ -45,14 +66,13 @@
 module IrGenlockGenerator #(
     parameter integer CLK_HZ      = 74_250_000,
     parameter integer EPOCH_W     = 16,
-    // 59.94005994 Hz = 60000/1001.  1,238,737.5 cycles -> alternate +0/+1.
-    parameter integer PERIOD_5994 = 1_238_737,
-    // 60.000 Hz exactly.  Kept as a TEST rate: it is 2x the 30.00 Hz display
-    // and phase-locks to the same 74.25 MHz with zero drift, which would be
-    // ideal IF no camera ever misses an edge.  That has to be measured.
-    parameter integer PERIOD_6000 = 1_237_500,
-    // 59.5 Hz fallback for a camera that misses 59.94.
-    parameter integer PERIOD_5950 = 1_247_899,
+    // 29.97002997 Hz = 30000/1001, exactly 2,477,475 cycles.  Default.
+    parameter integer PERIOD_2997 = 2_477_475,
+    // 30.000 Hz exactly = the HD raster period.  TEST rate: zero drift against
+    // the display, no rate conversion, ideal IF no camera misses an edge.
+    parameter integer PERIOD_3000 = 2_475_000,
+    // 29.5 Hz fallback for a camera that misses 29.97.
+    parameter integer PERIOD_2950 = 2_516_949,
     // 0.5 ms.  Comfortably inside the 166 us .. 16 ms window.
     parameter integer HIGH_CYCLES = 37_125
 )(
@@ -60,7 +80,7 @@ module IrGenlockGenerator #(
     input  wire                rst_n,
     input  wire                enable,
 
-    // 0 = 59.94 Hz (default), 1 = 60.000 Hz, 2 = 59.5 Hz, 3 = 59.94 Hz
+    // 0 = 29.97 Hz (default), 1 = 30.000 Hz, 2 = 29.5 Hz, 3 = 29.97 Hz
     input  wire [1:0]          rate_sel,
     // Per-camera output mask, for isolating one camera during bring-up.
     input  wire [5:0]          cam_mask,
@@ -74,27 +94,23 @@ module IrGenlockGenerator #(
     // parameters claim.
     output reg  [23:0]         measured_period
 );
-    localparam integer CW = 21;   // 1,247,899 needs 21 bits
+    localparam integer CW = 21;   // [21:0] = 22 bits, holds 2,516,949
 
     reg [CW:0]  cnt;
-    reg         half;             // fractional phase: adds one cycle alternately
     reg [23:0]  cyc;
 
-    wire [CW:0] period_base =
-        (rate_sel == 2'd1) ? PERIOD_6000[CW:0] :
-        (rate_sel == 2'd2) ? PERIOD_5950[CW:0] :
-                             PERIOD_5994[CW:0];
-    // Only the 59.94 rate is fractional; the others are whole cycle counts.
-    wire        period_frac = (rate_sel != 2'd1) && (rate_sel != 2'd2);
-    wire [CW:0] period_now  = period_base + ((period_frac && half) ? {{CW{1'b0}}, 1'b1}
-                                                                  : {(CW+1){1'b0}});
+    // Every 30 Hz rate here is a whole number of cycles, so there is no
+    // fractional phase to carry -- see the header.
+    wire [CW:0] period_now =
+        (rate_sel == 2'd1) ? PERIOD_3000[CW:0] :
+        (rate_sel == 2'd2) ? PERIOD_2950[CW:0] :
+                             PERIOD_2997[CW:0];
 
     assign genlock = {6{genlock_pulse}} & cam_mask;
 
     always @(posedge clk) begin
         if (!rst_n) begin
             cnt             <= {(CW+1){1'b0}};
-            half            <= 1'b0;
             cyc             <= 24'd0;
             genlock_pulse   <= 1'b0;
             epoch           <= {EPOCH_W{1'b0}};
@@ -109,7 +125,6 @@ module IrGenlockGenerator #(
             end else if (cnt >= period_now - {{CW{1'b0}}, 1'b1}) begin
                 // Wrap: this edge starts the next frame period.
                 cnt             <= {(CW+1){1'b0}};
-                half            <= ~half;
                 measured_period <= cyc + 24'd1;
                 cyc             <= 24'd0;
                 genlock_pulse   <= 1'b1;

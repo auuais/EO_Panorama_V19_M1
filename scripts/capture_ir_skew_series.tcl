@@ -64,7 +64,8 @@ proc csv_last {path match} {
     return [string trim [lindex $row $idx]]
 }
 
-emit $fh "# sample  t_ms   seen    spread   maxspread  rr  delay      epoch  present"
+emit $fh "# n    seen   spread  maxspr  rr-delay   first to win gl  eo_present"
+emit $fh "#      (units of 2^SHIFT ui_clk cycles; ~119 units per IR row)"
 for {set i 0} {$i < $count} {incr i} {
     set t0 [clock milliseconds]
     run_hw_ila -trigger_now $ila
@@ -77,20 +78,24 @@ for {set i 0} {$i < $count} {incr i} {
     if {$w eq ""} { emit $fh "  ERROR sample $i: ir_skew_dbg not in CSV"; continue }
     scan $w %llx word
 
-    set seen   [expr {($word >> 54) & 0x3F}]
-    set spread [expr {($word >> 38) & 0xFFFF}]
-    set maxspr [expr {($word >> 22) & 0xFFFF}]
-    set rr     [expr {($word >> 19) & 0x7}]
-    set delay  [expr {($word >>  3) & 0xFFFF}]
-    set epoch  [expr {$word & 0x7}]
-    set sig    [expr {($word >> 60) & 0xF}]
+    # Layout of IrGenlockSkewMonitor's dbg word, signature D.
+    set sig      [expr {($word >> 60) & 0xF}]
+    set seen     [expr {($word >> 54) & 0x3F}]
+    set spread   [expr {($word >> 42) & 0xFFF}]
+    set maxspr   [expr {($word >> 30) & 0xFFF}]
+    set rr       [expr {($word >> 27) & 0x7}]
+    set delay    [expr {($word >> 15) & 0xFFF}]
+    set firstcam [expr {($word >> 12) & 0x7}]
+    set timeouts [expr {($word >>  8) & 0xF}]
+    set windows  [expr {($word >>  4) & 0xF}]
+    set glphase  [expr {$word & 0xF}]
 
     set present [csv_last $tmpcsv "v19_cam_present"]
     if {$present eq ""} { set present "-" }
 
-    if {$sig != 14} { emit $fh "  WARNING sample $i signature=$sig (expected E) word=$w" }
-    emit $fh [format "  %-7d %-6d %06b  %-8d %-10d %-3d %-10d %-6d %s" \
-                  $i [expr {[clock milliseconds] - $t0}] $seen $spread $maxspr $rr $delay $epoch $present]
+    if {$sig != 13} { emit $fh "  WARNING sample $i signature=$sig (expected D) word=$w" }
+    emit $fh [format "  %-4d %06b %-7d %-7d cam%d=%-6d first=%d to=%-2d win=%-2d gl=%-2d %s" \
+                  $i $seen $spread $maxspr $rr $delay $firstcam $timeouts $windows $glphase $present]
 
     if {$i < $count - 1} { after $interval }
 }
