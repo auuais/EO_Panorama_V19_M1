@@ -16,7 +16,13 @@ module tb_EoV19DdrCamWriterAdmission;
 
     reg cam_hsync = 1'b0;
     reg cam_vsync = 1'b0;
-    reg trigger_ref = 1'b0;
+    // The content-frame epoch is BROADCAST now, not counted per camera.  The
+    // writer decodes a gray-coded global count in ui_clk and pairs each raster
+    // with the oldest unconsumed trigger, so advancing epoch_bin is what a
+    // trigger IS -- there is no per-camera trigger_ref pulse any more.
+    localparam integer TB_EPOCH_W = 16;
+    reg  [TB_EPOCH_W-1:0] epoch_bin = {TB_EPOCH_W{1'b0}};
+    wire [TB_EPOCH_W-1:0] epoch_gray = epoch_bin ^ (epoch_bin >> 1);
     reg [19:0] cam_pixel = 20'h20400;
     reg fifo_rd_en = 1'b0;
     reg free_bank_valid_ui = 1'b0;
@@ -44,7 +50,12 @@ module tb_EoV19DdrCamWriterAdmission;
     ) dut (
         .rst_n(rst_n),
         .capture_enable(capture_enable),
-        .trigger_ref(trigger_ref),
+        .join_enable(1'b1),
+        .cap_fifo_rst_req(1'b0),
+        .free_fifo_rst_req(1'b0),
+        .cam_alive_tgl(),
+        .rejoin_busy_ui(),
+        .global_epoch_gray_ui(epoch_gray),
         .cam_clk(cam_clk),
         .cam_hsync(cam_hsync),
         .cam_vsync(cam_vsync),
@@ -79,10 +90,9 @@ module tb_EoV19DdrCamWriterAdmission;
     task frame_edge;
         begin
             @(negedge cam_clk);
-            trigger_ref = 1'b1;
+            epoch_bin = epoch_bin + 1'b1;
             repeat (3) cam_cycle();
             @(negedge cam_clk);
-            trigger_ref = 1'b0;
             repeat (4) cam_cycle();
             @(negedge cam_clk);
             cam_hsync = 1'b0;

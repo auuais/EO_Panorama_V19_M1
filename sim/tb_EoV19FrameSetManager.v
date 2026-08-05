@@ -12,6 +12,13 @@ module tb_EoV19FrameSetManager;
     reg [15:0] desc_epoch0, desc_epoch1, desc_epoch2;
     reg [15:0] desc_epoch3, desc_epoch4, desc_epoch5;
     reg consumer_done = 1'b0;
+    // These were omitted entirely, so cam_present floated to Z and the
+    // manager's presence logic ran on X -- the bench could not be trusted to
+    // mean anything about the behaviour this module exists for.
+    reg [5:0] cam_present = 6'h3f;
+    reg [5:0] forfeit_req = 6'd0;
+    wire [5:0] forfeit_ack;
+    wire       release_timeout_seen;
     wire [5:0] free_valid;
     wire [1:0] free_bank0, free_bank1, free_bank2;
     wire [1:0] free_bank3, free_bank4, free_bank5;
@@ -26,6 +33,9 @@ module tb_EoV19FrameSetManager;
 
     EoV19FrameSetManager dut (
         .clk(clk), .rst(rst), .enable(enable),
+        .cam_present(cam_present),
+        .forfeit_req(forfeit_req), .forfeit_ack(forfeit_ack),
+        .release_timeout_seen(release_timeout_seen),
         .desc_valid(desc_valid),
         .desc_bank0(desc_bank0), .desc_bank1(desc_bank1),
         .desc_bank2(desc_bank2), .desc_bank3(desc_bank3),
@@ -193,7 +203,44 @@ module tb_EoV19FrameSetManager;
             lease_bank3 != 0 || lease_bank4 != 0 || lease_bank5 != 0)
             $fatal(1, "wrong banks after skipped-epoch recovery");
 
-        $display("PASS: leases are atomic and skipped epochs cannot deadlock the rings");
+        //------------------------------------------------------------------
+        // A camera that is ABSENT must not block the set.
+        //
+        // This is the whole reason cam_present exists: every readiness
+        // decision used to be an unconditional six-way AND, so powering one
+        // camera down stopped the entire panorama.  The bench did not drive
+        // cam_present at all until now -- it floated, and the manager's
+        // presence logic ran on X -- so this behaviour was never covered.
+        //------------------------------------------------------------------
+        @(negedge clk); consumer_done=1'b1;
+        @(negedge clk); consumer_done=1'b0;
+        while (lease_valid) @(posedge clk);
+        repeat (5) @(posedge clk);
+
+        cam_present = 6'b110111;      // camera 3 has gone away
+        publish_one(0, 16'd40, 1);
+        publish_one(1, 16'd40, 1);
+        publish_one(2, 16'd40, 1);
+        publish_one(4, 16'd40, 1);
+        publish_one(5, 16'd40, 1);    // camera 3 publishes NOTHING
+        wait_lease(16'd40);
+        $display("absent camera 3: lease still granted at epoch %0d", lease_epoch);
+
+        // ...and it must rejoin by itself once it comes back.
+        @(negedge clk); consumer_done=1'b1;
+        @(negedge clk); consumer_done=1'b0;
+        while (lease_valid) @(posedge clk);
+        repeat (5) @(posedge clk);
+
+        cam_present = 6'h3f;
+        publish_set(16'd41, 1,1,1,1,1,1);
+        wait_lease(16'd41);
+        $display("camera 3 back: lease granted at epoch %0d across all six", lease_epoch);
+
+        if (release_timeout_seen)
+            $fatal(1, "a token return timed out");
+
+        $display("PASS: leases are atomic, skipped epochs cannot deadlock the rings, and an absent camera neither blocks nor is stranded");
         $finish;
     end
 endmodule
