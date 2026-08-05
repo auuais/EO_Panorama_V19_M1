@@ -704,9 +704,8 @@ module PanoramaBase_DdrBlackFrame(
     wire [28:0] fold_jump_fwd  = geom_1080 ? 29'd517448 : 29'd459848;
     wire [28:0] fold_jump_back = geom_1080 ? 29'd518392 : 29'd460792;
 
-    wire v19_consumer_done = (SRC_SEL == SRC_V19) && write_retiring &&
-                             !cmd_write_capture &&
-                             (fb_burst_count == active_beats - 18'd1);
+    // v19_consumer_done is defined further down, next to v19_cam_present,
+    // which it now depends on.
     reg [28:0] wr_addr;
     // Logical V19 stream is 3840xN (240 beats per row); the deployable
     // framebuffer is 1920x2N (120 beats per row), N being 480 for the panorama
@@ -946,6 +945,47 @@ module PanoramaBase_DdrBlackFrame(
     // the SRC_V19 generate block.  Declared at module scope because
     // v19_rows_start_aligned above consumes it well before that block.
     wire [5:0] v19_cam_present;
+
+    //------------------------------------------------------------------------
+    // Frame-set lease release.
+    //
+    // The manager leases six banks and holds them in ST_WAIT until
+    // consumer_done.  Releasing is what returns FREE bank tokens to the camera
+    // writers, so nothing else in the capture ring can move until it happens.
+    //
+    // Tying that solely to an output-frame copy completing is wrong in two
+    // ways, and both were observed wedged on hardware:
+    //
+    // 1. In IR single and EO single the output copy is fed by the IR buffer or
+    //    the single-camera reader -- it never reads the leased set at all.  The
+    //    EO capture ring was therefore clocked by a rate with nothing to do
+    //    with the EO cameras (the IR camera's frame rate).  Any deficit
+    //    accumulates: the cameras exhaust their four banks, stop publishing
+    //    descriptors, and ~300 ms later EoV19CamPresence declares every one of
+    //    them absent.  Switching back to the panorama then finds cam_present=0,
+    //    the renderer produces nothing, and the copy never completes.
+    //
+    // 2. That end state is circular and cannot recover: consumer_done needs
+    //    the copy to finish, the copy needs pixels, pixels need a present
+    //    camera, presence needs descriptors, descriptors need bank tokens, and
+    //    tokens need consumer_done.  EoV19CamPresence's own header calls this
+    //    wedge self-sustaining.  Captured 2026-08-05 after IR single ->
+    //    panorama: cam_present=00, descriptor_valid_map=ffffff (every bank
+    //    published and unconsumed), frameset state ST_WAIT, copy_active=1,
+    //    copy_px_valid=0.
+    //
+    // So release the lease when the panorama is not the consumer, and also
+    // when no camera is present -- the one moment holding it can only deadlock.
+    // Both terms cost nothing when the panorama is running normally.
+    //------------------------------------------------------------------------
+    wire v19_panorama_consuming = !ir_single_ui && !eo_single_ui;
+    wire v19_copy_frame_done    = write_retiring && !cmd_write_capture &&
+                                  (fb_burst_count == active_beats - 18'd1);
+    wire v19_consumer_done = (SRC_SEL == SRC_V19) &&
+                             (v19_copy_frame_done ||
+                              !v19_panorama_consuming ||
+                              (v19_cam_present == 6'd0));
+
     wire [10:0] v19_cap0_row, v19_cap1_row, v19_cap2_row;
     wire [10:0] v19_cap3_row, v19_cap4_row, v19_cap5_row;
     reg  [11:0] v19_cap0_peak, v19_cap1_peak, v19_cap2_peak;
