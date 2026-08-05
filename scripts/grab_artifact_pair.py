@@ -137,6 +137,12 @@ def main():
                     help="request an uncompressed pixel format (default)")
     ap.add_argument("--no-raw", dest="raw", action="store_false")
     ap.add_argument("--list", action="store_true", help="probe device indices and exit")
+    ap.add_argument("--burst", type=int, default=0, metavar="N",
+                    help="capture N CONSECUTIVE frames instead of spreading "
+                         "--frames over --seconds.  Frames one second apart "
+                         "share no scene content, so the fault cannot be "
+                         "separated from texture; consecutive frames can be "
+                         "differenced against each other.")
     a = ap.parse_args()
 
     if a.list:
@@ -170,24 +176,48 @@ def main():
         meta["frames"].append({"file": p.name, "kind": "static", "t": 0.0})
 
         print("\n" + "=" * 66)
-        print(f"  STEP 2 of 2 -- MOVING sequence")
-        print(f"  {a.frames} frames over {a.seconds:g} s.")
-        print("  Move the rig steadily for the whole capture -- the artifact")
-        print("  scales with motion, so keep it moving to the last frame.")
+        if a.burst:
+            print(f"  STEP 2 of 2 -- MOVING burst, {a.burst} CONSECUTIVE frames")
+            print("  Move the rig steadily and keep moving until it finishes.")
+        else:
+            print(f"  STEP 2 of 2 -- MOVING sequence")
+            print(f"  {a.frames} frames over {a.seconds:g} s.")
+            print("  Move the rig steadily for the whole capture -- the artifact")
+            print("  scales with motion, so keep it moving to the last frame.")
         input("  Press Enter to start... ")
 
-        interval = a.seconds / a.frames
-        t0 = time.time()
-        for i in range(a.frames):
-            frame = drain_read(cap, interval)
-            if frame is None:
-                print(f"  frame {i}: no data, skipped")
-                continue
-            t = time.time() - t0
-            p = outdir / f"moving_{i:02d}.png"
-            size = save_png(p, frame)
-            print(f"  [{i+1:2d}/{a.frames}] t={t:5.2f}s  {p.name}  {size/1e6:.1f} MB")
-            meta["frames"].append({"file": p.name, "kind": "moving", "t": round(t, 3)})
+        if a.burst:
+            # Back-to-back reads: every frame the grabber gives us, in order,
+            # with nothing skipped.  Neighbouring frames then overlap enough to
+            # be predicted from one another, which is what makes a temporal
+            # fault separable from ordinary scene texture.
+            t0 = time.time()
+            for i in range(a.burst):
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    print(f"  frame {i}: no data, skipped")
+                    continue
+                t = time.time() - t0
+                p = outdir / f"burst_{i:03d}.png"
+                save_png(p, frame)
+                meta["frames"].append({"file": p.name, "kind": "burst",
+                                       "t": round(t, 4)})
+            dt = time.time() - t0
+            print(f"  {a.burst} frames in {dt:.2f}s "
+                  f"({a.burst/dt if dt else 0:.1f} fps captured)")
+        else:
+            interval = a.seconds / a.frames
+            t0 = time.time()
+            for i in range(a.frames):
+                frame = drain_read(cap, interval)
+                if frame is None:
+                    print(f"  frame {i}: no data, skipped")
+                    continue
+                t = time.time() - t0
+                p = outdir / f"moving_{i:02d}.png"
+                size = save_png(p, frame)
+                print(f"  [{i+1:2d}/{a.frames}] t={t:5.2f}s  {p.name}  {size/1e6:.1f} MB")
+                meta["frames"].append({"file": p.name, "kind": "moving", "t": round(t, 3)})
     finally:
         cap.release()
 
