@@ -53,6 +53,11 @@ def main() -> int:
     ap.add_argument("--height", type=int, required=True, help="per-camera map height")
     ap.add_argument("--qy-clamp", type=int, required=True,
                     help="max addressable source row (source_h - 2)")
+    ap.add_argument("--record-bits", type=int, default=144, choices=(96, 144),
+                    help="144 keeps sy/ox0/len in the record (EO, historical); "
+                         "96 drops them -- they are all derivable from the ROM "
+                         "address, which already encodes (row, cam, seg), and "
+                         "storing them costs ~29 BRAM tiles for nothing")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--row-max-out", type=Path)
     ap.add_argument("--row-min-out", type=Path)
@@ -108,10 +113,16 @@ def main() -> int:
                     dax_q16 = div_round_signed(x[i1] - ax0, span)
                     day_q16 = div_round_signed(y[i1] - ay0, span)
                     dax, day = q12_4(dax_q16), q12_4(day_q16)
-                    # Record layout is intentionally bit-addressable in RTL:
-                    # sy, ox0, len, ax0_q16, ay0_q16, dax_q12_4, day_q12_4.
-                    rec = struct.pack("<HHHiiHH", sy, ox0, length, ax0, ay0, dax & 0xffff, day & 0xffff)
-                    f.write(f"{int.from_bytes(rec, 'little'):036x}\n")
+                    # Record layout is intentionally bit-addressable in RTL.
+                    if args.record_bits == 144:
+                        rec = struct.pack("<HHHiiHH", sy, ox0, length,
+                                          ax0, ay0, dax & 0xffff, day & 0xffff)
+                        f.write(f"{int.from_bytes(rec, 'little'):036x}\n")
+                    else:
+                        # ax0_q16, ay0_q16, dax_q12_4, day_q12_4 only.  sy, ox0
+                        # and len are recomputed in RTL from the address.
+                        rec = struct.pack("<iiHH", ax0, ay0, dax & 0xffff, day & 0xffff)
+                        f.write(f"{int.from_bytes(rec, 'little'):024x}\n")
                     # Mirror EoV19StreamingRendererII1's qy() on this segment:
                     #   cy = ay0 + ((lx - ox0) * day_q12_4) << 12 ; qy = cy >> 16
                     for lx in range(ox0, ox0 + length):
