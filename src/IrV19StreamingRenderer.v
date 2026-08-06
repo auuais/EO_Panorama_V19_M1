@@ -1,3 +1,4 @@
+`timescale 1ns / 1ps
 `include "IrV19PanoramaParams.vh"
 
 // IR panorama renderer, direct ingress.

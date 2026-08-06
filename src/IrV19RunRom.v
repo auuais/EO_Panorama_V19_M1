@@ -1,3 +1,4 @@
+`timescale 1ns / 1ps
 `include "IrV19PanoramaParams.vh"
 
 // Synchronous dual-read RowRun ROM for the IR panorama.
