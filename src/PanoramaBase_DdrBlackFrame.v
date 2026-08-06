@@ -3509,6 +3509,7 @@ module PanoramaBase_DdrBlackFrame(
         .rst_n          (rst_n),
         .rd_clk         (rd_clk),
         .mode_enabled   (renderer_mode_enabled),
+        .ir_tail_guard_en((SRC_SEL == SRC_V19) && ir_stack_ui),
         .win_tall       (geom_1080),
         .dbg_pulse_seen (dbg_pulse_seen),
         .dbg_wpend_seen (dbg_wpend_seen),
@@ -3555,6 +3556,7 @@ module PanoramaBase_HdDdrRenderer #(
     input  wire        rst_n,
     input  wire        rd_clk,
     input  wire        mode_enabled,
+    input  wire        ir_tail_guard_en,
     // Window height select, ui_clk domain.  A single bit rather than a row
     // count on purpose: a multi-bit value crossing clock domains can be
     // sampled mid-change, and this one picks the frame geometry.
@@ -3626,6 +3628,15 @@ module PanoramaBase_HdDdrRenderer #(
                                     (v_cnt >= Y_OFF) && (v_cnt < (Y_OFF + win_rows));
     wire        vblank_drain_window = (v_cnt >= VBLANK_DRAIN_START[10:0]) && (v_cnt <= VBLANK_DRAIN_END[10:0]);
     wire        frame_toggle_line   = end_line && (v_cnt == FRAME_TOGGLE_LINE[10:0]);
+    wire        ir_visible_tail_black;
+
+    IrV19VisibleTailGuard u_ir_visible_tail_guard (
+        .ir_stack_mode(ir_tail_guard_en),
+        .cur_active(cur_active),
+        .cur_x(cur_x),
+        .v_cnt(v_cnt),
+        .tail_black(ir_visible_tail_black)
+    );
 
     assign hd_de    = hd_de_r;
     assign hd_hsync = hd_hsync_r;
@@ -3729,6 +3740,8 @@ module PanoramaBase_HdDdrRenderer #(
                 // corrupted, but ahead of the window content so it can't be
                 // missed. Does not gate on cur_inside_window on purpose.
                 hd_dout_r <= {10'd512, 10'd128};
+            end else if (ir_visible_tail_black) begin
+                hd_dout_r <= BLACK;
             end else if (cur_inside_window && frame_valid_sync && stream_started && !pix_empty) begin
                 // BT.1120 YCbCr 4:2:2: Y on the upper component and the
                 // alternating Cb/Cr sample on the lower component.

@@ -22,3 +22,21 @@ module IrV19TailMask (
 
     assign px_out = tail_slot ? `IR_V19_BLACK_PIXEL : px_in;
 endmodule
+
+module IrV19VisibleTailGuard (
+    input  wire        ir_stack_mode,
+    input  wire        cur_active,
+    input  wire [11:0] cur_x,
+    input  wire [10:0] v_cnt,
+    output wire        tail_black
+);
+    localparam [11:0] IR_FOLDED_TAIL_X0 =
+        `IR_V19_BLACK_X0 - (`IR_V19_PANO_W / 2);
+    localparam [10:0] IR_FOLDED_Y0 = `IR_V19_PANO_H;
+    localparam [10:0] IR_FOLDED_Y1 = `IR_V19_FOLDED_ACTIVE_H;
+
+    assign tail_black = ir_stack_mode && cur_active &&
+                        (v_cnt >= IR_FOLDED_Y0) &&
+                        (v_cnt < IR_FOLDED_Y1) &&
+                        (cur_x >= IR_FOLDED_TAIL_X0);
+endmodule
