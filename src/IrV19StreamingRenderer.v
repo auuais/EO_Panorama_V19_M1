@@ -22,15 +22,25 @@
 //   * no epoch/frame-set gating. EO absorbs unsynchronisable cameras through
 //     DDR and a common-epoch frontier; here the cameras are already aligned.
 //
-// Pipeline, one pixel per cycle, advancing only when px_ready:
-//   0 issue     pano_x/y, map decode (which cameras cover this column), ROM addr
-//   1 rom       RowRun record returns (ax0, ay0, dax, day) for camera a and b
-//   2 coord     cx = ax0 + ((lx-ox0)*dax)<<12, same for cy; qx, qy, frac
-//   3 fetch     present qx/qy/qy+1 to all six caches
-//   4 sample    cache data returns, select camera a's and b's pixels
-//   5 vinterp   vertical bilinear between y0 and y1
-//   6 blend     alpha merge of camera a and b across the 29-px seam
-//   7 pack      {luma, 0x80}, or black outside the valid region
+// Pipeline, one pixel per cycle, advancing only when px_ready. Stage k's
+// valid bit is v[k-1]; the whole table is written out because a one-stage
+// error here is silent in synthesis and shows up as a shifted seam:
+//
+//   k=0  issue    pano_x/y, map decode, ROM address (combinational)
+//   k=1  rom      RowRun record (ax0, ay0, dax, day) for camera a and b
+//   k=2  coord    cx = ax0 + ((lx-ox0)*dax)<<12, same for cy
+//   k=3  quant    qx, qy, frac -- addresses presented to all six caches here
+//   k=4  (cache: BRAM array access)
+//   k=5  (cache: BRAM output register, READ_LATENCY_B=2)
+//   k=6  sample   cache rd_pixel valid; 6:1 camera mux, registered
+//   k=7  vinterp  vertical bilinear between y0 and y1
+//   k=8  blend    alpha merge across the 29-px seam
+//   k=9  pack     {luma, 0x80}, or black outside the valid region
+//
+// k=4..7 are four separate cycles because the first version did the BRAM read,
+// a 32:1 bank mux, a 6:1 camera mux, a subtract, a 9x16 multiply and an add all
+// in ONE cycle. It routed at WNS -2.257 with 5,797 failing endpoints, every
+// violated path reading mem_reg_bram/CLKBWRCLK -> va_reg/D.
 module IrV19StreamingRenderer #(
     parameter integer SEG_W        = `IR_V19_SEG_W,
     parameter integer SEGS_PER_ROW = `IR_V19_SEGS_PER_ROW,
@@ -205,13 +215,14 @@ module IrV19StreamingRenderer #(
     // by the same clock edge.  Getting this indexing wrong by one is how the
     // alpha ramp ends up applied to the pixel next to the seam instead of on
     // it, so the mapping is written down rather than inferred.
-    reg [6:0]  v;              // valid, stage 1..7
-    reg        blk  [1:6];
-    reg        bln  [1:6];
-    reg        lst  [1:6];
-    reg [4:0]  apos [1:4];
+    reg [8:0]  v;              // valid, stage 1..9
+    reg        blk  [1:9];
+    reg        bln  [1:8];
+    reg        lst  [1:9];
+    reg [4:0]  apos [1:7];
     reg [5:0]  lxa_o [1:1], lxb_o [1:1];
-    reg [2:0]  cma [1:4], cmb [1:4];
+    reg [2:0]  cma [1:6], cmb [1:6];
+    reg [15:0] fya_p [4:7], fyb_p [4:7];   // frac carried to meet its samples
 
     wire last_pixel = (pano_y == H-1) && (pano_x == `IR_V19_PANO_W-1);
 
@@ -222,7 +233,7 @@ module IrV19StreamingRenderer #(
         if (!rst_n) begin
             v <= 7'd0;
         end else if (advance) begin
-            v    <= {v[5:0], (state == ST_OUT)};
+            v    <= {v[7:0], (state == ST_OUT)};
             blk[1] <= s0_black;  bln[1] <= s0_blend;  lst[1] <= last_pixel;
             apos[1] <= map_alpha_pos;
             lxa_o[1] <= s0_lx_a[5:0];  lxb_o[1] <= map_lx_b[5:0];
@@ -234,7 +245,13 @@ module IrV19StreamingRenderer #(
             blk[4] <= blk[3]; bln[4] <= bln[3]; lst[4] <= lst[3];
             apos[4] <= apos[3]; cma[4] <= cma[3]; cmb[4] <= cmb[3];
             blk[5] <= blk[4]; bln[5] <= bln[4]; lst[5] <= lst[4];
+            apos[5] <= apos[4]; cma[5] <= cma[4]; cmb[5] <= cmb[4];
             blk[6] <= blk[5]; bln[6] <= bln[5]; lst[6] <= lst[5];
+            apos[6] <= apos[5]; cma[6] <= cma[5]; cmb[6] <= cmb[5];
+            blk[7] <= blk[6]; bln[7] <= bln[6]; lst[7] <= lst[6];
+            apos[7] <= apos[6];
+            blk[8] <= blk[7]; bln[8] <= bln[7]; lst[8] <= lst[7];
+            blk[9] <= blk[8]; lst[9] <= lst[8];
         end
     end
 
@@ -294,14 +311,22 @@ module IrV19StreamingRenderer #(
         end
     endgenerate
 
-    // --- stage 4/5: sample and vertical interpolation ----------------------
-    reg [15:0] fya_q, fyb_q;
-    always @(posedge clk) if (advance) begin fya_q <= fya; fyb_q <= fyb; end
+    // --- k=6: sample. Camera mux REGISTERED, alone in its cycle -------------
+    // The cache spends k=4/k=5 on its array access and output register, so what
+    // arrives here is already registered. The 6:1 select is all this stage
+    // does; pairing it with the interpolation below caused the -2.257 failure.
+    always @(posedge clk) if (advance) begin
+        fya_p[4] <= fya;      fyb_p[4] <= fyb;
+        fya_p[5] <= fya_p[4]; fyb_p[5] <= fyb_p[4];
+        fya_p[6] <= fya_p[5]; fyb_p[6] <= fyb_p[5];
+        fya_p[7] <= fya_p[6]; fyb_p[7] <= fyb_p[6];
+    end
 
-    wire [7:0] pa0 = px_y0[cma[4]];
-    wire [7:0] pa1 = px_y1[cma[4]];
-    wire [7:0] pb0 = px_y0[cmb[4]];
-    wire [7:0] pb1 = px_y1[cmb[4]];
+    reg [7:0] pa0_q, pa1_q, pb0_q, pb1_q;
+    always @(posedge clk) if (advance) begin
+        pa0_q <= px_y0[cma[6]];  pa1_q <= px_y1[cma[6]];
+        pb0_q <= px_y0[cmb[6]];  pb1_q <= px_y1[cmb[6]];
+    end
 
     function [7:0] vlerp;
         input [7:0] p0; input [7:0] p1; input [15:0] f;
@@ -314,10 +339,11 @@ module IrV19StreamingRenderer #(
         end
     endfunction
 
+    // --- k=7: vertical interpolation, alone in its cycle -------------------
     reg [7:0] va, vb;
     always @(posedge clk) if (advance) begin
-        va <= vlerp(pa0, pa1, fya_q);
-        vb <= vlerp(pb0, pb1, fyb_q);
+        va <= vlerp(pa0_q, pa1_q, fya_p[7]);
+        vb <= vlerp(pb0_q, pb1_q, fyb_p[7]);
     end
 
     // --- stage 6: seam blend ----------------------------------------------
@@ -325,11 +351,11 @@ module IrV19StreamingRenderer #(
     // apos[4] and registered.  Reading it from apos[3] would apply each seam
     // weight one pixel early -- a 1-px shift of the whole 29-px ramp.
     reg [15:0] alpha_q;
-    always @(posedge clk) if (advance) alpha_q <= alpha_y[apos[4]];
+    always @(posedge clk) if (advance) alpha_q <= alpha_y[apos[7]];
 
     reg [7:0] merged;
     always @(posedge clk) if (advance) begin
-        merged <= bln[5] ? vlerp(va, vb, alpha_q) : va;
+        merged <= bln[8] ? vlerp(va, vb, alpha_q) : va;
     end
 
     // --- stage 7: pack -----------------------------------------------------
@@ -339,10 +365,10 @@ module IrV19StreamingRenderer #(
         if (!rst_n) begin
             px_valid <= 1'b0; px_data <= `IR_V19_BLACK_PIXEL; frame_done <= 1'b0;
         end else if (advance) begin
-            px_valid <= v[5];
-            px_data  <= blk[6] ? `IR_V19_BLACK_PIXEL
+            px_valid <= v[8];
+            px_data  <= blk[9] ? `IR_V19_BLACK_PIXEL
                                : {merged, `IR_V19_CHROMA_NEUTRAL};
-            frame_done <= v[5] && lst[6];
+            frame_done <= v[8] && lst[9];
         end else begin
             frame_done <= 1'b0;
         end

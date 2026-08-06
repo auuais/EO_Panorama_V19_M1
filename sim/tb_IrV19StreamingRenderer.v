@@ -138,7 +138,7 @@ module tb_IrV19StreamingRenderer;
                     $time, dut.state, dut.pano_x, dut.v,
                     dut.lxa_o[1], dut.rom_a[31:16],
                     dut.cxa[33:16], dut.qxa,
-                    dut.fya_q, dut.px_y0[0], dut.va, px_valid, px_data);
+                    dut.fya_p[7], dut.px_y0[0], dut.va, px_valid, px_data);
             end
         end
     end

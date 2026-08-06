@@ -149,7 +149,7 @@ module IrV19LineCache #(
                 .MEMORY_INIT_FILE("none"), .MEMORY_INIT_PARAM("0"),
                 .MEMORY_OPTIMIZATION("true"), .MEMORY_PRIMITIVE("block"),
                 .MEMORY_SIZE(WIDTH*PIX_W), .MESSAGE_CONTROL(0),
-                .READ_DATA_WIDTH_B(PIX_W), .READ_LATENCY_B(1),
+                .READ_DATA_WIDTH_B(PIX_W), .READ_LATENCY_B(2),
                 .READ_RESET_VALUE_B("0"), .RST_MODE_B("SYNC"),
                 .SIM_ASSERT_CHK(0), .USE_EMBEDDED_CONSTRAINT(0),
                 .USE_MEM_INIT(1), .WAKEUP_TIME("disable_sleep"),
@@ -160,7 +160,12 @@ module IrV19LineCache #(
                 .clkb(rd_clk), .enb(rd_en), .addrb(rd_x[AWM-1:0]),
                 .doutb(bank_dout[g]),
                 .sleep(1'b0), .injectsbiterra(1'b0), .injectdbiterra(1'b0),
-                .regceb(1'b1), .rstb(~rst_n), .sbiterrb(), .dbiterrb()
+                // regceb gates the BRAM's OUTPUT register, which only exists
+                // because READ_LATENCY_B is 2. Tied high it free-runs through a
+                // renderer stall and shifts the read stream -- the datapath is
+                // fine and only the stalling run fails. enb alone is not enough:
+                // it gates the array access, not the output stage.
+                .regceb(rd_en), .rstb(~rst_n), .sbiterrb(), .dbiterrb()
             );
         end
     endgenerate
@@ -192,25 +197,49 @@ module IrV19LineCache #(
     // Rows are written sequentially from slot zero at each frame boundary, so
     // row-to-slot is a bit-slice rather than a 32-way encoder at 233 MHz. The
     // committed epoch+row tag is still checked before a read counts as a hit.
+    // READ LATENCY IS 3, and every stage of it is load-bearing.
+    //
+    // The first version had latency 1: BRAM output straight into a
+    // combinational 32:1 bank mux, then out of the module into the renderer's
+    // 6:1 camera mux, subtract, 9x16 multiply and add -- all inside one 4.28 ns
+    // ui_clk cycle. It routed at WNS -2.257 with 5,797 failing endpoints, every
+    // violated path reading mem_reg_bram/CLKBWRCLK -> va_reg/D.
+    //
+    //   +1  the XPM's own output register (READ_LATENCY_B=2). Costs no fabric
+    //       -- it is the BRAM primitive's DOB_REG -- and replaces ~1.5 ns of
+    //       block clock-to-out with a ~0.1 ns register.
+    //   +1  the 32:1 bank mux, registered here. The 32 banks are physically
+    //       spread, so this mux is mostly route delay and cannot share a cycle
+    //       with arithmetic.
+    //
+    // The bank select must be delayed to match, or the mux picks the right
+    // bank one cycle before its data arrives.
     reg [SLOT_W-1:0] rd_bank_y0_q, rd_bank_y1_q;
-    reg rd_hit_y0_q, rd_hit_y1_q;
+    reg [SLOT_W-1:0] rd_bank_y0_q2, rd_bank_y1_q2;
+    reg rd_hit_y0_q, rd_hit_y1_q, rd_hit_y0_q2, rd_hit_y1_q2;
+    reg [PIX_W-1:0] rd_p0_q, rd_p1_q;
     wire [SLOT_W-1:0] rd_slot_y0 = rd_y0[SLOT_W-1:0];
     wire [SLOT_W-1:0] rd_slot_y1 = rd_y1[SLOT_W-1:0];
     wire rd_match_y0 = (tag_sync[rd_slot_y0] == {epoch_sync, rd_y0});
     wire rd_match_y1 = (tag_sync[rd_slot_y1] == {epoch_sync, rd_y1});
     always @(posedge rd_clk) begin
         if (!rst_n) begin
-            rd_bank_y0_q <= 0; rd_bank_y1_q <= 0;
-            rd_hit_y0_q  <= 1'b0; rd_hit_y1_q <= 1'b0;
+            rd_bank_y0_q  <= 0; rd_bank_y1_q  <= 0;
+            rd_bank_y0_q2 <= 0; rd_bank_y1_q2 <= 0;
+            rd_hit_y0_q   <= 1'b0; rd_hit_y1_q  <= 1'b0;
+            rd_hit_y0_q2  <= 1'b0; rd_hit_y1_q2 <= 1'b0;
+            rd_p0_q <= {PIX_W{1'b0}}; rd_p1_q <= {PIX_W{1'b0}};
         end else if (rd_en) begin
-            rd_bank_y0_q <= rd_slot_y0;
-            rd_bank_y1_q <= rd_slot_y1;
-            rd_hit_y0_q  <= rd_match_y0;
-            rd_hit_y1_q  <= rd_match_y1;
+            rd_bank_y0_q  <= rd_slot_y0;   rd_bank_y0_q2 <= rd_bank_y0_q;
+            rd_bank_y1_q  <= rd_slot_y1;   rd_bank_y1_q2 <= rd_bank_y1_q;
+            rd_hit_y0_q   <= rd_match_y0;  rd_hit_y0_q2  <= rd_hit_y0_q;
+            rd_hit_y1_q   <= rd_match_y1;  rd_hit_y1_q2  <= rd_hit_y1_q;
+            rd_p0_q <= bank_dout[rd_bank_y0_q2];
+            rd_p1_q <= bank_dout[rd_bank_y1_q2];
         end
     end
-    assign rd_pixel_y0 = bank_dout[rd_bank_y0_q];
-    assign rd_pixel_y1 = bank_dout[rd_bank_y1_q];
+    assign rd_pixel_y0 = rd_p0_q;
+    assign rd_pixel_y1 = rd_p1_q;
 
     reg [AW-1:0] rows_meta, rows_sync;
     reg [AW-1:0] height_meta, height_sync;
@@ -230,6 +259,6 @@ module IrV19LineCache #(
     assign frame_toggle  = tog_sync;
     assign field_height  = height_sync;
     assign current_epoch = epoch_sync;
-    assign rd_hit_y0     = rd_hit_y0_q;
-    assign rd_hit_y1     = rd_hit_y1_q;
+    assign rd_hit_y0     = rd_hit_y0_q2;
+    assign rd_hit_y1     = rd_hit_y1_q2;
 endmodule
