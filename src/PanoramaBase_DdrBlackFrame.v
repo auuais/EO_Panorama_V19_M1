@@ -866,6 +866,14 @@ module PanoramaBase_DdrBlackFrame(
     //------------------------------------------------------------------------
     wire        copy_px_valid;    // pulses once per pixel ready to pack
     wire [15:0] copy_px_data;     // packed {hi8,lo8} value, valid when copy_px_valid
+    wire [15:0] copy_px_pack_data;
+    IrV19TailMask u_ir_v19_tail_mask (
+        .ir_stack_mode((SRC_SEL == SRC_V19) && ir_stack_ui),
+        .fold_beat_x(fb_fold_beat_x),
+        .pack_count(fb_pack_count),
+        .px_in(copy_px_data),
+        .px_out(copy_px_pack_data)
+    );
     wire        eo_frames_valid;  // all six EO tile buffers have captured >=1 frame
     wire        v19_replay_frame_edge_ui;
     wire        v19_replay_banks_ready;
@@ -2947,7 +2955,7 @@ module PanoramaBase_DdrBlackFrame(
             //----------------------------------------------------------------
             if (copy_px_valid) begin
                 fb_pack_buf[DDR_GUARD_OFFSET_BITS +
-                            {fb_pack_count, 4'b0000} +: 16] <= copy_px_data;
+                            {fb_pack_count, 4'b0000} +: 16] <= copy_px_pack_data;
                 if (fb_pack_count == PIXELS_PER_BEAT_LAST)
                     fb_write_pending <= 1'b1;
                 else
