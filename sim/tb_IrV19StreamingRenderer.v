@@ -25,7 +25,7 @@ module tb_IrV19StreamingRenderer;
     reg start_copy = 0;
     reg [5:0] cam_present = 6'h3F;
 
-    reg chs = 0, cvs = 1;
+    reg chs = 0, cvs = 0;
     reg [7:0] cpx = 0;
 
     wire        px_valid;
@@ -60,8 +60,8 @@ module tb_IrV19StreamingRenderer;
     integer fed_rows;
     integer x, y;
 
-    // Camera raster: vsync high, then falling edge starts the frame; each row
-    // is 640 pixels with hsync high, then a blanking gap.
+    // Camera raster: vsync is active high, as in the hardware-proven IR single
+    // path; each row is 640 pixels with hsync high, then a blanking gap.
     //
     // Driven on the NEGEDGE, and this is not cosmetic. The posedge version
     // overwrote cpx in the same timestep the cache samples it, xsim ran the
@@ -72,9 +72,9 @@ module tb_IrV19StreamingRenderer;
     // debugging pass pointing at the datapath. The cache micro-bench
     // (tb_IrV19LineCacheAlign) caught the pairing directly: wr_x=0 px=1.
     initial begin
-        cvs = 1; chs = 0; fed_rows = 0;
+        cvs = 0; chs = 0; fed_rows = 0;
         repeat (20) @(negedge cclk);
-        cvs = 0;                                  // falling edge = frame start
+        cvs = 1;                                  // rising edge = frame start
         for (y = 0; y < FEED_ROWS; y = y + 1) begin
             @(negedge cclk); chs = 1;
             for (x = 0; x < SRC_W; x = x + 1) begin
@@ -85,7 +85,7 @@ module tb_IrV19StreamingRenderer;
             fed_rows = y + 1;
             repeat (8) @(negedge cclk);           // horizontal blanking
         end
-        chs = 0;
+        chs = 0; cvs = 0;
     end
 
     // Irregular stall pattern on the consumer, driven at NEGEDGE.

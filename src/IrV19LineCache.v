@@ -70,8 +70,9 @@ module IrV19LineCache #(
     reg [EPOCH_W-1:0] wr_epoch;
     reg [AW-1:0] field_height_wr;
 
-    wire wr_active        = wr_hsync && !wr_vsync;
-    wire wr_frame_start   = wr_vsync_d && !wr_vsync;
+    // IR camera vsync is active high here, matching IrSelectedFrameBuffer.
+    wire wr_active        = wr_hsync && wr_vsync;
+    wire wr_frame_start   = wr_vsync && !wr_vsync_d;
     wire wr_frame_restart = wr_frame_reset || wr_frame_start;
     wire wr_line_complete = wr_active && (wr_x == WIDTH-1);
 

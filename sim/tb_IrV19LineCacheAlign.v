@@ -13,7 +13,7 @@ module tb_IrV19LineCacheAlign;
     reg wclk = 0; always #9 wclk = ~wclk;
     reg rclk = 0; always #2 rclk = ~rclk;
     reg rst_n = 0;
-    reg hs = 0, vs = 1;
+    reg hs = 0, vs = 0;
     reg [7:0] px = 0;
 
     reg [10:0] ry0 = 0, ry1 = 1, rx = 0;
@@ -68,8 +68,15 @@ module tb_IrV19LineCacheAlign;
         repeat (6) @(negedge wclk);
         rst_n = 1;
         repeat (4) @(negedge wclk);
-        vs = 0;                              // falling edge = frame start
+        vs = 1;                              // active-high frame, matching IR hardware
         for (y = 0; y < 8; y = y + 1) feed_row(y);
+        @(negedge wclk); vs = 0;
+
+        repeat (8) @(posedge rclk);
+        if (rows < 11'd8) begin
+            $display("  FAIL: active-high vsync raster captured only %0d rows", rows);
+            errs = errs + 1;
+        end
 
         check_addr(11'd0);
         check_addr(11'd1);
