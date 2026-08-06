@@ -430,6 +430,21 @@ module IrV19StreamingRenderer #(
     assign dbg_pano_x     = pano_x;
     assign dbg_rows_min   = rows_min;
     assign dbg_row_target = need_row;
-    assign dbg_word = {4'hC, cam_present, state, row_ready_q, frames_valid,
-                       pano_y, pano_x, rows_min, dbg_row_target, 3'd0};
+    // Exactly 64 bits. The previous version concatenated to 60 and was
+    // assigned to a 64-bit output, so it was left-padded with zeros and the
+    // signature did not sit at [63:60] -- it would have decoded as garbage.
+    //
+    //  [63:60] sig 4'hC   [59:58] state   [57] row_ready  [56] frames_valid
+    //  [55] start_copy    [54] px_valid   [53] px_ready
+    //  [52:44] pano_y     [43:32] pano_x
+    //  [31:21] rows_min   [20:10] need_row
+    //  [9:4] cam_present  [3:0] v[3:0]
+    //
+    // rows_min against need_row is the whole question when the renderer
+    // stalls: it says whether the row gate is closed and by how much.
+    assign dbg_word = {4'hC, state, row_ready_q, frames_valid,
+                       start_copy, px_valid, px_ready,
+                       pano_y, pano_x,
+                       rows_min, need_row,
+                       cam_present, v[3:0]};
 endmodule

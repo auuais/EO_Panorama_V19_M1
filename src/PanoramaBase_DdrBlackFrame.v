@@ -3464,7 +3464,13 @@ module PanoramaBase_DdrBlackFrame(
         // stay load-bearing (v19_dbg_rows_word2[50:40] still feeds
         // v19_rows_start_aligned); only the probe assignment moves, so the
         // ILA IP is not regenerated.  Layout in IrGenlockSkewMonitor.
-        .probe24 (ir_skew_dbg),
+        // probe24 now carries the IR RENDERER, not the genlock skew monitor.
+        // The skew question is answered -- all six cameras within 274 ns,
+        // measured 2026-08-06 after IR_SetNV(16,0) -- and mode 0x14 produces
+        // no pixels on hardware while passing simulation, which cannot be
+        // diagnosed without seeing the renderer's own state. The skew monitor
+        // stays instantiated so it can be probed again if cameras drift.
+        .probe24 (ir_render_dbg),
         // V19 DDR replay bring-up visibility: distinguish "source read not
         // requested", "request not accepted", and "return misclassified".
         // The two return valids are probed separately -- a return landing on
