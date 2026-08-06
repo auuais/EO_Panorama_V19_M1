@@ -37,6 +37,9 @@ module PanoramaBase_DdrBlackFrame(
     // skew monitor.  Measurement only -- nothing in the datapath uses it yet.
     input  wire        ir_genlock_pulse,
     input  wire        ir_single_mode,
+    // Mode 0x14. Deglitched alongside the others below; it gates both
+    // the IR panorama renderer and the EO frame-set lease release.
+    input  wire        ir_stack_mode,
     input  wire [2:0]  ir_sel,
     // EO single is served from the DDR capture that already runs for the
     // panorama, so it needs the same mode/selection the IR path takes.
@@ -570,15 +573,15 @@ module PanoramaBase_DdrBlackFrame(
     // Control deglitch: synchronize {ir_single_mode, ir_sel} into ui_clk and
     // only accept a value once it has been stable for 2 ui_clk cycles.
     //------------------------------------------------------------------------
-    reg [7:0] mode_meta, mode_sync, mode_sync_d, mode_stable;
+    reg [8:0] mode_meta, mode_sync, mode_sync_d, mode_stable;
     always @(posedge c0_ddr4_ui_clk) begin
         if (ui_rst) begin
-            mode_meta   <= 8'd0;
-            mode_sync   <= 8'd0;
-            mode_sync_d <= 8'd0;
-            mode_stable <= 8'd0;
+            mode_meta   <= 9'd0;
+            mode_sync   <= 9'd0;
+            mode_sync_d <= 9'd0;
+            mode_stable <= 9'd0;
         end else begin
-            mode_meta   <= {eo_single_mode, eo_sel, ir_single_mode, ir_sel};
+            mode_meta   <= {ir_stack_mode, eo_single_mode, eo_sel, ir_single_mode, ir_sel};
             mode_sync   <= mode_meta;
             mode_sync_d <= mode_sync;
             if (mode_sync == mode_sync_d)
@@ -588,6 +591,7 @@ module PanoramaBase_DdrBlackFrame(
     wire       ir_single_ui = mode_stable[3];
     wire [2:0] ir_sel_ui    = mode_stable[2:0];
     wire       eo_single_ui = mode_stable[7];
+    wire       ir_stack_ui  = mode_stable[8];
     wire [2:0] eo_sel_ui    = mode_stable[6:4];
 
     //------------------------------------------------------------------------
@@ -617,6 +621,7 @@ module PanoramaBase_DdrBlackFrame(
     wire       sel_pulse_w;
     wire       sel_frame_valid_w;   // low once the selected camera stops
     wire [5:0] ir_rejoin_busy;      // per IR camera, high while re-baselining
+    wire [63:0] ir_render_dbg;      // IR panorama renderer status
     wire [5:0] ir_cam_frame_pulse;  // per IR camera frame END (vsync fall), ui_clk
     wire [5:0] ir_cam_sof_pulse;    // per IR camera frame START (vsync rise), ui_clk
     wire [63:0] ir_skew_dbg;
@@ -1025,7 +1030,12 @@ module PanoramaBase_DdrBlackFrame(
     // introduces no new ownership hazard.  Doing it in place needs the explicit
     // per-camera/bank/epoch outstanding-read fence that document specifies.
     //------------------------------------------------------------------------
-    wire v19_panorama_consuming = !ir_single_ui && !eo_single_ui;
+    // Mode 0x14 consumes nothing from the EO replay path -- the IR panorama
+    // renders straight from its line caches. Without the ir_stack_ui term the
+    // EO frame-set manager sits holding its lease waiting for an output copy
+    // that the IR renderer, not the EO replay, is producing. That is exactly
+    // the wedge fixed in 6456810 for IR single, one mode over.
+    wire v19_panorama_consuming = !ir_single_ui && !eo_single_ui && !ir_stack_ui;
     wire v19_copy_frame_done    = write_retiring && !cmd_write_capture &&
                                   (fb_burst_count == active_beats - 18'd1);
     wire v19_consumer_done = (SRC_SEL == SRC_V19) &&
@@ -1394,8 +1404,15 @@ module PanoramaBase_DdrBlackFrame(
         // buffers: six two-line caches feed the RowRun/vertical-interpolate
         // renderer, preblend placeholders, deterministic seam merge, and the
         // existing 16-pixel DDR packer.
-        wire v19_px_valid;
-        wire [15:0] v19_px_data;
+        // Two renderers share the downstream FIFO, fold and scan-out. Only one
+        // runs at a time -- start_copy is gated by mode, so the idle one sits in
+        // ST_IDLE producing nothing -- and this mux picks whose pixels land.
+        wire        eo_rnd_px_valid, ir_rnd_px_valid;
+        wire [15:0] eo_rnd_px_data,  ir_rnd_px_data;
+        wire        eo_rnd_frame_done, ir_rnd_frame_done;
+        wire        eo_rnd_frames_valid, ir_rnd_frames_valid;
+        wire v19_px_valid     = ir_stack_ui ? ir_rnd_px_valid   : eo_rnd_px_valid;
+        wire [15:0] v19_px_data = ir_stack_ui ? ir_rnd_px_data  : eo_rnd_px_data;
         wire [1:0] v19_dbg_state;
         wire [8:0] v19_dbg_pano_y;
         wire [11:0] v19_dbg_pano_x;
@@ -1900,7 +1917,7 @@ module PanoramaBase_DdrBlackFrame(
         EoV19StreamingRendererII1 u_v19_renderer (
             .rst_n      (rst_n),
             .clk        (c0_ddr4_ui_clk),
-            .start_copy (v19_render_active),
+            .start_copy (v19_render_active && !ir_stack_ui),
             .cam_present(v19_cam_present),
             .source_frame_reset(v19_replay_frame_edge_ui),
             .cam0_clk   (v19_replay_clk), .cam0_hsync(v19_cam0_hsync), .cam0_vsync(v19_cam0_vsync), .cam0_pixel(v19_cam0_pixel),
@@ -1909,11 +1926,11 @@ module PanoramaBase_DdrBlackFrame(
             .cam3_clk   (v19_replay_clk), .cam3_hsync(v19_cam3_hsync), .cam3_vsync(v19_cam3_vsync), .cam3_pixel(v19_cam3_pixel),
             .cam4_clk   (v19_replay_clk), .cam4_hsync(v19_cam4_hsync), .cam4_vsync(v19_cam4_vsync), .cam4_pixel(v19_cam4_pixel),
             .cam5_clk   (v19_replay_clk), .cam5_hsync(v19_cam5_hsync), .cam5_vsync(v19_cam5_vsync), .cam5_pixel(v19_cam5_pixel),
-            .px_valid   (v19_px_valid),
+            .px_valid   (eo_rnd_px_valid),
             .px_ready   (!v19_fifo_full),
-            .px_data    (v19_px_data),
-            .frame_done (v19_frame_done),
-            .frames_valid(v19_frames_valid),
+            .px_data    (eo_rnd_px_data),
+            .frame_done (eo_rnd_frame_done),
+            .frames_valid(eo_rnd_frames_valid),
             .dbg_state  (v19_dbg_state),
             .dbg_pano_y (v19_dbg_pano_y),
             .dbg_pano_x (v19_dbg_pano_x),
@@ -1930,6 +1947,38 @@ module PanoramaBase_DdrBlackFrame(
             .dbg_rows_word1(v19_dbg_rows_word1),
             .dbg_rows_word2(v19_dbg_rows_word2)
         );
+
+        //--------------------------------------------------------------------
+        // IR panorama (mode 0x14), direct ingress.
+        //
+        // The six IR cameras feed line caches straight from their pixel clocks
+        // -- no DDR ring, no frame-set lease, no replay -- which is sound only
+        // because they are 30 Hz genlock slaves starting within 274 ns of each
+        // other, and because the RowRun tables bound the working set for any
+        // one output row at 13 source rows.
+        //--------------------------------------------------------------------
+        IrV19StreamingRenderer u_ir_renderer (
+            .rst_n      (rst_n),
+            .clk        (c0_ddr4_ui_clk),
+            .start_copy (v19_render_active && ir_stack_ui),
+            .cam_present(~ir_rejoin_busy),
+            .cam0_clk(ir0_wr_clk), .cam0_hsync(ir0_wr_hsync), .cam0_vsync(ir0_wr_vsync), .cam0_pixel(ir0_wr_pixel),
+            .cam1_clk(ir1_wr_clk), .cam1_hsync(ir1_wr_hsync), .cam1_vsync(ir1_wr_vsync), .cam1_pixel(ir1_wr_pixel),
+            .cam2_clk(ir2_wr_clk), .cam2_hsync(ir2_wr_hsync), .cam2_vsync(ir2_wr_vsync), .cam2_pixel(ir2_wr_pixel),
+            .cam3_clk(ir3_wr_clk), .cam3_hsync(ir3_wr_hsync), .cam3_vsync(ir3_wr_vsync), .cam3_pixel(ir3_wr_pixel),
+            .cam4_clk(ir4_wr_clk), .cam4_hsync(ir4_wr_hsync), .cam4_vsync(ir4_wr_vsync), .cam4_pixel(ir4_wr_pixel),
+            .cam5_clk(ir5_wr_clk), .cam5_hsync(ir5_wr_hsync), .cam5_vsync(ir5_wr_vsync), .cam5_pixel(ir5_wr_pixel),
+            .px_valid   (ir_rnd_px_valid),
+            .px_ready   (!v19_fifo_full),
+            .px_data    (ir_rnd_px_data),
+            .frame_done (ir_rnd_frame_done),
+            .frames_valid(ir_rnd_frames_valid),
+            .dbg_state(), .dbg_pano_y(), .dbg_pano_x(),
+            .dbg_rows_min(), .dbg_row_target(), .dbg_word(ir_render_dbg)
+        );
+        assign v19_frame_done   = ir_stack_ui ? ir_rnd_frame_done   : eo_rnd_frame_done;
+        assign v19_frames_valid = ir_stack_ui ? ir_rnd_frames_valid : eo_rnd_frames_valid;
+
         assign eo_frames_valid = v19_frames_valid;
         assign v19_dbg_bus = {v19_dbg_seen_done, v19_dbg_seen_out,
                               v19_dbg_rows_peak,

@@ -484,6 +484,7 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
         .rd_clk               (hd_path_clk),
         .ir_genlock_pulse     (ir_genlock_pulse),
         .ir_single_mode       (ir_single_mode_active),
+        .ir_stack_mode        (ir_stack_mode_active),
         .ir_sel               (ir_sel),
         .eo_single_mode       (eo_single_mode_active),
         .eo_sel               (eo_sel),

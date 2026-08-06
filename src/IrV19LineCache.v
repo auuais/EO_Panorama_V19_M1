@@ -1,3 +1,4 @@
+`timescale 1ns / 1ps
 `include "IrV19PanoramaParams.vh"
 
 // Tagged source-row cache for the IR streaming renderer.
@@ -53,7 +54,12 @@ module IrV19LineCache #(
     output wire        rd_hit_y0,
     output wire        rd_hit_y1
 );
-    localparam integer AW      = 11;
+    localparam integer AW      = 11;   // row/col counters, renderer-facing
+    // XPM requires ADDR_WIDTH == clog2(MEMORY_SIZE/WRITE_DATA_WIDTH). The
+    // memory is WIDTH entries deep (640 -> 10 bits), NOT AW. Declaring 11
+    // aborts the XPM behavioural model at time 0. The EO cache never showed
+    // this because its 1920 entries happen to give clog2 = 11 = its AW.
+    localparam integer AWM     = $clog2(WIDTH);
     localparam integer SLOT_W  = (CACHE_LINES <= 2) ? 1 : $clog2(CACHE_LINES);
     localparam integer EPOCH_W = 2;
     localparam integer TAG_W   = AW + EPOCH_W;
@@ -137,7 +143,7 @@ module IrV19LineCache #(
                 end
             end
             xpm_memory_sdpram #(
-                .ADDR_WIDTH_A(AW), .ADDR_WIDTH_B(AW),
+                .ADDR_WIDTH_A(AWM), .ADDR_WIDTH_B(AWM),
                 .AUTO_SLEEP_TIME(0), .BYTE_WRITE_WIDTH_A(PIX_W),
                 .CLOCKING_MODE("independent_clock"), .ECC_MODE("no_ecc"),
                 .MEMORY_INIT_FILE("none"), .MEMORY_INIT_PARAM("0"),
@@ -150,8 +156,8 @@ module IrV19LineCache #(
                 .WRITE_DATA_WIDTH_A(PIX_W), .WRITE_MODE_B("read_first")
             ) u_bank (
                 .clka(wr_clk), .ena(bank_wr_q), .wea(bank_wr_q),
-                .addra(bank_addr_q), .dina(bank_data_q),
-                .clkb(rd_clk), .enb(rd_en), .addrb(rd_x),
+                .addra(bank_addr_q[AWM-1:0]), .dina(bank_data_q),
+                .clkb(rd_clk), .enb(rd_en), .addrb(rd_x[AWM-1:0]),
                 .doutb(bank_dout[g]),
                 .sleep(1'b0), .injectsbiterra(1'b0), .injectdbiterra(1'b0),
                 .regceb(1'b1), .rstb(~rst_n), .sbiterrb(), .dbiterrb()
