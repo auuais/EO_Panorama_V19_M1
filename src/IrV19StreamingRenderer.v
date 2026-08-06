@@ -26,7 +26,7 @@
 // valid bit is v[k-1]; the whole table is written out because a one-stage
 // error here is silent in synthesis and shows up as a shifted seam:
 //
-//   k=0  issue    pano_x/y, map decode, ROM address (combinational)
+//   k=0  issue    pano_x/y, map decode, ROM address from registered row base
 //   k=1  rom      RowRun record (ax0, ay0, dax, day) for camera a and b
 //   k=2  coord    cx = ax0 + ((lx-ox0)*dax)<<12, same for cy
 //   k=3  quant    qx, qy, frac -- addresses presented to all six caches here
@@ -78,6 +78,7 @@ module IrV19StreamingRenderer #(
     localparam integer H      = `IR_V19_PER_CAM_H;       // 480
     localparam integer SRC_W  = `IR_V19_INPUT_W;         // 640
     localparam [10:0]  QYCLMP = `IR_V19_QY_CLAMP;        // 510
+    localparam [14:0]  RUN_ROW_STRIDE = 6 * SEGS_PER_ROW;
 
     // Declared before first use: a forward reference here would silently
     // become a 1-bit implicit net and every cache would free-run through
@@ -137,6 +138,7 @@ module IrV19StreamingRenderer #(
     localparam ST_IDLE=2'd0, ST_ROW_WAIT=2'd1, ST_OUT=2'd2, ST_DRAIN=2'd3;
     reg [8:0]  pano_y;
     reg [11:0] pano_x;
+    reg [14:0] rom_row_base;
     reg        started;
 
     // Which camera(s) cover this column, and the local x inside each.
@@ -199,8 +201,21 @@ module IrV19StreamingRenderer #(
 
     wire [3:0] seg_a = s0_lx_a[9:6];
     wire [3:0] seg_b = map_lx_b[9:6];
-    wire [14:0] rom_addr_a = (({6'd0, pano_y} * 3'd6) + {12'd0, s0_cam_a}) * SEGS_PER_ROW + {11'd0, seg_a};
-    wire [14:0] rom_addr_b = (({6'd0, pano_y} * 3'd6) + {12'd0, map_cam_b}) * SEGS_PER_ROW + {11'd0, seg_b};
+    function [14:0] cam_run_offset;
+        input [2:0] cam;
+        begin
+            case (cam)
+                3'd0: cam_run_offset = 15'd0;
+                3'd1: cam_run_offset = 1 * SEGS_PER_ROW;
+                3'd2: cam_run_offset = 2 * SEGS_PER_ROW;
+                3'd3: cam_run_offset = 3 * SEGS_PER_ROW;
+                3'd4: cam_run_offset = 4 * SEGS_PER_ROW;
+                default: cam_run_offset = 5 * SEGS_PER_ROW;
+            endcase
+        end
+    endfunction
+    wire [14:0] rom_addr_a = rom_row_base + cam_run_offset(s0_cam_a) + {11'd0, seg_a};
+    wire [14:0] rom_addr_b = rom_row_base + cam_run_offset(map_cam_b) + {11'd0, seg_b};
 
     wire [95:0] rom_a, rom_b;
     IrV19RunRom u_rom (
@@ -402,11 +417,11 @@ module IrV19StreamingRenderer #(
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            state <= ST_IDLE; pano_x <= 12'd0; pano_y <= 9'd0; started <= 1'b0;
+            state <= ST_IDLE; pano_x <= 12'd0; pano_y <= 9'd0; rom_row_base <= 15'd0; started <= 1'b0;
         end else begin
             case (state)
                 ST_IDLE: begin
-                    pano_x <= 12'd0; pano_y <= 9'd0;
+                    pano_x <= 12'd0; pano_y <= 9'd0; rom_row_base <= 15'd0;
                     if (start_copy) begin state <= ST_ROW_WAIT; started <= 1'b1; end
                 end
                 ST_ROW_WAIT: if (row_ready_q) state <= ST_OUT;
@@ -414,12 +429,16 @@ module IrV19StreamingRenderer #(
                     if (pano_x == `IR_V19_PANO_W-1) begin
                         pano_x <= 12'd0;
                         if (pano_y == H-1) state <= ST_DRAIN;
-                        else begin pano_y <= pano_y + 9'd1; state <= ST_ROW_WAIT; end
+                        else begin
+                            pano_y <= pano_y + 9'd1;
+                            rom_row_base <= rom_row_base + RUN_ROW_STRIDE;
+                            state <= ST_ROW_WAIT;
+                        end
                     end else
                         pano_x <= pano_x + 12'd1;
                 end
                 ST_DRAIN: if (advance && !(|v)) begin
-                    state <= ST_IDLE; started <= 1'b0;
+                    state <= ST_IDLE; started <= 1'b0; rom_row_base <= 15'd0;
                 end
             endcase
         end
