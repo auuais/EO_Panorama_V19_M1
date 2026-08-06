@@ -1,9 +1,36 @@
-# IR renderer vs golden model — open coordinate mismatch
+# IR renderer vs golden model — RESOLVED: the RTL was correct
 
 Date: 2026-08-06
-Status: **RTL complete and compiling; bench failing. Not built, not programmed.**
-Nothing in this work is wired into a bitstream yet, so the EO path on the board
-is unaffected.
+Status: **RESOLVED same day. 11,520 pixels bit-exact vs the golden model, with
+and without stalls. The renderer RTL had no coordinate bug.**
+
+The mismatches were manufactured by the testbench: two same-edge
+blocking-assignment races, one on the consumer (`px_ready`) and one on the
+producer (the camera raster). The producer-side race did the damage — the
+bench overwrote `cpx` in the same timestep the cache samples it, xsim ran the
+bench process first, and all six cameras were fed a one-pixel-early raster, so
+every line cache held `mem[A] = src(A+1)`. The renderer faithfully rendered a
+shifted source. The consumer-side race partially *masked* it with drops and
+duplicates, which is why fixing only `px_ready` made the count rise from 7,213
+to 10,728 — that rise was the tell that the remaining error was deterministic
+and in the data, not the handshake.
+
+The decisive instrument was a cache micro-bench (`tb_IrV19LineCacheAlign`)
+printing the write-staging pairing directly: `wr_x=0 px=1`. Third instance of
+this race class in this project (`tb_IrSelectedCameraSwitch`, `px_ready`, now
+the camera drive). Rule adopted: **xsim bench stimulus moves on the negedge,
+always.**
+
+Both suspects named below by the original diagnosis — `clampx` sign handling
+and the `advance`/`state` gating asymmetry — were cleared by trace. The
+period-16 "sub-pixel rounding boundary" pattern was a coincidence: the old
+stall generator's delivered-pixel period was also ~16.
+
+The original handoff follows, unedited, as a record of what a wrong-but-
+plausible diagnosis looks like: every number in it is real, and the conclusion
+drawn from them was still wrong.
+
+---
 
 ## Where it stands
 

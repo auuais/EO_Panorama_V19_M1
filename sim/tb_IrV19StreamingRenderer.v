@@ -62,34 +62,83 @@ module tb_IrV19StreamingRenderer;
 
     // Camera raster: vsync high, then falling edge starts the frame; each row
     // is 640 pixels with hsync high, then a blanking gap.
+    //
+    // Driven on the NEGEDGE, and this is not cosmetic. The posedge version
+    // overwrote cpx in the same timestep the cache samples it, xsim ran the
+    // bench process first, and all six cameras were fed a one-pixel-early
+    // raster: mem[A] = src(A+1) in every line cache. The renderer then
+    // faithfully rendered a shifted source, which diffed against the golden
+    // model as got 6e80 / expected 6780 at row 0 col 0 and burned a full
+    // debugging pass pointing at the datapath. The cache micro-bench
+    // (tb_IrV19LineCacheAlign) caught the pairing directly: wr_x=0 px=1.
     initial begin
         cvs = 1; chs = 0; fed_rows = 0;
-        repeat (20) @(posedge cclk);
+        repeat (20) @(negedge cclk);
         cvs = 0;                                  // falling edge = frame start
         for (y = 0; y < FEED_ROWS; y = y + 1) begin
-            @(posedge cclk); chs = 1;
+            @(negedge cclk); chs = 1;
             for (x = 0; x < SRC_W; x = x + 1) begin
                 cpx = (x*7 + y*13) & 8'hFF;       // must match src_pixel()
-                @(posedge cclk);
+                @(negedge cclk);
             end
             chs = 0;
             fed_rows = y + 1;
-            repeat (8) @(posedge cclk);           // horizontal blanking
+            repeat (8) @(negedge cclk);           // horizontal blanking
         end
         chs = 0;
     end
 
-    // Irregular stall pattern on the consumer.
+    // Irregular stall pattern on the consumer, driven at NEGEDGE.
+    //
+    // The first version assigned px_ready with blocking statements inside
+    // @(posedge clk) -- the same edge at which the DUT samples advance and the
+    // collector samples px_valid && px_ready. Whether they saw the old or new
+    // value was scheduler ordering: a same-edge race, the exact bug class that
+    // made tb_IrSelectedCameraSwitch report a phantom regression. Every ready
+    // transition could drop or duplicate one beat, and the diff showed exactly
+    // that: row 0 dropped its first pixel, row 1 DUPLICATED its first pixel
+    // (a coordinate-math bug cannot produce a duplicate), row 2 leaked row 1's
+    // tail pixel across the row boundary.
+    //
+    // The trap that mis-aimed the first diagnosis: the old stall generator's
+    // delivered-pixel period was ~16 ((37-5)/2 per ready transition), and
+    // dax = 15/16 also stalls qx once per 16 -- two unrelated period-16
+    // processes, so the corruption pattern looked like a sub-pixel rounding
+    // defect. The periods here are 41/223, coprime with 16: if period-16
+    // mismatches ever reappear, they are genuinely arithmetic.
+    //
+    // +nostall runs with ready held high: a clean nostall run proves the
+    // datapath; comparing it with the stalling run isolates handshake bugs.
     integer sc;
     initial begin
         px_ready = 1'b1; sc = 0;
+        if (!$test$plusargs("nostall")) begin
+            forever begin
+                @(negedge clk);
+                sc = sc + 1;
+                if (sc % 41 == 0)      px_ready = 1'b0;
+                else if (sc % 41 == 3) px_ready = 1'b1;
+                if (sc % 223 == 0) begin
+                    px_ready = 1'b0; repeat (17) @(negedge clk); px_ready = 1'b1;
+                end
+            end
+        end
+    end
+
+    // +trace: per-cycle internals around the first issued pixels. Hierarchical
+    // references are bench-only debug; xsim resolves them fine.
+    integer trc;
+    initial if ($test$plusargs("trace")) begin
+        trc = 0;
         forever begin
             @(posedge clk);
-            sc = sc + 1;
-            if (sc % 37 == 0)      px_ready = 1'b0;
-            else if (sc % 37 == 5) px_ready = 1'b1;
-            else if (sc % 211 == 0) begin
-                px_ready = 1'b0; repeat (17) @(posedge clk); px_ready = 1'b1;
+            if (rst_n && (dut.state == 2'd2 || trc > 0) && trc < 40) begin
+                trc = trc + 1;
+                $display("[trc] t=%0t st=%0d x=%0d v=%b | lxa1=%0d ax0a=%0d | cxa16=%0d qxa=%0d | fya=%0d dout0=%02h va=%02h | pxv=%b pxd=%04h",
+                    $time, dut.state, dut.pano_x, dut.v,
+                    dut.lxa_o[1], dut.rom_a[31:16],
+                    dut.cxa[33:16], dut.qxa,
+                    dut.fya_q, dut.px_y0[0], dut.va, px_valid, px_data);
             end
         end
     end
