@@ -143,6 +143,15 @@ module tb_IrV19StreamingRenderer;
             if (seen[i] === 16'h1080) blackcnt = blackcnt + 1;
         end
 
+        // Dump the raw stream so the offset structure can be analysed without
+        // re-simulating: a constant shift and a per-row drift look identical in
+        // a mismatch count but completely different here.
+        begin : dump
+            integer fh;
+            fh = $fopen("ir_seen.mem", "w");
+            for (i = 0; i < ROWS*PANO_W; i = i + 1) $fdisplay(fh, "%04h", seen[i]);
+            $fclose(fh);
+        end
         $display("  compared %0d pixels over %0d rows, %0d mismatches", got, ROWS, errs);
 
         // Independent structural checks, so a golden file that was itself wrong
