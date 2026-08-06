@@ -1,0 +1,16 @@
+# n    seen   spread  maxspr  rr-delay   first to win gl  eo_present
+#      (units of 2^SHIFT ui_clk cycles; ~119 units per IR row)
+  0    111111 0       0       cam1=0      first=0 to=0  win=0  gl=0  3f
+  1    111111 0       0       cam5=0      first=0 to=0  win=14 gl=0  3f
+  2    111111 0       0       cam4=0      first=0 to=0  win=13 gl=0  3f
+  3    111111 0       0       cam2=0      first=3 to=0  win=11 gl=0  3f
+  4    111111 0       0       cam0=0      first=2 to=0  win=9  gl=0  3f
+  5    111111 0       0       cam4=0      first=4 to=0  win=7  gl=0  3f
+  6    111111 0       0       cam3=0      first=5 to=0  win=6  gl=0  3f
+  7    111111 0       0       cam1=0      first=1 to=0  win=4  gl=0  3f
+  8    111111 0       0       cam0=0      first=1 to=0  win=3  gl=0  3f
+  9    111111 0       0       cam4=0      first=0 to=0  win=1  gl=0  3f
+  10   111111 0       0       cam3=0      first=0 to=0  win=0  gl=0  3f
+  11   111111 0       0       cam3=0      first=2 to=0  win=0  gl=0  3f
+  12   111111 0       0       cam2=0      first=4 to=0  win=15 gl=0  3f
+  13   111111 0       0       cam1=0      first=2 to=0  win=14 gl=0  3f
