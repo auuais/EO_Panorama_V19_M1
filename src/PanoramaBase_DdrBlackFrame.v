@@ -747,10 +747,12 @@ module PanoramaBase_DdrBlackFrame(
     // v19_consumer_done is defined further down, next to v19_cam_present,
     // which it now depends on.
     reg [28:0] wr_addr;
-    // Logical V19 stream is 3840xN (240 beats per row); the deployable
-    // framebuffer is 1920x2N (120 beats per row), N being 480 for the panorama
-    // and 540 for full-frame EO single.  These counters drive the fold-on-write
-    // address map without a divider in the pixel pack path.
+    // The shared V19 writer receives a 3840xN row-pair stream (240 beats per
+    // source row); the deployable framebuffer is 1920x2N (120 beats per row),
+    // N being 480 for the panorama and 540 for full-frame EO single.  The IR
+    // panorama renderer itself emits 3576 valid pixels per row, and the
+    // IR-only formatter below inserts the two 132-pixel HD pad regions before
+    // pixels reach these counters.
     reg [7:0] fb_fold_beat_x;
     reg [9:0] fb_fold_row;   // 10 bits: counts to 540 in the tall geometry
 
@@ -1701,8 +1703,27 @@ module PanoramaBase_DdrBlackFrame(
         reg [12:0] v19_fifo_count;
         wire v19_fifo_full  = (v19_fifo_count == 13'd4096);
         wire v19_fifo_empty = (v19_fifo_count == 13'd0);
-        wire v19_fifo_pop   = copy_active && !v19_fifo_empty && !fb_write_pending;
+        wire [15:0] v19_fifo_head = v19_fifo_mem[v19_fifo_rd_ptr];
+        wire v19_copy_ready = copy_active && !fb_write_pending;
+        wire v19_fifo_pop_direct = v19_copy_ready && !v19_fifo_empty;
+        wire v19_ir_fmt_pop;
+        wire v19_ir_fmt_valid;
+        wire [15:0] v19_ir_fmt_data;
+        wire v19_fifo_pop = ir_stack_ui ? v19_ir_fmt_pop : v19_fifo_pop_direct;
         wire v19_fifo_push  = v19_px_valid && !v19_fifo_full;
+
+        IrV19FoldFormatter u_ir_v19_fold_formatter (
+            .clk(c0_ddr4_ui_clk),
+            .rst_n(rst_n),
+            .reset(ui_rst || !copy_active || !ir_stack_ui || copy_start_accept),
+            .enable(ir_stack_ui && copy_active),
+            .sink_ready(v19_copy_ready),
+            .src_empty(v19_fifo_empty),
+            .src_data(v19_fifo_head),
+            .src_pop(v19_ir_fmt_pop),
+            .out_valid(v19_ir_fmt_valid),
+            .out_data(v19_ir_fmt_data)
+        );
         //--------------------------------------------------------------------
         // IR single mode, sharing the panorama's output-frame geometry.
         //
@@ -1896,13 +1917,15 @@ module PanoramaBase_DdrBlackFrame(
 
         assign copy_px_valid = ir_mode ? (ir_vld[2] && ir_en)
                              : eo_mode ? (eo_stale ? eo_px_ready : eo_px_valid)
-                             : v19_fifo_pop;
+                             : ir_stack_ui ? v19_ir_fmt_valid
+                                           : v19_fifo_pop;
         assign copy_px_data  = ir_mode
                              ? ((ir_box[2] && !ir_stale) ? {sel_rd_pixel, 8'h80}
                                                         : BLACK_PIXEL)
                              : eo_mode
                              ? (eo_stale ? BLACK_PIXEL : eo_px_data)
-                             : v19_fifo_mem[v19_fifo_rd_ptr];
+                             : ir_stack_ui ? v19_ir_fmt_data
+                                           : v19_fifo_head;
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst || copy_start_accept) begin
                 v19_fifo_wr_ptr <= 12'd0;
@@ -3740,6 +3763,9 @@ module PanoramaBase_HdDdrRenderer #(
                 // corrupted, but ahead of the window content so it can't be
                 // missed. Does not gate on cur_inside_window on purpose.
                 hd_dout_r <= {10'd512, 10'd128};
+            end else if (ir_visible_tail_black && frame_valid_sync && stream_started && !pix_empty) begin
+                hd_dout_r <= BLACK;
+                pix_rd_en <= 1'b1;
             end else if (ir_visible_tail_black) begin
                 hd_dout_r <= BLACK;
             end else if (cur_inside_window && frame_valid_sync && stream_started && !pix_empty) begin

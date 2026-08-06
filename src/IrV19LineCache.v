@@ -63,12 +63,32 @@ module IrV19LineCache #(
     localparam integer SLOT_W  = (CACHE_LINES <= 2) ? 1 : $clog2(CACHE_LINES);
     localparam integer EPOCH_W = 2;
     localparam integer TAG_W   = AW + EPOCH_W;
+    localparam [AW-1:0] HEIGHT_LAST = HEIGHT - 1;
+
+    function [AW-1:0] bin_to_gray;
+        input [AW-1:0] bin;
+        begin
+            bin_to_gray = (bin >> 1) ^ bin;
+        end
+    endfunction
+
+    function [AW-1:0] gray_to_bin;
+        input [AW-1:0] gray;
+        integer k;
+        begin
+            gray_to_bin[AW-1] = gray[AW-1];
+            for (k = AW-2; k >= 0; k = k - 1)
+                gray_to_bin[k] = gray_to_bin[k+1] ^ gray[k];
+        end
+    endfunction
 
     reg [AW-1:0] wr_x, wr_y;
+    reg [AW-1:0] wr_rows_gray;
     reg [SLOT_W-1:0] wr_slot;
     reg wr_hsync_d, wr_vsync_d, frame_tog;
     reg [EPOCH_W-1:0] wr_epoch;
     reg [AW-1:0] field_height_wr;
+    reg [AW-1:0] field_height_gray_wr;
 
     // IR camera vsync is active high here, matching IrSelectedFrameBuffer.
     wire wr_active        = wr_hsync && wr_vsync;
@@ -79,22 +99,32 @@ module IrV19LineCache #(
     always @(posedge wr_clk) begin
         if (!rst_n) begin
             wr_x <= 0; wr_y <= 0; wr_slot <= 0;
+            wr_rows_gray <= 0;
             wr_hsync_d <= 0; wr_vsync_d <= 0;
-            frame_tog <= 0; wr_epoch <= 0; field_height_wr <= 0;
+            frame_tog <= 0; wr_epoch <= 0;
+            field_height_wr <= 0; field_height_gray_wr <= 0;
         end else begin
             wr_hsync_d <= wr_hsync;
             wr_vsync_d <= wr_vsync;
             if (wr_frame_restart) begin
                 field_height_wr <= wr_y;
+                field_height_gray_wr <= bin_to_gray(wr_y);
                 wr_x     <= 0;
                 wr_y     <= 0;
+                wr_rows_gray <= 0;
                 wr_slot  <= 0;
                 frame_tog <= ~frame_tog;
                 wr_epoch <= wr_epoch + 1'b1;
             end else if (wr_active) begin
                 if (wr_line_complete) begin
                     wr_x    <= 0;
-                    wr_y    <= (wr_y == HEIGHT[AW-1:0] - 1'b1) ? wr_y : wr_y + 11'd1;
+                    if (wr_y == HEIGHT_LAST) begin
+                        wr_y <= wr_y;
+                        wr_rows_gray <= bin_to_gray(wr_y);
+                    end else begin
+                        wr_y <= wr_y + 11'd1;
+                        wr_rows_gray <= bin_to_gray(wr_y + 11'd1);
+                    end
                     wr_slot <= (wr_slot == CACHE_LINES-1) ? 0 : wr_slot + 1'b1;
                 end else if (wr_x < WIDTH)
                     wr_x <= wr_x + 11'd1;
@@ -172,7 +202,10 @@ module IrV19LineCache #(
     endgenerate
 
     // Row tags into the renderer clock domain. The memories are
-    // independent-clock XPMs; tags are control metadata and use two flops.
+    // independent-clock XPMs; tags are debug hit metadata only. The renderer's
+    // actual row gate below uses the Gray-coded completed-row counter, because
+    // a multi-bit binary row count sampled mid-transition can transiently jump
+    // ahead and authorize reads from rows the camera has not committed.
     reg [TAG_W-1:0] tag_meta [0:CACHE_LINES-1];
     reg [TAG_W-1:0] tag_sync [0:CACHE_LINES-1];
     reg [EPOCH_W-1:0] epoch_meta, epoch_sync;
@@ -242,23 +275,25 @@ module IrV19LineCache #(
     assign rd_pixel_y0 = rd_p0_q;
     assign rd_pixel_y1 = rd_p1_q;
 
-    reg [AW-1:0] rows_meta, rows_sync;
-    reg [AW-1:0] height_meta, height_sync;
+    reg [AW-1:0] rows_gray_meta, rows_gray_sync;
+    reg [AW-1:0] height_gray_meta, height_gray_sync;
     reg tog_meta, tog_sync;
     always @(posedge rd_clk) begin
         if (!rst_n) begin
-            rows_meta <= 0; rows_sync <= 0;
-            height_meta <= 0; height_sync <= 0;
+            rows_gray_meta <= 0; rows_gray_sync <= 0;
+            height_gray_meta <= 0; height_gray_sync <= 0;
             tog_meta <= 0; tog_sync <= 0;
         end else begin
-            rows_meta   <= wr_y;      rows_sync   <= rows_meta;
-            height_meta <= field_height_wr; height_sync <= height_meta;
+            rows_gray_meta   <= wr_rows_gray;
+            rows_gray_sync   <= rows_gray_meta;
+            height_gray_meta <= field_height_gray_wr;
+            height_gray_sync <= height_gray_meta;
             tog_meta    <= frame_tog; tog_sync    <= tog_meta;
         end
     end
-    assign captured_rows = rows_sync;
+    assign captured_rows = gray_to_bin(rows_gray_sync);
     assign frame_toggle  = tog_sync;
-    assign field_height  = height_sync;
+    assign field_height  = gray_to_bin(height_gray_sync);
     assign current_epoch = epoch_sync;
     assign rd_hit_y0     = rd_hit_y0_q2;
     assign rd_hit_y1     = rd_hit_y1_q2;

@@ -9,10 +9,11 @@
 // generator was corrected from 59.94 Hz to 29.97 Hz), and because the RowRun
 // tables show the working set for any one output row is at most 13 source rows.
 //
-// Initiation interval is 1. The budget forces it: 3840x480 at 30 Hz is
-// 1,843,200 pixels against 7.78 M ui_clk cycles per frame, so anything past
-// ~4 cycles/pixel misses the frame. The EO path learned this the expensive way
-// -- its bring-up form took 7 cycles/pixel and had to be rebuilt.
+// Initiation interval is 1. The budget forces it: 3576x480 at 30 Hz is
+// 1,716,480 renderer pixels against 7.78 M ui_clk cycles per frame, before the
+// output formatter inserts HD-fold padding. Anything past ~4 cycles/pixel
+// misses the frame. The EO path learned this the expensive way -- its bring-up
+// form took 7 cycles/pixel and had to be rebuilt.
 //
 // Simpler than the EO renderer in two ways worth stating, because they are why
 // this is a fresh module rather than a parameterised copy:
@@ -239,7 +240,8 @@ module IrV19StreamingRenderer #(
     reg [2:0]  cma [1:6], cmb [1:6];
     reg [15:0] fya_p [4:7], fyb_p [4:7];   // frac carried to meet its samples
 
-    wire last_pixel = (pano_y == H-1) && (pano_x == `IR_V19_PANO_W-1);
+    localparam [11:0] OUT_W = `IR_V19_VALID_W;
+    wire last_pixel = (pano_y == H-1) && (pano_x == OUT_W-1);
 
     // --- stage 1: capture what stage 0 decided, ROM data arrives now -------
     // lx within the segment is just the low 6 bits: ox0 = seg*64 by
@@ -426,7 +428,7 @@ module IrV19StreamingRenderer #(
                 end
                 ST_ROW_WAIT: if (row_ready_q) state <= ST_OUT;
                 ST_OUT: if (advance) begin
-                    if (pano_x == `IR_V19_PANO_W-1) begin
+                    if (pano_x == OUT_W-1) begin
                         pano_x <= 12'd0;
                         if (pano_y == H-1) state <= ST_DRAIN;
                         else begin

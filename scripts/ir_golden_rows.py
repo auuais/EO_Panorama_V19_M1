@@ -20,7 +20,7 @@ SEG_W   = 64
 SRC_W   = 640
 QY_CLAMP= 510
 VALID_W = 3576
-PANO_W  = 3840
+PANO_W  = VALID_W
 OVERLAP = 29
 STARTS  = [0, 587, 1179, 1771, 2363, 2955]
 WIDTHS  = [616, 621, 621, 621, 621, 621]
@@ -103,9 +103,6 @@ def main():
     for sy in range(a.rows):
         for px in range(PANO_W):
             d = decode(px)
-            if d is None:
-                out.append(BLACK)
-                continue
             cam_a, lx_a, cam_b, lx_b, apos = d
             va = sample(recs, cam_a, lx_a, sy)
             if cam_b is None:

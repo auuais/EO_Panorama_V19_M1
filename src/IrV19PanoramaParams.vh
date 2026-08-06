@@ -5,11 +5,11 @@
 //
 // Milestone boundary:
 //   * IR panorama only, six 640x512 cameras, 8-bit luma
-//   * logical output 3840x480, of which 0..3575 is valid and 3576..3839 black
+//   * logical renderer output 3576x480
 //   * chroma is not stored anywhere: it is synthesized at 0x80 when packing
-//   * folded for the HD raster exactly as EO is:
-//       rows   0..479 : panorama columns    0..1919
-//       rows 480..959 : panorama columns 1920..3839
+//   * folded for the HD raster as two equal valid halves:
+//       rows   0..479 : panorama columns    0..1787, then black to x=1919
+//       rows 480..959 : panorama columns 1788..3575, then black to x=1919
 //       rows 960..1079: black padding
 //
 // INGRESS IS DIRECT, NOT VIA DDR.
@@ -29,6 +29,7 @@
 // IRCAMn_DOUT[13:6] is the 8-bit post-AGC parallel sample (NV#5 PDVO enabled).
 `define IR_V19_PIX_W                 8
 
+// Stored/output row-pair width after folding two 1920-pixel HD rows.
 `define IR_V19_PANO_W                3840
 `define IR_V19_PANO_H                480
 // Valid panorama width. 3576 = 6*621 - 5*29, which closes exactly; see below.
@@ -37,6 +38,8 @@
 
 `define IR_V19_HD_W                  1920
 `define IR_V19_HD_H                  1080
+`define IR_V19_FOLD_HALF_W           1788
+`define IR_V19_FOLD_PAD_W            132
 `define IR_V19_FOLDED_ACTIVE_H       960
 `define IR_V19_BLACK_PAD_Y0          960
 

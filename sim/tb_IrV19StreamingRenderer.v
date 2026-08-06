@@ -15,7 +15,7 @@
 module tb_IrV19StreamingRenderer;
 
     localparam integer ROWS    = 3;
-    localparam integer PANO_W  = 3840;
+    localparam integer PANO_W  = 3576;
     localparam integer SRC_W   = 640;
     localparam integer FEED_ROWS = 60;
 
@@ -206,10 +206,6 @@ module tb_IrV19StreamingRenderer;
         // Independent structural checks, so a golden file that was itself wrong
         // cannot quietly pass the run.
         for (i = 0; i < ROWS; i = i + 1) begin
-            if (seen[i*PANO_W + 3576] !== 16'h1080) begin
-                $display("  FAIL: row %0d col 3576 is %04h, expected black", i, seen[i*PANO_W+3576]);
-                errs = errs + 1;
-            end
             if (seen[i*PANO_W + 3575] === 16'h1080) begin
                 $display("  FAIL: row %0d col 3575 is black; valid region should reach 3575", i);
                 errs = errs + 1;
@@ -222,7 +218,7 @@ module tb_IrV19StreamingRenderer;
 
         $display("");
         if (errs == 0)
-            $display("PASS - %0d pixels bit-exact vs the golden model, through stalls, black tail at 3576", got);
+            $display("PASS - %0d valid pixels bit-exact vs the golden model, through stalls", got);
         else
             $display("FAIL - %0d mismatches", errs);
         $finish;
