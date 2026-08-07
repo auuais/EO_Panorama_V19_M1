@@ -36,11 +36,19 @@ module tb_IrV19StreamingRenderer;
     wire [8:0]  dbg_pano_y;
     wire [11:0] dbg_pano_x;
 
+    `ifdef IR_V19_OLD_ROW_GATE
+    localparam integer STRICT_ROW_WINDOW = 0;
+    `else
+    localparam integer STRICT_ROW_WINDOW = 1;
+    `endif
+
     // All six cameras are driven from the same raster. That is not a weaker
     // test: camera a and camera b sample DIFFERENT source coordinates for the
     // same output column, so the seam blend is still exercised, and the golden
     // model uses one src_pixel() for all six to match.
-    IrV19StreamingRenderer dut (
+    IrV19StreamingRenderer #(
+        .STRICT_ROW_WINDOW(STRICT_ROW_WINDOW)
+    ) dut (
         .rst_n(rst_n), .clk(clk), .start_copy(start_copy), .cam_present(cam_present),
         .cam0_clk(cclk), .cam0_hsync(chs), .cam0_vsync(cvs), .cam0_pixel(cpx),
         .cam1_clk(cclk), .cam1_hsync(chs), .cam1_vsync(cvs), .cam1_pixel(cpx),
@@ -58,7 +66,8 @@ module tb_IrV19StreamingRenderer;
     initial $readmemh("../../sim/ir_golden_rows.mem", golden);
 
     integer fed_rows;
-    integer x, y;
+    integer x, y, frame, rows_this_frame;
+    integer late_start;
 
     // Camera raster: vsync is active high, as in the hardware-proven IR single
     // path; each row is 640 pixels with hsync high, then a blanking gap.
@@ -73,19 +82,25 @@ module tb_IrV19StreamingRenderer;
     // (tb_IrV19LineCacheAlign) caught the pairing directly: wr_x=0 px=1.
     initial begin
         cvs = 0; chs = 0; fed_rows = 0;
+        late_start = $test$plusargs("late_start");
         repeat (20) @(negedge cclk);
-        cvs = 1;                                  // rising edge = frame start
-        for (y = 0; y < FEED_ROWS; y = y + 1) begin
-            @(negedge cclk); chs = 1;
-            for (x = 0; x < SRC_W; x = x + 1) begin
-                cpx = (x*7 + y*13) & 8'hFF;       // must match src_pixel()
-                @(negedge cclk);
+        for (frame = 0; frame < (late_start ? 2 : 1); frame = frame + 1) begin
+            cvs = 1;                              // rising edge = frame start
+            fed_rows = 0;
+            rows_this_frame = (late_start && frame == 0) ? 110 : FEED_ROWS;
+            for (y = 0; y < rows_this_frame; y = y + 1) begin
+                @(negedge cclk); chs = 1;
+                for (x = 0; x < SRC_W; x = x + 1) begin
+                    cpx = (x*7 + y*13) & 8'hFF;   // must match src_pixel()
+                    @(negedge cclk);
+                end
+                chs = 0;
+                fed_rows = y + 1;
+                repeat (8) @(negedge cclk);       // horizontal blanking
             end
-            chs = 0;
-            fed_rows = y + 1;
-            repeat (8) @(negedge cclk);           // horizontal blanking
+            chs = 0; cvs = 0; fed_rows = 0;
+            repeat (40) @(negedge cclk);          // vertical blanking
         end
-        chs = 0; cvs = 0;
     end
 
     // Irregular stall pattern on the consumer, driven at NEGEDGE.
@@ -172,9 +187,13 @@ module tb_IrV19StreamingRenderer;
         repeat (10) @(posedge clk);
         rst_n = 1;
 
-        // Let the cameras get well ahead of the first row's requirement
-        // (row_max[0]+2 = 36) before asking for a frame.
-        wait (fed_rows >= 45);
+        // Normal starts inside the 32-line cache window. +late_start waits
+        // until the first row's source span has already been overwritten,
+        // proving the upper row-window gate waits for the next frame.
+        if ($test$plusargs("late_start"))
+            wait (fed_rows >= 100);
+        else
+            wait (fed_rows >= 45);
         @(posedge clk); start_copy = 1'b1;
 
         wait (got >= ROWS*PANO_W);

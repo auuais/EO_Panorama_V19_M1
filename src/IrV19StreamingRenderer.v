@@ -45,7 +45,8 @@
 module IrV19StreamingRenderer #(
     parameter integer SEG_W        = `IR_V19_SEG_W,
     parameter integer SEGS_PER_ROW = `IR_V19_SEGS_PER_ROW,
-    parameter integer RUN_COUNT    = `IR_V19_RUN_COUNT
+    parameter integer RUN_COUNT    = `IR_V19_RUN_COUNT,
+    parameter integer STRICT_ROW_WINDOW = 1
 ) (
     input  wire rst_n,
     input  wire clk,                  // ui_clk
@@ -400,6 +401,7 @@ module IrV19StreamingRenderer #(
     // including it would hold the gate low forever -- the same permanent stall
     // the EO path hit with its epoch gate.
     //------------------------------------------------------------------
+    wire [10:0] gate_min_row = row_min_y0[pano_y];
     wire [10:0] need_row = row_max_y0[pano_y] + 11'd2;
     wire [10:0] rows_e0 = cam_present[0] ? rows[0] : 11'd2047;
     wire [10:0] rows_e1 = cam_present[1] ? rows[1] : 11'd2047;
@@ -407,11 +409,29 @@ module IrV19StreamingRenderer #(
     wire [10:0] rows_e3 = cam_present[3] ? rows[3] : 11'd2047;
     wire [10:0] rows_e4 = cam_present[4] ? rows[4] : 11'd2047;
     wire [10:0] rows_e5 = cam_present[5] ? rows[5] : 11'd2047;
+    wire [10:0] rows_u0 = cam_present[0] ? rows[0] : 11'd0;
+    wire [10:0] rows_u1 = cam_present[1] ? rows[1] : 11'd0;
+    wire [10:0] rows_u2 = cam_present[2] ? rows[2] : 11'd0;
+    wire [10:0] rows_u3 = cam_present[3] ? rows[3] : 11'd0;
+    wire [10:0] rows_u4 = cam_present[4] ? rows[4] : 11'd0;
+    wire [10:0] rows_u5 = cam_present[5] ? rows[5] : 11'd0;
     function [10:0] mn2; input [10:0] a; input [10:0] b; begin mn2 = (a<b)?a:b; end endfunction
+    function [10:0] mx2; input [10:0] a; input [10:0] b; begin mx2 = (a>b)?a:b; end endfunction
     wire [10:0] rows_min = mn2(mn2(mn2(rows_e0,rows_e1),mn2(rows_e2,rows_e3)),
                                mn2(rows_e4,rows_e5));
+    wire [10:0] rows_max = mx2(mx2(mx2(rows_u0,rows_u1),mx2(rows_u2,rows_u3)),
+                               mx2(rows_u4,rows_u5));
+    // With captured_rows == R, the 32-line ring is already writing row R into
+    // slot R[4:0], so the oldest row that is still safe to read is R-30.  If
+    // copy starts late in the camera frame, the old lower-only gate rendered
+    // overwritten slots from rows with the same low 5 bits -- the vertical
+    // rolling bands seen on hardware.  The upper bound waits for the next
+    // frame instead of consuming stale cache contents.
+    wire [10:0] gate_last_safe_rows = gate_min_row + 11'd30;
+    wire row_window_ok = (STRICT_ROW_WINDOW == 0) ? 1'b1 :
+                         (rows_max <= gate_last_safe_rows);
     reg row_ready_q;
-    always @(posedge clk) row_ready_q <= (rows_min >= need_row);
+    always @(posedge clk) row_ready_q <= (rows_min >= need_row) && row_window_ok;
 
     assign frames_valid = (rows_e0 >= 11'd32) && (rows_e1 >= 11'd32) &&
                           (rows_e2 >= 11'd32) && (rows_e3 >= 11'd32) &&
