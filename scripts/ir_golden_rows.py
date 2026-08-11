@@ -28,6 +28,20 @@ ENDS    = [s + w - 1 for s, w in zip(STARTS, WIDTHS)]   # 615 1207 1799 2391 298
 BLACK   = 0x1080
 
 
+def cam23_fold_alpha_pos(raw):
+    """Delayed handoff for the fold-crossing cam2/cam3 seam.
+
+    The normal package overlap is 1771..1799.  Hardware captures show this
+    physical fold seam exposes the brighter cam3/UI-cam4 edge too abruptly, so
+    the RTL keeps cam2 through the 1788 fold, clamps it at lx=639 after its
+    true image edge, and fades cam3 in over 1771..1860.  This keeps the golden
+    model independent but aligned with that IR-only policy.
+    """
+    if raw <= 17:
+        return 0
+    return min(28, ((raw - 17) * 25 + 32) >> 6)
+
+
 def src_pixel(x, y):
     """Must match the pattern the testbench drives into the cameras."""
     return (x * 7 + y * 13) & 0xFF
@@ -65,10 +79,14 @@ def decode(px):
     """
     if px >= VALID_W:
         return None
+    if STARTS[3] <= px <= STARTS[3] + 89:
+        return (2, min(px - STARTS[2], 639), 3, px - STARTS[3],
+                cam23_fold_alpha_pos(px - STARTS[3]))
     owners = [i for i in range(6) if STARTS[i] <= px <= ENDS[i]]
     if len(owners) == 2:
         a, b = owners
-        return (a, px - STARTS[a], b, px - STARTS[b], px - STARTS[b])
+        apos = px - STARTS[b]
+        return (a, px - STARTS[a], b, px - STARTS[b], apos)
     a = owners[0]
     return (a, px - STARTS[a], None, 0, 0)
 

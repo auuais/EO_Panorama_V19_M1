@@ -190,11 +190,19 @@ module tb_IrV19TailMask;
         check_fmt("source empty waits",  1'b1, 1'b1, 1'b0, 1'b0, 16'h0000);
         check_fmt("sink stall waits",    1'b0, 1'b0, 1'b0, 1'b0, 16'h0000);
 
-        for (i = 0; i < 1788; i = i + 1)
+        for (i = 0; i < 1787; i = i + 1)
             check_fmt("top valid", 1'b1, 1'b0, 1'b1, 1'b1, fmt_pattern(fmt_src_idx));
-        for (i = 0; i < 132; i = i + 1)
+
+        check_fmt("last valid stall", 1'b0, 1'b0, 1'b0, 1'b0, 16'h0000);
+        check_fmt("top last valid",   1'b1, 1'b0, 1'b1, 1'b1, fmt_pattern(fmt_src_idx));
+        check_fmt("first pad empty",  1'b1, 1'b1, 1'b1, 1'b0, 16'h1080);
+        check_fmt("pad stall",        1'b0, 1'b1, 1'b0, 1'b0, 16'h0000);
+        for (i = 1; i < 132; i = i + 1)
             check_fmt("top pad",   1'b1, 1'b0, 1'b1, 1'b0, 16'h1080);
-        for (i = 0; i < 1788; i = i + 1)
+
+        check_fmt("bottom waits empty", 1'b1, 1'b1, 1'b0, 1'b0, 16'h0000);
+        check_fmt("bottom first valid", 1'b1, 1'b0, 1'b1, 1'b1, fmt_pattern(fmt_src_idx));
+        for (i = 1; i < 1788; i = i + 1)
             check_fmt("bottom valid", 1'b1, 1'b0, 1'b1, 1'b1, fmt_pattern(fmt_src_idx));
         for (i = 0; i < 132; i = i + 1)
             check_fmt("bottom pad",   1'b1, 1'b0, 1'b1, 1'b0, 16'h1080);

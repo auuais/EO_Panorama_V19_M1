@@ -1,3 +1,5 @@
+`include "EoV19PanoramaParams.vh"
+
 //============================================================================
 // PanoramaBase_DdrBlackFrame  -  clean rewrite (2026-06-03)
 //
@@ -285,8 +287,6 @@ module PanoramaBase_DdrBlackFrame(
     // DDR4 MIG (native user interface) - instance preserved verbatim
     //------------------------------------------------------------------------
     wire         c0_init_calib_complete;
-    wire         dbg_clk;
-    wire [511:0] dbg_bus;
     wire         c0_ddr4_ui_clk;
     wire         c0_ddr4_ui_clk_sync_rst;
     wire         c0_ddr4_app_en;
@@ -354,10 +354,8 @@ module PanoramaBase_DdrBlackFrame(
 
     ddr4_sub64 u_ddr4_sub64 (
         .c0_init_calib_complete(c0_init_calib_complete),
-        .dbg_clk(dbg_clk),
         .c0_sys_clk_p(c0_sys_clk_p),
         .c0_sys_clk_n(c0_sys_clk_n),
-        .dbg_bus(dbg_bus),
         .c0_ddr4_adr(c0_ddr4_adr),
         .c0_ddr4_ba(c0_ddr4_ba),
         .c0_ddr4_cke(c0_ddr4_cke),
@@ -602,6 +600,8 @@ module PanoramaBase_DdrBlackFrame(
     reg        fb_rd_en;
     reg [18:0] fb_rd_addr;
     reg [2:0]  ir_sel_latched;
+    localparam integer IR_SELECTED_FB_READ_LATENCY =
+        (SRC_SEL == SRC_V19) ? 3 : 2;
 
     //------------------------------------------------------------------------
     // One IR frame buffer shared by all six cameras (IrSelectedFrameBuffer).
@@ -626,7 +626,9 @@ module PanoramaBase_DdrBlackFrame(
     wire [5:0] ir_cam_sof_pulse;    // per IR camera frame START (vsync rise), ui_clk
     wire [63:0] ir_skew_dbg;
 
-    IrSelectedFrameBuffer u_ir_framebuf (
+    IrSelectedFrameBuffer #(
+        .READ_LATENCY(IR_SELECTED_FB_READ_LATENCY)
+    ) u_ir_framebuf (
         .rst_n(rst_n),
         .ir0_wr_clk(ir0_wr_clk), .ir0_wr_hsync(ir0_wr_hsync), .ir0_wr_vsync(ir0_wr_vsync), .ir0_wr_pixel(ir0_wr_pixel),
         .ir1_wr_clk(ir1_wr_clk), .ir1_wr_hsync(ir1_wr_hsync), .ir1_wr_vsync(ir1_wr_vsync), .ir1_wr_pixel(ir1_wr_pixel),
@@ -711,10 +713,7 @@ module PanoramaBase_DdrBlackFrame(
     reg        dbg_bank_conflict_seen;
     reg        dbg_output_fifo_overflow_seen;
     // Sticky: MIG rdy was low on a launch cycle (proves the hold-FSM actually
-    // waited at least once). Has no logic consumer by design -- it exists for
-    // hardware bring-up ILA probing only, so mark_debug/dont_touch keep
-    // synthesis from trimming it as dead logic.
-    (* mark_debug = "true", dont_touch = "true" *)
+    // waited at least once).
     reg        dbg_cmd_retry_seen;
 
     // BRAM -> pack -> DDR write (copy).  fb_rd_en_d1/d2/fb_rd_busy live inside
@@ -726,14 +725,27 @@ module PanoramaBase_DdrBlackFrame(
     reg [17:0] fb_burst_count;
     reg [DDR_APP_DATA_W-1:0] fb_pack_buf;
     //------------------------------------------------------------------------
-    // Active output geometry.  geom_1080 is a REGISTER that only ever changes
-    // while the pipeline is drained and the picture is blanked (see the
-    // geometry-change quiesce at the end of the main ui_clk block), so
-    // everything derived from it is stable for the whole of any frame.
+    // Active output mode/geometry.  These registers only ever change while the
+    // shared output backend is drained and the picture is blanked (see the
+    // mode-change quiesce at the end of the main ui_clk block), so everything
+    // derived from them is stable for the whole of any copy/scan pass.
     //------------------------------------------------------------------------
+    localparam [1:0] V19_MODE_EO_PANO   = 2'd0;
+    localparam [1:0] V19_MODE_IR_SINGLE = 2'd1;
+    localparam [1:0] V19_MODE_EO_SINGLE = 2'd2;
+    localparam [1:0] V19_MODE_IR_PANO   = 2'd3;
+    reg [1:0] active_mode_key;
+    wire [1:0] want_mode_key =
+        ir_single_ui ? V19_MODE_IR_SINGLE :
+        eo_single_ui ? V19_MODE_EO_SINGLE :
+        ir_stack_ui  ? V19_MODE_IR_PANO   : V19_MODE_EO_PANO;
     reg  geom_1080;
     reg  geom_quiesce;
     wire want_geom_1080 = (SRC_SEL == SRC_V19) && eo_single_ui;
+    wire mode_transition_pending =
+        (SRC_SEL == SRC_V19) &&
+        ((want_mode_key != active_mode_key) || (want_geom_1080 != geom_1080));
+    wire backend_transition_block = geom_quiesce || mode_transition_pending;
     wire [17:0] active_beats = (SRC_SEL != SRC_V19) ? BEATS_TOTAL :
                                geom_1080 ? BEATS_TOTAL_TALL : BEATS_TOTAL;
     // Fold address jumps, in app_addr units, for the 3840xN logical -> 1920x2N
@@ -1186,11 +1198,11 @@ module PanoramaBase_DdrBlackFrame(
             endcase
         end
     end
-    (* mark_debug = "true", dont_touch = "true" *) wire [63:0] v19_dbg_bus;
-    (* mark_debug = "true", dont_touch = "true" *) wire [63:0] v19_dbg_rows_word0;
-    (* mark_debug = "true", dont_touch = "true" *) wire [63:0] v19_dbg_rows_word1;
-    (* mark_debug = "true", dont_touch = "true" *) wire [63:0] v19_dbg_rows_word2;
-    (* mark_debug = "true", dont_touch = "true" *) wire [63:0] v19_replay_dbg_word;
+    wire [63:0] v19_dbg_bus;
+    wire [63:0] v19_dbg_rows_word0;
+    wire [63:0] v19_dbg_rows_word1;
+    wire [63:0] v19_dbg_rows_word2;
+    wire [63:0] v19_replay_dbg_word;
     // Capture-service telemetry.  Each peak is reported in eight-entry units,
     // so all six 0..2048-entry FIFO peaks plus the individual sticky overflow
     // causes fit in one existing 64-bit ILA probe without growing the core.
@@ -1203,13 +1215,14 @@ module PanoramaBase_DdrBlackFrame(
          v19_cap5_peak[11:3], v19_cap4_peak[11:3],
          v19_cap3_peak[11:3], v19_cap2_peak[11:3],
          v19_cap1_peak[11:3], v19_cap0_peak[11:3]};
-    (* mark_debug = "true", dont_touch = "true" *) wire        v19_content_row51 =
+    localparam [8:0] V19_CONTENT_FIRST_ROW = `EO_V19_YPAD;
+    wire        v19_content_first_row =
         (SRC_SEL == SRC_V19) &&
         v19_dbg_bus[49] &&                // renderer start_copy/copy_active
         v19_dbg_bus[48] &&                // renderer px_ready
         v19_dbg_bus[46] &&                // renderer px_valid
         (v19_dbg_bus[44:43] == 2'b10) &&  // renderer OUTPUT state
-        (v19_dbg_bus[42:34] == 9'd51);    // first non-padding content row
+        (v19_dbg_bus[42:34] == V19_CONTENT_FIRST_ROW);
     wire [63:0] v19_dbg_rows_word0_strobe =
         v19_dbg_rows_word0 | {eo_strobe_period_ui[8:0], 55'd0};
     wire [63:0] v19_dbg_rows_word1_strobe =
@@ -1269,7 +1282,7 @@ module PanoramaBase_DdrBlackFrame(
                                (!frame_valid || (wr_bank != rd_bank));
     // No new copy may start into a bank whose geometry is about to change.
     wire copy_start_accept = copy_start_trig && !copy_active &&
-                             copy_bank_available && !geom_quiesce;
+                             copy_bank_available && !backend_transition_block;
     wire v19_output_bank_conflict = (SRC_SEL == SRC_V19) && copy_active &&
                                     frame_valid && (wr_bank == rd_bank);
 
@@ -1300,13 +1313,14 @@ module PanoramaBase_DdrBlackFrame(
 
     // Scan wants to issue a read this cycle (rdy handshake handled by the
     // held-launch FSM below, not sampled here).
-    wire scan_want = running && scan_active &&
+    wire scan_want = running && scan_active && !backend_transition_block &&
                      !beat_fifo_prog_full &&
                      !pix_fifo_wr_rst_busy && (outstanding < MAX_OUTSTANDING);
     // Copy wants to issue an output-frame write; V19 camera capture may also
     // issue DDR writes into the per-camera frame rings.
     wire output_write_want = running && copy_active && fb_write_pending;
     wire capture_write_want = running && (SRC_SEL == SRC_V19) &&
+                              !backend_transition_block &&
                               v19_cap_sel_valid && !v19_cap_marker_pop_pending;
     wire write_want = output_write_want || capture_write_want;
 
@@ -1326,20 +1340,21 @@ module PanoramaBase_DdrBlackFrame(
     // blank-screen regression: a dummy read outstanding during flush could
     // keep the flush-completion check (outstanding==0) from ever becoming
     // true, stalling the frame-boundary commit indefinitely.
-    wire keepalive_want = running && !flush_active &&
-                          !scan_want &&
-                          (read_gap_counter >= KEEPALIVE_THRESHOLD) &&
-                          (outstanding < MAX_OUTSTANDING) &&
-                          (rd_tag_count < RD_TAG_DEPTH);
+    wire keepalive_want = running && !flush_active && !backend_transition_block &&
+                           !scan_want &&
+                           (read_gap_counter >= KEEPALIVE_THRESHOLD) &&
+                           (outstanding < MAX_OUTSTANDING) &&
+                           (rd_tag_count < RD_TAG_DEPTH);
 
     // keepalive_launch: the actual cycle a keepalive read is selected by
     // the arbiter (below) and loaded into the held-command register --
     // distinct from keepalive_want, which can stay asserted across
     // multiple cycles while a write command is being held/accepted.
     wire keepalive_launch = !issue_busy && !scan_want && keepalive_want;
-    wire v19_src_read_want = running && (SRC_SEL == SRC_V19) && v19_src_rd_valid &&
-                             (outstanding < MAX_OUTSTANDING) &&
-                             (rd_tag_count < RD_TAG_DEPTH);
+    wire v19_src_read_want = running && (SRC_SEL == SRC_V19) &&
+                              !backend_transition_block && v19_src_rd_valid &&
+                              (outstanding < MAX_OUTSTANDING) &&
+                              (rd_tag_count < RD_TAG_DEPTH);
     assign v19_src_rd_ready = read_retiring && cmd_is_src_read;
 
     function [9:0] eo_v19_scale_x_to_tile;
@@ -1683,6 +1698,11 @@ module PanoramaBase_DdrBlackFrame(
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst || !rst_n)
                 v19_render_active <= 1'b0;
+            // A mode handoff drains the shared backend and abandons the old
+            // producer transaction; stop any panorama renderer immediately so
+            // it cannot keep issuing source reads or filling the staging FIFO.
+            else if (backend_transition_block)
+                v19_render_active <= 1'b0;
             // Never run the panorama replay/renderer for an IR-mode copy:
             // it would issue source reads and hold DDR bandwidth for pixels
             // the IR producer is supplying instead.
@@ -1702,6 +1722,7 @@ module PanoramaBase_DdrBlackFrame(
         reg [11:0] v19_fifo_wr_ptr, v19_fifo_rd_ptr;
         reg [12:0] v19_fifo_count;
         wire v19_fifo_full  = (v19_fifo_count == 13'd4096);
+        wire v19_fifo_ir_almost_full = (v19_fifo_count >= 13'd4032);
         wire v19_fifo_empty = (v19_fifo_count == 13'd0);
         wire [15:0] v19_fifo_head = v19_fifo_mem[v19_fifo_rd_ptr];
         wire v19_copy_ready = copy_active && !fb_write_pending;
@@ -1710,7 +1731,17 @@ module PanoramaBase_DdrBlackFrame(
         wire v19_ir_fmt_valid;
         wire [15:0] v19_ir_fmt_data;
         wire v19_fifo_pop = ir_stack_ui ? v19_ir_fmt_pop : v19_fifo_pop_direct;
-        wire v19_fifo_push  = v19_px_valid && !v19_fifo_full;
+        (* max_fanout = 64 *) reg v19_ir_px_ready_q;
+        wire v19_eo_px_ready = !v19_fifo_full;
+        wire v19_px_ready = ir_stack_ui ? v19_ir_px_ready_q : v19_eo_px_ready;
+        wire v19_fifo_push  = v19_px_valid && v19_px_ready;
+
+        always @(posedge c0_ddr4_ui_clk) begin
+            if (ui_rst || copy_start_accept || !ir_stack_ui)
+                v19_ir_px_ready_q <= 1'b1;
+            else
+                v19_ir_px_ready_q <= !v19_fifo_ir_almost_full;
+        end
 
         IrV19FoldFormatter u_ir_v19_fold_formatter (
             .clk(c0_ddr4_ui_clk),
@@ -1736,9 +1767,9 @@ module PanoramaBase_DdrBlackFrame(
         // the proven stand-alone IR build used, and nothing downstream of
         // copy_px_* changes at all.
         //
-        // The capture buffers are xpm_memory_sdpram with READ_LATENCY=2 and
+        // The selected capture buffer has its latency parameterized, with
         // rd_en tied to enb, so the output register HOLDS while rd_en is
-        // low.  That lets the whole three-stage pipeline freeze on packer
+        // low.  That lets the whole small pipeline freeze on packer
         // backpressure without losing the read already in flight, instead of
         // the one-outstanding-read handshake the stand-alone build used --
         // which at this raster size would need ~24 ms per frame and could
@@ -1761,12 +1792,10 @@ module PanoramaBase_DdrBlackFrame(
         reg  [10:0] ir_x;        // 0..1919, physical column
         reg         ir_half;     // 0 = physical row ir_l, 1 = physical row +480
         reg  [9:0]  ir_l;        // 0..479, logical row
-        // Stage k holds a pixel issued k cycles ago.  The shared IR buffer is
-        // block RAM at READ_LATENCY 2: the address presented in cycle T is
-        // sampled at the next edge and its data is valid in T+3, so the
-        // consume tap is [2].
-        reg  [2:0]  ir_vld;
-        reg  [2:0]  ir_box;      // ... and whether it came from the image
+        // Stage k holds a pixel issued k cycles ago.  The shared selected
+        // frame buffer latency defines the consume tap.
+        reg  [IR_SELECTED_FB_READ_LATENCY:0] ir_vld;
+        reg  [IR_SELECTED_FB_READ_LATENCY:0] ir_box;
         wire [10:0] ir_y      = {1'b0, ir_l} + (ir_half ? 11'd480 : 11'd0);
         wire        ir_mode   = (SRC_SEL == SRC_V19) && ir_single_ui;
         wire        ir_en     = copy_active && ir_mode && !fb_write_pending;
@@ -1780,8 +1809,8 @@ module PanoramaBase_DdrBlackFrame(
                 ir_x       <= 11'd0;
                 ir_half    <= 1'b0;
                 ir_l       <= 10'd0;
-                ir_vld     <= 3'd0;
-                ir_box     <= 3'd0;
+                ir_vld     <= {(IR_SELECTED_FB_READ_LATENCY+1){1'b0}};
+                ir_box     <= {(IR_SELECTED_FB_READ_LATENCY+1){1'b0}};
                 fb_rd_en   <= 1'b0;
                 fb_rd_addr <= 19'd0;
             end else if (ir_en) begin
@@ -1796,8 +1825,8 @@ module PanoramaBase_DdrBlackFrame(
                 // segment then took stale data.  Out-of-box reads are
                 // harmless: ir_box decides what is actually used.
                 fb_rd_en   <= 1'b1;
-                ir_vld     <= {ir_vld[1:0], 1'b1};
-                ir_box     <= {ir_box[1:0], ir_in_box};
+                ir_vld     <= {ir_vld[IR_SELECTED_FB_READ_LATENCY-1:0], 1'b1};
+                ir_box     <= {ir_box[IR_SELECTED_FB_READ_LATENCY-1:0], ir_in_box};
                 // 1920 columns, then the other half of the same logical row,
                 // then the next logical row: 1920*2*480 = 1,843,200 pixels,
                 // exactly BEATS_TOTAL*PIXELS_PER_BEAT.
@@ -1817,8 +1846,7 @@ module PanoramaBase_DdrBlackFrame(
             end
         end
 
-        // Stage 2 lines up with the buffer's two-cycle read latency, exactly
-        // where the stand-alone build consumed fb_rd_en_d2.
+        // The selected buffer latency defines the tap consumed by copy_px_*.
         //--------------------------------------------------------------------
         // EO single, served from the DDR capture already running.
         //
@@ -1915,19 +1943,19 @@ module PanoramaBase_DdrBlackFrame(
             .frame_done(), .dbg()
         );
 
-        assign copy_px_valid = ir_mode ? (ir_vld[2] && ir_en)
+        assign copy_px_valid = ir_mode ? (ir_vld[IR_SELECTED_FB_READ_LATENCY] && ir_en)
                              : eo_mode ? (eo_stale ? eo_px_ready : eo_px_valid)
                              : ir_stack_ui ? v19_ir_fmt_valid
                                            : v19_fifo_pop;
         assign copy_px_data  = ir_mode
-                             ? ((ir_box[2] && !ir_stale) ? {sel_rd_pixel, 8'h80}
-                                                        : BLACK_PIXEL)
+                             ? ((ir_box[IR_SELECTED_FB_READ_LATENCY] && !ir_stale)
+                                ? {sel_rd_pixel, 8'h80} : BLACK_PIXEL)
                              : eo_mode
                              ? (eo_stale ? BLACK_PIXEL : eo_px_data)
                              : ir_stack_ui ? v19_ir_fmt_data
                                            : v19_fifo_head;
         always @(posedge c0_ddr4_ui_clk) begin
-            if (ui_rst || copy_start_accept) begin
+            if (ui_rst || copy_start_accept || backend_transition_block) begin
                 v19_fifo_wr_ptr <= 12'd0;
                 v19_fifo_rd_ptr <= 12'd0;
                 v19_fifo_count  <= 13'd0;
@@ -1958,7 +1986,7 @@ module PanoramaBase_DdrBlackFrame(
             .cam4_clk   (v19_replay_clk), .cam4_hsync(v19_cam4_hsync), .cam4_vsync(v19_cam4_vsync), .cam4_pixel(v19_cam4_pixel),
             .cam5_clk   (v19_replay_clk), .cam5_hsync(v19_cam5_hsync), .cam5_vsync(v19_cam5_vsync), .cam5_pixel(v19_cam5_pixel),
             .px_valid   (eo_rnd_px_valid),
-            .px_ready   (!v19_fifo_full),
+            .px_ready   (v19_eo_px_ready),
             .px_data    (eo_rnd_px_data),
             .frame_done (eo_rnd_frame_done),
             .frames_valid(eo_rnd_frames_valid),
@@ -2000,7 +2028,7 @@ module PanoramaBase_DdrBlackFrame(
             .cam4_clk(ir4_wr_clk), .cam4_hsync(ir4_wr_hsync), .cam4_vsync(ir4_wr_vsync), .cam4_pixel(ir4_wr_pixel),
             .cam5_clk(ir5_wr_clk), .cam5_hsync(ir5_wr_hsync), .cam5_vsync(ir5_wr_vsync), .cam5_pixel(ir5_wr_pixel),
             .px_valid   (ir_rnd_px_valid),
-            .px_ready   (!v19_fifo_full),
+            .px_ready   (v19_ir_px_ready_q),
             .px_data    (ir_rnd_px_data),
             .frame_done (ir_rnd_frame_done),
             .frames_valid(ir_rnd_frames_valid),
@@ -2456,7 +2484,6 @@ module PanoramaBase_DdrBlackFrame(
         assign copy_px_valid  = copy_px_take;
         assign copy_px_data   = copyfifo_dout;
 
-        (* mark_debug = "true", dont_touch = "true" *)
         reg dbg_copyfifo_resid;
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst)
@@ -2636,7 +2663,6 @@ module PanoramaBase_DdrBlackFrame(
         assign copy_px_valid  = copy_px_take;
         assign copy_px_data   = copyfifo_dout;
 
-        (* mark_debug = "true", dont_touch = "true" *)
         reg dbg_copyfifo_resid;
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst)
@@ -2696,7 +2722,6 @@ module PanoramaBase_DdrBlackFrame(
         // full -- should never happen given the bandwidth headroom above;
         // exists purely for hardware bring-up visibility, matching this
         // project's established dbg_*_seen convention.
-        (* mark_debug = "true", dont_touch = "true" *)
         reg dbg_eo0raw_fifo_ovf_seen;
         always @(posedge eo0_wr_clk) begin
             if (!rst_n) dbg_eo0raw_fifo_ovf_seen <= 1'b0;
@@ -2756,7 +2781,6 @@ module PanoramaBase_DdrBlackFrame(
         assign copy_px_valid  = copy_px_take;
         assign copy_px_data   = copyfifo_dout;
 
-        (* mark_debug = "true", dont_touch = "true" *)
         reg dbg_copyfifo_resid;
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst)
@@ -2815,6 +2839,7 @@ module PanoramaBase_DdrBlackFrame(
             cmd_is_keepalive <= 1'b0;
             cmd_is_src_read  <= 1'b0;
             cmd_src_is_eo    <= 1'b0;
+            active_mode_key  <= V19_MODE_EO_PANO;
             geom_1080        <= 1'b0;
             geom_quiesce     <= 1'b0;
             cmd_addr_q       <= 29'd0;
@@ -2993,6 +3018,9 @@ module PanoramaBase_DdrBlackFrame(
                 scan_active   <= 1'b0;
                 flush_active  <= 1'b0;
                 flush_commit_pending <= 1'b0;
+                active_mode_key <= want_mode_key;
+                geom_1080     <= want_geom_1080;
+                geom_quiesce  <= 1'b0;
                 cmd_pend      <= 1'b0;
                 cmd_is_src_read <= 1'b0;
                 cmd_write_capture <= 1'b0;
@@ -3309,13 +3337,25 @@ module PanoramaBase_DdrBlackFrame(
             outstanding <= outstanding_next;
 
             //----------------------------------------------------------------
-            // Geometry-change quiesce.
+            // Mode/geometry-change quiesce.
             //
-            // The output height differs per mode (1080 for EO single, 960 for
-            // everything else), but the ping-pong bank bases do not.  A bank
-            // written at one height and scanned at the other is read as
-            // garbage, so the switch may only happen with the whole output
-            // pipeline empty.
+            // The copy-side producer also differs per mode: IR single, EO
+            // single, EO panorama, and IR panorama all feed the same output
+            // packer.  A command can change that producer while copy_active is
+            // high; if the old producer is disabled mid-copy, waiting for it
+            // to produce the rest of the frame wedges the output forever.
+            //
+            // Treat a mode-family change as a backend transaction boundary:
+            // block new starts/reads, blank and discard any uncommitted output
+            // banks, stop scan, drain in-flight scan returns, abandon the old
+            // partial copy once no full beat is pending, then latch the new
+            // mode/height and restart from empty ping-pong banks.
+            //
+            // The output height still differs per mode (1080 for EO single,
+            // 960 for everything else), but the ping-pong bank bases do not.
+            // A bank written at one height and scanned at the other is read as
+            // garbage, so the geometry portion of the switch also happens only
+            // after the output pipeline is empty.
             //
             // Deliberately LAST in this block: it overrides frame_valid and
             // pending_valid set earlier by the commit and write-retire logic,
@@ -3323,15 +3363,25 @@ module PanoramaBase_DdrBlackFrame(
             // restarting a scan (the scan only starts when one of those two is
             // set).  Verilog's last-assignment-wins is doing real work here.
             //
-            // Keyed on the height alone, not on any mode change, so switching
-            // between EO cameras -- same geometry -- costs nothing.
+            // Keyed on mode family, not on camera index, so switching between
+            // EO single cameras -- same producer and geometry -- costs nothing.
             //----------------------------------------------------------------
             if (SRC_SEL == SRC_V19) begin
-                if (geom_quiesce) begin
+                if (geom_quiesce || mode_transition_pending) begin
+                    geom_quiesce <= 1'b1;
                     // Blank and discard: anything completing during the drain
-                    // belongs to the old geometry.
+                    // belongs to the old mode/geometry.
                     frame_valid   <= 1'b0;
                     pending_valid <= 1'b0;
+                    flush_commit_pending <= 1'b0;
+                    scan_active <= 1'b0;
+
+                    if ((outstanding_next != 7'd0) || !beat_fifo_empty ||
+                        (unpack_count != 6'd0)) begin
+                        flush_active <= 1'b1;
+                        unpack_shift <= {DDR_APP_DATA_W{1'b0}};
+                        unpack_count <= 6'd0;
+                    end
 
                     // The producer feeding an in-flight copy was torn down by
                     // the mode change itself, so that copy can never finish --
@@ -3339,30 +3389,33 @@ module PanoramaBase_DdrBlackFrame(
                     // outstanding) rather than wait for it.  Nothing is
                     // committed, so this cannot show a torn frame.
                     if (copy_active && !fb_write_pending) begin
-                        copy_active    <= 1'b0;
-                        fb_pack_count  <= 6'd0;
-                        fb_burst_count <= 18'd0;
-                        fb_fold_beat_x <= 8'd0;
-                        fb_fold_row    <= 10'd0;
+                        copy_active      <= 1'b0;
+                        fb_write_pending <= 1'b0;
+                        fb_pack_count    <= 6'd0;
+                        fb_burst_count   <= 18'd0;
+                        fb_fold_beat_x   <= 8'd0;
+                        fb_fold_row      <= 10'd0;
+                        fb_pack_buf      <= {DDR_APP_DATA_W{1'b0}};
                     end
 
                     if (!copy_active && !scan_active && !flush_active &&
                         (outstanding_next == 7'd0) && beat_fifo_empty &&
+                        !issue_busy && (rd_tag_count == 0) &&
+                        !fb_write_pending && (fb_pack_count == 6'd0) &&
                         (unpack_count == 6'd0)) begin
                         geom_1080      <= want_geom_1080;
+                        active_mode_key<= want_mode_key;
                         geom_quiesce   <= 1'b0;
                         // Restart both banks from a known state: their
-                        // contents are meaningless in the new geometry.
+                        // contents are meaningless in the new mode/geometry.
                         wr_bank        <= 1'b0;
                         rd_bank        <= 1'b0;
                         wr_addr        <= BANK0_BASE;
                         rd_addr        <= BANK0_BASE;
                         rd_issue_count <= 18'd0;
+                        fb_fold_beat_x <= 8'd0;
+                        fb_fold_row    <= 10'd0;
                     end
-                end else if (want_geom_1080 != geom_1080) begin
-                    geom_quiesce  <= 1'b1;
-                    frame_valid   <= 1'b0;
-                    pending_valid <= 1'b0;
                 end
             end
         end
@@ -3400,121 +3453,8 @@ module PanoramaBase_DdrBlackFrame(
     wire renderer_mode_enabled = (SRC_SEL == SRC_EOSTK || SRC_SEL == SRC_EO0 ||
                                   SRC_SEL == SRC_EO0RAW || SRC_SEL == SRC_V19) ? 1'b1 : ir_single_ui;
 
-    //------------------------------------------------------------------------
-    // Hardware bring-up ILA (2026-07-07, see docs/DDR_EO_PANORAMA_FIX_PLAN.md
-    // sections 13-15): probes the shared write/pack and read/unpack path to
-    // find the vertical-stripe corruption bug the SRC_RAMP bisection proved
-    // lives in this source-agnostic back end, not the EO-specific front end.
-    // Section 13/14's narrower probes (16-bit corners) proved the write side
-    // is clean and pinned the corruption to c0_ddr4_app_rd_data bits[15:0],
-    // but section 15's calibration margin dashboard showed byte0 (bits[7:0])
-    // has perfectly ordinary margins -- ruling out a per-byte analog issue
-    // and pointing instead at a specific time-slot/chunk within the BL8
-    // burst assembly. probe5/probe11/probe14 were widened from
-    // 16-bit corners to full 64-bit corners to check whether bytes 2-7 at
-    // the same chunk position as the already-known-bad byte0/1 are ALSO
-    // wrong (time-slot theory) or clean (byte-specific theory survives).
-    // First attempt concatenated two disjoint 64-bit ranges into one wide
-    // port ({sig[511:448], sig[63:0]}); Vivado's debug-probe auto-naming
-    // only produced a usable name for a 32-bit fragment of that (a MAP of
-    // "probe5[31:0]", confirmed via report_property on the hw_probe object
-    // -- the other 96 bits were simply inaccessible by name, not corrupt
-    // data, but unusable all the same). Fixed by giving each single
-    // CONTIGUOUS 64-bit range its own dedicated probe port (probe19-24)
-    // instead of concatenating disjoint ranges -- probe6/wr_addr[15:0] etc.
-    // (simple contiguous slices, no concatenation) always named correctly,
-    // which is what motivated this restructuring. probe5/11/14 reverted to
-    // their original 32-bit first+last-pixel form. Temporary bring-up
-    // instrumentation -- remove once root cause is fixed.
-    //------------------------------------------------------------------------
-    dbg_ila_0 u_dbg_ila_0 (
-        .clk     (c0_ddr4_ui_clk),
-        .probe0  (copy_px_valid),
-        .probe1  (copy_px_data),
-        .probe2  (fb_pack_count),
-        .probe3  (fb_write_pending),
-        .probe4  (write_retiring),
-        .probe5  ({wdf_data_q[DDR_APP_DATA_W-1 -: 16], wdf_data_q[15:0]}),
-        .probe6  (wr_addr[15:0]),
-        .probe7  ({cmd_pend, cmd_is_rd, c0_ddr4_app_rdy, wdf_pend, c0_ddr4_app_wdf_rdy}),
-        .probe8  (read_retiring),
-        .probe9  (rd_addr[15:0]),
-        .probe10 (c0_ddr4_app_rd_data_valid),
-        // Rejoin diagnostics.  This slot carried raw DDR read data, which has
-        // served its purpose; the open question is what a returning camera's
-        // writer is doing, and none of it was observable.  Width unchanged so
-        // the ILA IP is not regenerated.
-        //   [31:28] 4'hB signature
-        //   [27:24] rejoin FSM state of the camera under test
-        //   [23:8]  that camera's dbg_writer_ui:
-        //           [23] have_bank      [22] drop_frame
-        //           [21] free_bank_empty[20] free_bank_rd_rst_busy
-        //           [19] fifo_prog_full [18] fifo_full
-        //           [17] frame_epoch_available [16] fifo_overflow_seen
-        //           [15:8] fifo_level[11:4]
-        //   [7:2]   rejoin_busy per camera
-        //   [1]     release_timeout_seen  [0] any rejoin shed sticky
-        .probe11 ((SRC_SEL == SRC_V19)
-                  ? {4'hB, v19_dbg_rejoin_state, v19_dbg_writer_sel,
-                     v19_rejoin_busy, v19_release_timeout_seen,
-                     (|v19_rejoin_shed)}
-                  : {c0_ddr4_app_rd_data[DDR_APP_DATA_W-1 -: 16],
-                     c0_ddr4_app_rd_data[15:0]}),
-        .probe12 (outstanding),
-        .probe13 ({beat_fifo_wr_en, beat_fifo_rd_en, beat_fifo_empty, beat_fifo_full}),
-        .probe14 ({beat_fifo_dout[DDR_APP_DATA_W-1 -: 16], beat_fifo_dout[15:0]}),
-        .probe15 (unpack_count),
-        .probe16 ({pix_fifo_wr_en, pix_fifo_wr_data}),
-        .probe17 ({scan_active, copy_active, flush_active, frame_edge}),
-        .probe18 ({dbg_beat_overflow, dbg_cmd_retry_seen}),
-        // Frame-set ownership diagnostics.  This slot used to carry
-        // wdf_data_q[63:0] (raw DDR write data), which has served its purpose:
-        // the open question is now why the manager stops leasing after a
-        // camera rejoins, and none of descriptor_valid_map / cam_present /
-        // free_ready / the published epochs were observable.  Width is
-        // unchanged so the ILA IP does not need regenerating.
-        //   [63:60] 4'hA signature      [59:54] cam_present
-        //   [53:48] free_ready          [47:24] descriptor_valid_map
-        //   [23:20] frameset state      [19:12] cam0 last published epoch
-        //   [11:4]  cam4 last published epoch
-        //   [3] no-common-epoch  [2] desc collision  [1] lease_valid
-        //   [0] a FREE token was issued this cycle
-        .probe19 ({4'hA,
-                   v19_cam_present, v19_free_ready,
-                   v19_descriptor_valid_map,
-                   v19_frameset_dbg_state,
-                   v19_cap0_desc_epoch[7:0], v19_cap4_desc_epoch[7:0],
-                   v19_no_common_epoch_seen, v19_descriptor_collision_seen,
-                   v19_replay_banks_ready, (v19_free_valid != 6'd0)}),
-        .probe20 (v19_dbg_bus),
-        .probe21 ((SRC_SEL == SRC_V19) ? v19_replay_dbg_word : c0_ddr4_app_rd_data[63:0]),
-        .probe22 ((SRC_SEL == SRC_V19) ? v19_dbg_rows_word0_strobe : dbg_bus[127:64]),
-        .probe23 ((SRC_SEL == SRC_V19) ? v19_capture_dbg : dbg_bus[191:128]),
-        // Was v19_dbg_rows_word2_strobe -- RowRun row-window diagnostics from
-        // an investigation that closed on 2026-07-29.  The underlying wires
-        // stay load-bearing (v19_dbg_rows_word2[50:40] still feeds
-        // v19_rows_start_aligned); only the probe assignment moves, so the
-        // ILA IP is not regenerated.  Layout in IrGenlockSkewMonitor.
-        // probe24 now carries the IR RENDERER, not the genlock skew monitor.
-        // The skew question is answered -- all six cameras within 274 ns,
-        // measured 2026-08-06 after IR_SetNV(16,0) -- and mode 0x14 produces
-        // no pixels on hardware while passing simulation, which cannot be
-        // diagnosed without seeing the renderer's own state. The skew monitor
-        // stays instantiated so it can be probed again if cameras drift.
-        .probe24 (ir_render_dbg),
-        // V19 DDR replay bring-up visibility: distinguish "source read not
-        // requested", "request not accepted", and "return misclassified".
-        // The two return valids are probed separately -- a return landing on
-        // the wrong owner across a mode change is the failure this has to be
-        // able to show.  probe25 is 7 bits wide in the IP, so this displaces
-        // v19_src_rd_ready (a plain wire; accepts remain inferable from
-        // v19_src_rd_valid together with rd_tag_count on probe27).
-        .probe25 ({v19_content_row51, v19_frame_done, pending_valid,
-                   frame_valid, v19_src_rd_valid,
-                   v19_replay_rd_data_valid, eo_src_rd_data_valid}),
-        .probe26 (read_gap_counter),
-        .probe27 (rd_tag_count)
-    );
+    // ui_clk bring-up ILA removed for production/QSPI images. Diagnostic
+    // wires above now either feed normal logic or get trimmed by synthesis.
 
     //------------------------------------------------------------------------
     // HD renderer (rd_clk).  Streams the committed frame into the SRC_SEL
@@ -3830,22 +3770,5 @@ module PanoramaBase_HdDdrRenderer #(
         end
     end
 
-    //------------------------------------------------------------------------
-    // Hardware bring-up ILA #2 (2026-07-07, see docs/DDR_EO_PANORAMA_FIX_PLAN.md
-    // section 18): clocked on rd_clk (dbg_ila_0 is ui_clk-side only and
-    // cannot see this module's internals), to directly answer whether the
-    // renderer emits window content at the correct positions and to
-    // quantify the in-window underrun "slip" mechanism identified in
-    // section 18.2 (any pix_empty while inside the window and streaming
-    // permanently displaces the rest of the frame, since the diagnostic-
-    // color branch does not pop). Triggers on the starvation event itself
-    // (cur_inside_window && pix_empty && stream_started) since that event
-    // may be too infrequent for a free-running/other-condition trigger to
-    // reliably land inside a 16384-sample window. Temporary bring-up
-    // instrumentation -- remove once the geometry question is resolved.
-    //------------------------------------------------------------------------
-    wire dbg_starve_event = cur_inside_window && pix_empty && stream_started;
-
-    // The dbg_ila_1 core is currently instantiated at the top level for
-    // post-mux HD output bring-up, so the renderer-local instance is disabled.
+    // Renderer-local bring-up ILA removed for production/QSPI images.
 endmodule

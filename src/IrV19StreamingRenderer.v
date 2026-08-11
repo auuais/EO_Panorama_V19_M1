@@ -138,9 +138,11 @@ module IrV19StreamingRenderer #(
     //------------------------------------------------------------------
     reg [1:0]  state;
     localparam ST_IDLE=2'd0, ST_ROW_WAIT=2'd1, ST_OUT=2'd2, ST_DRAIN=2'd3;
+    localparam [1:0] GATE_SETTLE = 2'd2;
     reg [8:0]  pano_y;
     reg [11:0] pano_x;
     reg [14:0] rom_row_base;
+    reg [1:0]  gate_settle;
     reg        started;
 
     // Which camera(s) cover this column, and the local x inside each.
@@ -150,6 +152,22 @@ module IrV19StreamingRenderer #(
     reg [2:0]  map_cam_a, map_cam_b;
     reg [11:0] map_lx_a, map_lx_b;
     reg [4:0]  map_alpha_pos;
+    function [4:0] cam23_fold_alpha_pos;
+        input [6:0] raw_pos;
+        reg [6:0] adj;
+        reg [10:0] scaled;
+        begin
+            if (raw_pos <= 7'd17) begin
+                cam23_fold_alpha_pos = 5'd0;
+            end else begin
+                adj = raw_pos - 7'd17;
+                scaled = (adj * 5'd25) + 11'd32;
+                cam23_fold_alpha_pos = (scaled[10:6] > 5'd28) ?
+                                       5'd28 : scaled[10:6];
+            end
+        end
+    endfunction
+
     always @* begin
         map_black = 1'b0; map_blend = 1'b0;
         map_cam_a = 3'd0; map_cam_b = 3'd0;
@@ -170,10 +188,18 @@ module IrV19StreamingRenderer #(
             map_alpha_pos = pano_x - `IR_V19_CAM2_START;
         end else if (pano_x < `IR_V19_CAM3_START) begin
             map_cam_a = 3'd2; map_lx_a = pano_x - `IR_V19_CAM2_START;
-        end else if (pano_x <= `IR_V19_CAM2_END) begin
+        end else if (pano_x <= (`IR_V19_CAM3_START + 12'd89)) begin
             map_blend = 1'b1; map_cam_a = 3'd2; map_cam_b = 3'd3;
-            map_lx_a = pano_x - `IR_V19_CAM2_START; map_lx_b = pano_x - `IR_V19_CAM3_START;
-            map_alpha_pos = pano_x - `IR_V19_CAM3_START;
+            map_lx_a = (pano_x > (`IR_V19_CAM2_START + 12'd639)) ?
+                       12'd639 : (pano_x - `IR_V19_CAM2_START);
+            map_lx_b = pano_x - `IR_V19_CAM3_START;
+            // This seam straddles the 1788-pixel fold boundary.  Hardware
+            // captures show the package's normal 29-pixel handoff exposes the
+            // brighter cam3/UI-cam4 edge too quickly.  Hold cam2 through the
+            // fold, clamp it at its last valid RowRun column (lx=639), then
+            // fade cam3 in through x=1860.  Other IR seams and all EO paths
+            // keep the package geometry unchanged.
+            map_alpha_pos = cam23_fold_alpha_pos(pano_x - `IR_V19_CAM3_START);
         end else if (pano_x < `IR_V19_CAM4_START) begin
             map_cam_a = 3'd3; map_lx_a = pano_x - `IR_V19_CAM3_START;
         end else if (pano_x <= `IR_V19_CAM3_END) begin
@@ -236,6 +262,7 @@ module IrV19StreamingRenderer #(
     reg        blk  [1:9];
     reg        bln  [1:8];
     reg        lst  [1:9];
+    reg        hit_ok [7:9];
     reg [4:0]  apos [1:7];
     reg [5:0]  lxa_o [1:1], lxb_o [1:1];
     reg [2:0]  cma [1:6], cmb [1:6];
@@ -243,13 +270,27 @@ module IrV19StreamingRenderer #(
 
     localparam [11:0] OUT_W = `IR_V19_VALID_W;
     wire last_pixel = (pano_y == H-1) && (pano_x == OUT_W-1);
+    wire s6_hit_a = (cma[6] == 3'd0) ? (hit_y0[0] & hit_y1[0]) :
+                    (cma[6] == 3'd1) ? (hit_y0[1] & hit_y1[1]) :
+                    (cma[6] == 3'd2) ? (hit_y0[2] & hit_y1[2]) :
+                    (cma[6] == 3'd3) ? (hit_y0[3] & hit_y1[3]) :
+                    (cma[6] == 3'd4) ? (hit_y0[4] & hit_y1[4]) :
+                                        (hit_y0[5] & hit_y1[5]);
+    wire s6_hit_b = (cmb[6] == 3'd0) ? (hit_y0[0] & hit_y1[0]) :
+                    (cmb[6] == 3'd1) ? (hit_y0[1] & hit_y1[1]) :
+                    (cmb[6] == 3'd2) ? (hit_y0[2] & hit_y1[2]) :
+                    (cmb[6] == 3'd3) ? (hit_y0[3] & hit_y1[3]) :
+                    (cmb[6] == 3'd4) ? (hit_y0[4] & hit_y1[4]) :
+                                        (hit_y0[5] & hit_y1[5]);
+    wire s6_hits_ok = blk[6] || (s6_hit_a && (!bln[6] || s6_hit_b));
 
     // --- stage 1: capture what stage 0 decided, ROM data arrives now -------
     // lx within the segment is just the low 6 bits: ox0 = seg*64 by
     // construction, which is exactly why the ROM record can drop ox0.
     always @(posedge clk) begin
         if (!rst_n) begin
-            v <= 7'd0;
+            v <= 9'd0;
+            hit_ok[7] <= 1'b0; hit_ok[8] <= 1'b0; hit_ok[9] <= 1'b0;
         end else if (advance) begin
             v    <= {v[7:0], (state == ST_OUT)};
             blk[1] <= s0_black;  bln[1] <= s0_blend;  lst[1] <= last_pixel;
@@ -270,6 +311,9 @@ module IrV19StreamingRenderer #(
             apos[7] <= apos[6];
             blk[8] <= blk[7]; bln[8] <= bln[7]; lst[8] <= lst[7];
             blk[9] <= blk[8]; lst[9] <= lst[8];
+            hit_ok[7] <= s6_hits_ok;
+            hit_ok[8] <= hit_ok[7];
+            hit_ok[9] <= hit_ok[8];
         end
     end
 
@@ -384,8 +428,8 @@ module IrV19StreamingRenderer #(
             px_valid <= 1'b0; px_data <= `IR_V19_BLACK_PIXEL; frame_done <= 1'b0;
         end else if (advance) begin
             px_valid <= v[8];
-            px_data  <= blk[9] ? `IR_V19_BLACK_PIXEL
-                               : {merged, `IR_V19_CHROMA_NEUTRAL};
+            px_data  <= (blk[9] || !hit_ok[9]) ? `IR_V19_BLACK_PIXEL
+                                                : {merged, `IR_V19_CHROMA_NEUTRAL};
             frame_done <= v[8] && lst[9];
         end else begin
             frame_done <= 1'b0;
@@ -431,7 +475,12 @@ module IrV19StreamingRenderer #(
     wire row_window_ok = (STRICT_ROW_WINDOW == 0) ? 1'b1 :
                          (rows_max <= gate_last_safe_rows);
     reg row_ready_q;
-    always @(posedge clk) row_ready_q <= (rows_min >= need_row) && row_window_ok;
+    always @(posedge clk) begin
+        if (!rst_n)
+            row_ready_q <= 1'b0;
+        else
+            row_ready_q <= (rows_min >= need_row) && row_window_ok;
+    end
 
     assign frames_valid = (rows_e0 >= 11'd32) && (rows_e1 >= 11'd32) &&
                           (rows_e2 >= 11'd32) && (rows_e3 >= 11'd32) &&
@@ -440,13 +489,20 @@ module IrV19StreamingRenderer #(
     always @(posedge clk) begin
         if (!rst_n) begin
             state <= ST_IDLE; pano_x <= 12'd0; pano_y <= 9'd0; rom_row_base <= 15'd0; started <= 1'b0;
+            gate_settle <= 2'd0;
         end else begin
             case (state)
                 ST_IDLE: begin
                     pano_x <= 12'd0; pano_y <= 9'd0; rom_row_base <= 15'd0;
+                    gate_settle <= 2'd0;
                     if (start_copy) begin state <= ST_ROW_WAIT; started <= 1'b1; end
                 end
-                ST_ROW_WAIT: if (row_ready_q) state <= ST_OUT;
+                ST_ROW_WAIT: begin
+                    if (gate_settle != GATE_SETTLE)
+                        gate_settle <= gate_settle + 2'd1;
+                    else if (row_ready_q)
+                        state <= ST_OUT;
+                end
                 ST_OUT: if (advance) begin
                     if (pano_x == OUT_W-1) begin
                         pano_x <= 12'd0;
@@ -454,6 +510,7 @@ module IrV19StreamingRenderer #(
                         else begin
                             pano_y <= pano_y + 9'd1;
                             rom_row_base <= rom_row_base + RUN_ROW_STRIDE;
+                            gate_settle <= 2'd0;
                             state <= ST_ROW_WAIT;
                         end
                     end else
@@ -461,6 +518,7 @@ module IrV19StreamingRenderer #(
                 end
                 ST_DRAIN: if (advance && !(|v)) begin
                     state <= ST_IDLE; started <= 1'b0; rom_row_base <= 15'd0;
+                    gate_settle <= 2'd0;
                 end
             endcase
         end

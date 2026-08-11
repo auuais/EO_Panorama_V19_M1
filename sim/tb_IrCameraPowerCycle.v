@@ -31,7 +31,7 @@ module tb_IrCameraPowerCycle;
 
     localparam integer W = 640, H = 512;
     localparam integer FRAME_PIXELS = W * H;
-    localparam integer LAT = 2;
+    localparam integer LAT = 3;
 
     // shrunk so the sequence completes in simulation
     localparam integer LOST_B = 5, STABLE_B = 7, RSTA_B = 4;

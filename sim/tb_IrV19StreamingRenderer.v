@@ -14,13 +14,22 @@
 //
 module tb_IrV19StreamingRenderer;
 
+`ifdef IR_V19_LONG_ROWGATE
+    localparam integer ROWS    = 130;
+    localparam integer FEED_ROWS = 180;
+    localparam integer CCLK_HALF_NS = 25;
+    localparam string  GOLDEN_FILE = "../../sim/ir_golden_rows_long.mem";
+`else
     localparam integer ROWS    = 3;
+    localparam integer FEED_ROWS = 60;
+    localparam integer CCLK_HALF_NS = 9;
+    localparam string  GOLDEN_FILE = "../../sim/ir_golden_rows.mem";
+`endif
     localparam integer PANO_W  = 3576;
     localparam integer SRC_W   = 640;
-    localparam integer FEED_ROWS = 60;
 
     reg clk = 0;  always #2 clk = ~clk;      // ui_clk
-    reg cclk = 0; always #9 cclk = ~cclk;    // camera pixel clock, unrelated
+    reg cclk = 0; always #CCLK_HALF_NS cclk = ~cclk; // camera pixel clock, unrelated
     reg rst_n = 0;
     reg start_copy = 0;
     reg [5:0] cam_present = 6'h3F;
@@ -63,7 +72,7 @@ module tb_IrV19StreamingRenderer;
     );
 
     reg [15:0] golden [0:ROWS*PANO_W-1];
-    initial $readmemh("../../sim/ir_golden_rows.mem", golden);
+    initial $readmemh(GOLDEN_FILE, golden);
 
     integer fed_rows;
     integer x, y, frame, rows_this_frame;

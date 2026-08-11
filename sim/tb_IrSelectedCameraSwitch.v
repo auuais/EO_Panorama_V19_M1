@@ -22,7 +22,7 @@ module tb_IrSelectedCameraSwitch;
 
     localparam integer W = 640, H = 512;
     localparam integer FRAME_PIXELS = W * H;
-    localparam integer LAT = 2;
+    localparam integer LAT = 3;
 
     reg rd_clk = 0;  always #2  rd_clk = ~rd_clk;   // ~233 MHz
     reg clk_a  = 0;  always #18 clk_a  = ~clk_a;    // ~27 MHz
