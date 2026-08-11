@@ -2,10 +2,10 @@
 """Prove the RowRun row-window tables bound what the renderer actually reads.
 
 EoV19StreamingRendererII1 never evaluates the exact calibration map.  It
-reconstructs each source coordinate from the quantised Q12.4 chord fit stored
+reconstructs each source coordinate from the quantised RowRun chord fit stored
 in eo_v19_render_runs.mem:
 
-    cy = ay0 + ((lx - ox0) * day_q12_4) << 12      qy = cy >> 16
+    cy = ay0 + ((lx - ox0) * day) << DRUN_TO_Q16      qy = cy >> 16
 
 row_max_y0 / row_min_y0 must therefore bound *that* reconstruction, not the
 exact map.  Deriving them from the exact map (the defect fixed on 2026-07-29)
@@ -32,10 +32,11 @@ import argparse
 import sys
 from pathlib import Path
 
-W_CAM = [680, 681, 681, 681, 681, 681]
-H, NCAM, SEG = 378, 6, 64
-SEGS = (681 + SEG - 1) // SEG
+W_CAM = [650, 655, 655, 655, 655, 655]
+H, NCAM, SEG = 480, 6, 64
+SEGS = (655 + SEG - 1) // SEG
 QY_LIMIT = 1078
+DRUN_FRAC_BITS = 5
 OVERRUN_BOUND = 62
 
 
@@ -48,7 +49,7 @@ def sext(value: int, width: int) -> int:
 
 
 def record(word: int) -> tuple[int, int, int]:
-    """Return (ox0, ay0_q16, day_q12_4) exactly as the RTL slices the record."""
+    """Return (ox0, ay0_q16, day) exactly as the RTL slices the record."""
     return (
         (word >> 16) & 0xFFFF,
         sext((word >> 80) & 0xFFFFFFFF, 32),
@@ -65,7 +66,9 @@ def qy(cy: int) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rowrun-dir", type=Path, default=Path("assets/rowruns"))
+    ap.add_argument("--drun-frac-bits", type=int, default=DRUN_FRAC_BITS)
     args = ap.parse_args()
+    drun_to_q16 = 16 - args.drun_frac_bits
 
     runs = load_mem(args.rowrun_dir / "eo_v19_render_runs.mem")
     row_max = load_mem(args.rowrun_dir / "eo_v19_render_row_max_y0.mem")
@@ -85,7 +88,7 @@ def main() -> int:
         for cam in range(NCAM):
             for lx in range(W_CAM[cam]):
                 ox0, ay0, day = record(runs[(sy * NCAM + cam) * SEGS + lx // SEG])
-                y = qy(ay0 + ((sext((lx - ox0) & 0xFFFF, 16) * day) << 12))
+                y = qy(ay0 + ((sext((lx - ox0) & 0xFFFF, 16) * day) << drun_to_q16))
                 if y > hi:
                     above += 1
                     worst_above = max(worst_above, y - hi)

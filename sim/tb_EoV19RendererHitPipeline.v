@@ -11,6 +11,7 @@ module tb_EoV19RendererHitPipeline;
 
     EoV19StreamingRendererII1 dut (
         .rst_n(rst_n), .clk(clk), .start_copy(start_copy),
+        .cam_present(6'h3f),
         .source_frame_reset(1'b0),
         .cam0_clk(clk), .cam0_hsync(1'b0), .cam0_vsync(1'b0), .cam0_pixel(20'd0),
         .cam1_clk(clk), .cam1_hsync(1'b0), .cam1_vsync(1'b0), .cam1_pixel(20'd0),

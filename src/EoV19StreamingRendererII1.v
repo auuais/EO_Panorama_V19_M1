@@ -5,9 +5,9 @@
 // preblend/alpha merge are all carried as a token pipeline.  This is the
 // streaming form of the milestone-1 path: no panorama pixels are pre-rendered.
 module EoV19StreamingRendererII1 #(
-    parameter integer SEG_W = 64,
-    parameter integer SEGS_PER_ROW = 11,
-    parameter integer RUN_COUNT = 24948
+    parameter integer SEG_W = `EO_V19_SEG_W,
+    parameter integer SEGS_PER_ROW = `EO_V19_SEGS_PER_ROW,
+    parameter integer RUN_COUNT = `EO_V19_RUN_COUNT
 ) (
     input wire rst_n, input wire clk, input wire start_copy,
     // One bit per camera; low means that camera is not streaming.  Absent
@@ -66,8 +66,8 @@ module EoV19StreamingRendererII1 #(
     reg [10:0] qy_limit;
     reg [10:0] row_max_y0 [0:`EO_V19_PER_CAM_H-1];
     reg [10:0] row_min_y0 [0:`EO_V19_PER_CAM_H-1];
-    reg [15:0] alpha_y [0:48];
-    reg [15:0] alpha_c [0:23];
+    reg [15:0] alpha_y [0:`EO_V19_ALPHA_Y_LEN-1];
+    reg [15:0] alpha_c [0:`EO_V19_ALPHA_C_LEN-1];
     reg [2:0] ca[0:10],cb[0:10];
     reg [10:0] rd_x0_r,rd_x1_r,rd_x2_r,rd_x3_r,rd_x4_r,rd_x5_r;
     reg [10:0] rd_y00_r,rd_y01_r,rd_y10_r,rd_y11_r;
@@ -140,7 +140,7 @@ module EoV19StreamingRendererII1 #(
     // The old +60 bound predated the row-window fix in
     // scripts/v19_generate_render_runs.py.  row_max_y0/row_min_y0 now
     // describe the source rows the RTL actually reconstructs from the
-    // quantised Q12.4 chord fit rather than the exact map, which widened the
+    // quantised RowRun chord fit rather than the exact map, which widened the
     // worst-case window to 58 rows; +60 would have left that row with zero
     // margin and blackened it on any replay/renderer sampling skew.
     //
@@ -224,23 +224,26 @@ module EoV19StreamingRendererII1 #(
         $readmemh("../../assets/rowruns/eo_v19_alpha_c.mem", alpha_c);
     end
 
-    localparam [11:0] CAM0_START=12'd0, CAM1_START=12'd631, CAM2_START=12'd1263,
-                      CAM3_START=12'd1895, CAM4_START=12'd2527, CAM5_START=12'd3159;
+    localparam [4:0] ALPHA_C_LAST = `EO_V19_ALPHA_C_LEN - 1;
+    localparam [6:0] ALPHA_C_LAST_POS = (`EO_V19_ALPHA_C_LEN * 2) - 1;
+    localparam [11:0] CAM0_START=`EO_V19_CAM0_START, CAM1_START=`EO_V19_CAM1_START,
+                      CAM2_START=`EO_V19_CAM2_START, CAM3_START=`EO_V19_CAM3_START,
+                      CAM4_START=`EO_V19_CAM4_START, CAM5_START=`EO_V19_CAM5_START;
     integer map_cam_a,map_cam_b,map_lx_a,map_lx_b,map_seg_a,map_seg_b;
     reg map_blend;
     reg [6:0] map_alpha_pos;
     always @* begin
         map_blend=0; map_alpha_pos=0; map_cam_a=0; map_cam_b=0; map_lx_a=0; map_lx_b=0;
-        if (pano_x <= 12'd630) begin map_cam_a=0; map_lx_a=pano_x; end
-        else if (pano_x <= 12'd679) begin map_blend=1; map_cam_a=0; map_cam_b=1; map_lx_a=pano_x; map_lx_b=pano_x-CAM1_START; map_alpha_pos=pano_x-12'd631; end
-        else if (pano_x <= 12'd1262) begin map_cam_a=1; map_lx_a=pano_x-CAM1_START; end
-        else if (pano_x <= 12'd1311) begin map_blend=1; map_cam_a=1; map_cam_b=2; map_lx_a=pano_x-CAM1_START; map_lx_b=pano_x-CAM2_START; map_alpha_pos=pano_x-12'd1263; end
-        else if (pano_x <= 12'd1894) begin map_cam_a=2; map_lx_a=pano_x-CAM2_START; end
-        else if (pano_x <= 12'd1943) begin map_blend=1; map_cam_a=2; map_cam_b=3; map_lx_a=pano_x-CAM2_START; map_lx_b=pano_x-CAM3_START; map_alpha_pos=pano_x-12'd1895; end
-        else if (pano_x <= 12'd2526) begin map_cam_a=3; map_lx_a=pano_x-CAM3_START; end
-        else if (pano_x <= 12'd2575) begin map_blend=1; map_cam_a=3; map_cam_b=4; map_lx_a=pano_x-CAM3_START; map_lx_b=pano_x-CAM4_START; map_alpha_pos=pano_x-12'd2527; end
-        else if (pano_x <= 12'd3158) begin map_cam_a=4; map_lx_a=pano_x-CAM4_START; end
-        else if (pano_x <= 12'd3207) begin map_blend=1; map_cam_a=4; map_cam_b=5; map_lx_a=pano_x-CAM4_START; map_lx_b=pano_x-CAM5_START; map_alpha_pos=pano_x-12'd3159; end
+        if (pano_x < CAM1_START) begin map_cam_a=0; map_lx_a=pano_x; end
+        else if (pano_x <= `EO_V19_CAM0_END) begin map_blend=1; map_cam_a=0; map_cam_b=1; map_lx_a=pano_x; map_lx_b=pano_x-CAM1_START; map_alpha_pos=pano_x-CAM1_START; end
+        else if (pano_x < CAM2_START) begin map_cam_a=1; map_lx_a=pano_x-CAM1_START; end
+        else if (pano_x <= `EO_V19_CAM1_END) begin map_blend=1; map_cam_a=1; map_cam_b=2; map_lx_a=pano_x-CAM1_START; map_lx_b=pano_x-CAM2_START; map_alpha_pos=pano_x-CAM2_START; end
+        else if (pano_x < CAM3_START) begin map_cam_a=2; map_lx_a=pano_x-CAM2_START; end
+        else if (pano_x <= `EO_V19_CAM2_END) begin map_blend=1; map_cam_a=2; map_cam_b=3; map_lx_a=pano_x-CAM2_START; map_lx_b=pano_x-CAM3_START; map_alpha_pos=pano_x-CAM3_START; end
+        else if (pano_x < CAM4_START) begin map_cam_a=3; map_lx_a=pano_x-CAM3_START; end
+        else if (pano_x <= `EO_V19_CAM3_END) begin map_blend=1; map_cam_a=3; map_cam_b=4; map_lx_a=pano_x-CAM3_START; map_lx_b=pano_x-CAM4_START; map_alpha_pos=pano_x-CAM4_START; end
+        else if (pano_x < CAM5_START) begin map_cam_a=4; map_lx_a=pano_x-CAM4_START; end
+        else if (pano_x <= `EO_V19_CAM4_END) begin map_blend=1; map_cam_a=4; map_cam_b=5; map_lx_a=pano_x-CAM4_START; map_lx_b=pano_x-CAM5_START; map_alpha_pos=pano_x-CAM5_START; end
         else begin map_cam_a=5; map_lx_a=pano_x-CAM5_START; end
         map_seg_a=map_lx_a/SEG_W; map_seg_b=map_lx_b/SEG_W;
     end
@@ -257,24 +260,23 @@ module EoV19StreamingRendererII1 #(
     function [7:0] interp8; input [7:0] a,b; input [15:0] f; reg [32:0] z; begin z=({1'b0,a}*(17'd65536-{1'b0,f}))+({1'b0,b}*{1'b0,f})+33'd32768; interp8=z[23:16]; end endfunction
     function [7:0] blend8; input [7:0] a,b; input [15:0] f; reg [32:0] z; begin z=({1'b0,a}*(17'd65536-f))+({1'b0,b}*{1'b0,f})+33'd32768; blend8=z[23:16]; end endfunction
     function [32:0] weighted_acc33; input [7:0] a,b; input [15:0] f; begin weighted_acc33=({1'b0,a}*(17'd65536-{1'b0,f}))+({1'b0,b}*{1'b0,f})+33'd32768; end endfunction
-    // Expand a compact RowRun coordinate without losing the Q12.4 delta's
-    // integer bits.  Shifting the signed 16-bit delta before widening it
-    // truncates the result to 16 bits (for example, 16'sd41 <<< 12 becomes
-    // 16'h9000), producing the observed 64-pixel horizontal blocks.  Multiply
-    // first into an explicit 32-bit Q12.4 product, sign-extend both operands,
-    // and only then convert the product to Q16.16.
+    // Expand a compact RowRun coordinate without losing the delta's integer
+    // bits.  Shifting the signed 16-bit delta before widening it truncates the
+    // result to 16 bits, producing the observed 64-pixel horizontal blocks.
+    // Multiply first into an explicit 32-bit product, sign-extend both
+    // operands, and only then convert the product to Q16.16.
     function signed [47:0] affine_q16;
         input signed [31:0] base_q16;
         input signed [15:0] offset_px;
-        input signed [15:0] delta_q12_4;
-        reg signed [31:0] product_q12_4;
+        input signed [15:0] delta_q;
+        reg signed [31:0] product_q;
         reg signed [47:0] base_ext;
         reg signed [47:0] product_ext;
         begin
-            product_q12_4 = offset_px * delta_q12_4;
+            product_q = offset_px * delta_q;
             base_ext = {{16{base_q16[31]}}, base_q16};
-            product_ext = {{16{product_q12_4[31]}}, product_q12_4};
-            affine_q16 = base_ext + (product_ext <<< 12);
+            product_ext = {{16{product_q[31]}}, product_q};
+            affine_q16 = base_ext + (product_ext <<< `EO_V19_DRUN_TO_Q16);
         end
     endfunction
     function [10:0] qx; input signed [47:0] c; begin if(c<0)qx=0; else if(c>(1918<<<16))qx=1918; else qx=c[26:16]; end endfunction
@@ -429,7 +431,9 @@ module EoV19StreamingRendererII1 #(
                     rd_y30_r<=((ca[3]==3)?qy(cya[3]):qy(cyb[3])); rd_y31_r<=((ca[3]==3)?qy(cya[3]):qy(cyb[3]))+1;
                     rd_y40_r<=((ca[3]==4)?qy(cya[3]):qy(cyb[3])); rd_y41_r<=((ca[3]==4)?qy(cya[3]):qy(cyb[3]))+1;
                     rd_y50_r<=((ca[3]==5)?qy(cya[3]):qy(cyb[3])); rd_y51_r<=((ca[3]==5)?qy(cya[3]):qy(cyb[3]))+1;
-                    ay[4]<=alpha_y[apos[3]]; ac[4]<=alpha_c[(apos[3]>47)?23:(apos[3]>>1)];
+                    ay[4]<=alpha_y[apos[3]];
+                    ac[4]<=alpha_c[(apos[3] > ALPHA_C_LAST_POS) ?
+                                    ALPHA_C_LAST : apos[3][4:1]];
                 end
                 if(v[5]) begin
                     hit_a6 <= sel_hit_a;
