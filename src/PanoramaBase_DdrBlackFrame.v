@@ -3453,8 +3453,83 @@ module PanoramaBase_DdrBlackFrame(
     wire renderer_mode_enabled = (SRC_SEL == SRC_EOSTK || SRC_SEL == SRC_EO0 ||
                                   SRC_SEL == SRC_EO0RAW || SRC_SEL == SRC_V19) ? 1'b1 : ir_single_ui;
 
-    // ui_clk bring-up ILA removed for production/QSPI images. Diagnostic
-    // wires above now either feed normal logic or get trimmed by synthesis.
+    //------------------------------------------------------------------------
+    // Hardware bring-up ILA (2026-07-07, see docs/DDR_EO_PANORAMA_FIX_PLAN.md
+    // sections 13-15): probes the shared write/pack and read/unpack path to
+    // find the vertical-stripe corruption bug the SRC_RAMP bisection proved
+    // lives in this source-agnostic back end, not the EO-specific front end.
+    //
+    // Restored after the temporary no-ILA QSPI cleanup. The DDR4-native debug
+    // bus ports are no longer present on the current MIG IP, so the old
+    // non-V19 fallback-only probe slots are tied to zero rather than
+    // reintroducing that IP configuration.
+    //------------------------------------------------------------------------
+    dbg_ila_0 u_dbg_ila_0 (
+        .clk     (c0_ddr4_ui_clk),
+        .probe0  (copy_px_valid),
+        .probe1  (copy_px_data),
+        .probe2  (fb_pack_count),
+        .probe3  (fb_write_pending),
+        .probe4  (write_retiring),
+        .probe5  ({wdf_data_q[DDR_APP_DATA_W-1 -: 16], wdf_data_q[15:0]}),
+        .probe6  (wr_addr[15:0]),
+        .probe7  ({cmd_pend, cmd_is_rd, c0_ddr4_app_rdy, wdf_pend, c0_ddr4_app_wdf_rdy}),
+        .probe8  (read_retiring),
+        .probe9  (rd_addr[15:0]),
+        .probe10 (c0_ddr4_app_rd_data_valid),
+        // Rejoin diagnostics. Width unchanged from the existing ILA IP.
+        //   [31:28] 4'hB signature
+        //   [27:24] rejoin FSM state of the camera under test
+        //   [23:8]  that camera's dbg_writer_ui:
+        //           [23] have_bank      [22] drop_frame
+        //           [21] free_bank_empty[20] free_bank_rd_rst_busy
+        //           [19] fifo_prog_full [18] fifo_full
+        //           [17] frame_epoch_available [16] fifo_overflow_seen
+        //           [15:8] fifo_level[11:4]
+        //   [7:2]   rejoin_busy per camera
+        //   [1]     release_timeout_seen  [0] any rejoin shed sticky
+        .probe11 ((SRC_SEL == SRC_V19)
+                  ? {4'hB, v19_dbg_rejoin_state, v19_dbg_writer_sel,
+                     v19_rejoin_busy, v19_release_timeout_seen,
+                     (|v19_rejoin_shed)}
+                  : {c0_ddr4_app_rd_data[DDR_APP_DATA_W-1 -: 16],
+                     c0_ddr4_app_rd_data[15:0]}),
+        .probe12 (outstanding),
+        .probe13 ({beat_fifo_wr_en, beat_fifo_rd_en, beat_fifo_empty, beat_fifo_full}),
+        .probe14 ({beat_fifo_dout[DDR_APP_DATA_W-1 -: 16], beat_fifo_dout[15:0]}),
+        .probe15 (unpack_count),
+        .probe16 ({pix_fifo_wr_en, pix_fifo_wr_data}),
+        .probe17 ({scan_active, copy_active, flush_active, frame_edge}),
+        .probe18 ({dbg_beat_overflow, dbg_cmd_retry_seen}),
+        // Frame-set ownership diagnostics.
+        //   [63:60] 4'hA signature      [59:54] cam_present
+        //   [53:48] free_ready          [47:24] descriptor_valid_map
+        //   [23:20] frameset state      [19:12] cam0 last published epoch
+        //   [11:4]  cam4 last published epoch
+        //   [3] no-common-epoch  [2] desc collision  [1] lease_valid
+        //   [0] a FREE token was issued this cycle
+        .probe19 ({4'hA,
+                   v19_cam_present, v19_free_ready,
+                   v19_descriptor_valid_map,
+                   v19_frameset_dbg_state,
+                   v19_cap0_desc_epoch[7:0], v19_cap4_desc_epoch[7:0],
+                   v19_no_common_epoch_seen, v19_descriptor_collision_seen,
+                   v19_replay_banks_ready, (v19_free_valid != 6'd0)}),
+        .probe20 (v19_dbg_bus),
+        .probe21 ((SRC_SEL == SRC_V19) ? v19_replay_dbg_word : c0_ddr4_app_rd_data[63:0]),
+        .probe22 ((SRC_SEL == SRC_V19) ? v19_dbg_rows_word0_strobe : 64'd0),
+        .probe23 ((SRC_SEL == SRC_V19) ? v19_capture_dbg : 64'd0),
+        // probe24 carries the IR renderer debug word, kept in place for mode
+        // transition and IR/EO interaction debugging.
+        .probe24 (ir_render_dbg),
+        // V19 DDR replay bring-up visibility: distinguish source-read request,
+        // return classification, and frame publication state.
+        .probe25 ({v19_content_first_row, v19_frame_done, pending_valid,
+                   frame_valid, v19_src_rd_valid,
+                   v19_replay_rd_data_valid, eo_src_rd_data_valid}),
+        .probe26 (read_gap_counter),
+        .probe27 (rd_tag_count)
+    );
 
     //------------------------------------------------------------------------
     // HD renderer (rd_clk).  Streams the committed frame into the SRC_SEL

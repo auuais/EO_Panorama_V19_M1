@@ -27,10 +27,13 @@ add_files -fileset constrs_1 -norecurse [list \
 ]
 
 # The x48 MIG is a checked-in, hardware-proven IP configuration.  Never
-# regenerate it from the old x64 helper script. Debug ILA cores are omitted
-# from production/QSPI builds.
+# regenerate it from the old x64 helper script. Bring-up/debug builds keep
+# the ILA cores present; see docs/QSPI_NO_ILA_CLEANUP_MEMORY_20260811.md when
+# a production QSPI image needs them stripped again.
 foreach xci [list \
     [file join $project_root ip ddr4_sub64 ddr4_sub64.xci] \
+    [file join $project_root ip dbg_ila_0 dbg_ila_0.xci] \
+    [file join $project_root ip dbg_ila_1 dbg_ila_1.xci] \
 ] {
     if {![file exists $xci]} { error "Required IP definition is missing: $xci" }
     add_files -norecurse $xci

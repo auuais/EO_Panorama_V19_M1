@@ -21,8 +21,8 @@ complete in the 64-entry ring:
   1. row_min_y0[sy] <= qy <= row_max_y0[sy]   for every token the RTL issues
   2. bilinear needs qy+1, and the renderer waits for R >= row_max_y0+2,
      so qy+1 <= R-1 holds iff check 1 holds
-  3. the oldest required row must still be resident: row_max_y0 - row_min_y0
-     must not exceed the renderer's overrun bound (62)
+  3. the oldest required row must still be resident at the ready edge:
+     row_max_y0 + 2 must not exceed row_min_y0 + the renderer overrun bound.
 
 Exits non-zero on any violation.  Run after regenerating the RowRun assets.
 """
@@ -37,7 +37,7 @@ H, NCAM, SEG = 480, 6, 64
 SEGS = (655 + SEG - 1) // SEG
 QY_LIMIT = 1078
 DRUN_FRAC_BITS = 5
-OVERRUN_BOUND = 62
+OVERRUN_BOUND = 63
 
 
 def load_mem(path: Path) -> list[int]:
@@ -67,6 +67,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rowrun-dir", type=Path, default=Path("assets/rowruns"))
     ap.add_argument("--drun-frac-bits", type=int, default=DRUN_FRAC_BITS)
+    ap.add_argument("--overrun-bound", type=int, default=OVERRUN_BOUND,
+                    help="inclusive captured-row upper margin from row_min_y0")
     args = ap.parse_args()
     drun_to_q16 = 16 - args.drun_frac_bits
 
@@ -101,18 +103,26 @@ def main() -> int:
                         first.append(f"sy={sy} cam={cam} lx={lx} qy={y} < row_min={lo}")
 
     spans = [row_max[sy] - row_min[sy] for sy in range(H)]
-    over_ring = [(sy, spans[sy]) for sy in range(H) if spans[sy] > OVERRUN_BOUND]
+    over_ring = [(sy, spans[sy]) for sy in range(H) if spans[sy] > args.overrun_bound]
+    ready_after_overrun = [
+        (sy, row_min[sy], row_max[sy], row_max[sy] + 2, row_min[sy] + args.overrun_bound)
+        for sy in range(H)
+        if row_max[sy] + 2 > row_min[sy] + args.overrun_bound
+    ]
 
     print(f"tokens above row_max_y0 : {above} (worst +{worst_above})")
     print(f"tokens below row_min_y0 : {below} (worst -{worst_below})")
     print(f"row window span min/max : {min(spans)}/{max(spans)} "
-          f"(overrun bound {OVERRUN_BOUND})")
+          f"(overrun bound {args.overrun_bound})")
     for line in first:
         print("  " + line)
     if over_ring:
         print(f"rows exceeding the ring : {len(over_ring)} e.g. {over_ring[:5]}")
+    if ready_after_overrun:
+        print(f"rows ready only after overrun : {len(ready_after_overrun)} "
+              f"e.g. {ready_after_overrun[:5]}")
 
-    if above or below or over_ring:
+    if above or below or over_ring or ready_after_overrun:
         print("FAIL: row-window tables do not bound the reconstructed coordinates")
         return 1
     print("PASS: every reconstructed source row lies inside its gated window")
