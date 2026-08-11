@@ -39,8 +39,6 @@ foreach xdc [list \
 
 foreach xci [list \
     [file join $project_root ip ddr4_sub64 ddr4_sub64.xci] \
-    [file join $project_root ip dbg_ila_0 dbg_ila_0.xci] \
-    [file join $project_root ip dbg_ila_1 dbg_ila_1.xci] \
 ] {
     if {![file exists $xci]} {
         error "Required IP definition is missing: $xci"

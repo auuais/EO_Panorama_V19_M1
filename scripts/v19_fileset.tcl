@@ -35,9 +35,15 @@ proc v19_refresh_fileset {project_root} {
                       [file join $project_root constraints ddr4_sub64_firstpass.xdc]] {
         v19_add_if_missing $xdc constrs_1
     }
-    foreach xci [list [file join $project_root ip ddr4_sub64 ddr4_sub64.xci] \
-                      [file join $project_root ip dbg_ila_0 dbg_ila_0.xci] \
-                      [file join $project_root ip dbg_ila_1 dbg_ila_1.xci]] {
+    foreach stale_xci [list [file join $project_root ip dbg_ila_0 dbg_ila_0.xci] \
+                            [file join $project_root ip dbg_ila_1 dbg_ila_1.xci]] {
+        set stale_files [get_files -quiet [file normalize $stale_xci]]
+        if {[llength $stale_files]} {
+            remove_files $stale_files
+            puts "Removed debug IP from V19 fileset: $stale_xci"
+        }
+    }
+    foreach xci [list [file join $project_root ip ddr4_sub64 ddr4_sub64.xci]] {
         if {![file exists $xci]} { error "Required IP definition is missing: $xci" }
         v19_add_if_missing $xci
     }

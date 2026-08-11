@@ -566,23 +566,7 @@ module KintexTop_EO_IR_HD_SDI_panorama_base(
     assign HD_VSYNC = processed_mode_active ? proc_hd_vsync : 1'b0;
     assign HD_DOUT  = processed_mode_active ? proc_hd_dout : 20'h0;
 
-    // Bring-up ILA: post-mux HD output visibility.  This answers whether the
-    // top-level output selection is actually driving active BT.1120/YCbCr data
-    // after the renderer, independent of the downstream SDI/grabber lock.
-    dbg_ila_1 u_top_hd_mux_ila (
-        .clk     (hd_clk),
-        .probe0  (eo_fpga_trigger_common),
-        .probe1  (eo1_frame_start_cam0),
-        .probe2  (eo2_frame_start_cam0),
-        .probe3  (eo3_frame_start_cam0),
-        .probe4  (eo4_frame_start_cam0),
-        .probe5  (eo5_frame_start_cam0),
-        .probe6  ({3'b000, eo_follow_seen}),
-        .probe7  (eo_follow_probe7),
-        .probe8  (eo_follow_span_cycles[19:0]),
-        .probe9  (eo_follow_probe9),
-        .probe10 (eo_follow_all_seen_pulse)
-    );
+    // Post-mux HD bring-up ILA removed for production/QSPI images.
 
     assign IEG0_PCLK  = 1'b0;
     assign IEG0_HSYNC = 1'b0;

@@ -123,8 +123,6 @@ if {![file exists $synth_dcp]} {
 }
 
 set ip_files [list \
-    [file join $project_root ip dbg_ila_1 dbg_ila_1.xci] \
-    [file join $project_root ip dbg_ila_0 dbg_ila_0.xci] \
     [file join $project_root ip ddr4_sub64 ddr4_sub64.xci] \
 ]
 set xdc_files [list \
@@ -155,9 +153,9 @@ set bus_skew_rpt  [file join $impl_dir "${top}_bus_skew_routed.rpt"]
 set route_rpt     [file join $impl_dir "${top}_route_status_routed.rpt"]
 
 # Recreate the project-generated implementation link stage explicitly.  A raw
-# open_checkpoint sees the synthesized top DCP but leaves the ILA/MIG IP as
-# black boxes; the generated Vivado run resolves those cells by reading the
-# IP .xci files before link_design.
+# open_checkpoint sees the synthesized top DCP but leaves the MIG IP as a
+# black box; the generated Vivado run resolves that cell by reading the IP .xci
+# before link_design.
 close_project
 create_project -in_memory -part $part
 set_property design_mode GateLvl [current_fileset]
@@ -176,6 +174,28 @@ foreach xdc_file $xdc_files {
 }
 v19_phase "link_design"
 link_design -top $top -part $part
+set dbg_ila_cells [get_cells -hier -quiet -filter {NAME =~ "*dbg_ila*"}]
+if {[llength $dbg_ila_cells]} {
+    error "ILA cells remain after link_design: $dbg_ila_cells"
+}
+puts "No dbg_ila cells present after link_design"
+set debug_cores [list]
+if {[llength [info commands get_debug_cores]]} {
+    set debug_cores [get_debug_cores -quiet]
+}
+set unexpected_debug_cores [list]
+foreach debug_core $debug_cores {
+    if {($debug_core eq "dbg_hub") ||
+        [string match "*/u_ddr4_sub64" $debug_core] ||
+        [string match "*u_ddr4_sub64" $debug_core]} {
+        continue
+    }
+    lappend unexpected_debug_cores $debug_core
+}
+if {[llength $unexpected_debug_cores]} {
+    error "Unexpected debug cores remain after link_design: $unexpected_debug_cores"
+}
+puts "Allowed built-in DDR4 debug cores only: $debug_cores"
 
 # Placement directive, overridable from the command line:
 #   vivado ... -source scripts/impl_v19_full_rebuild.tcl -tclargs <place_directive>
@@ -217,12 +237,11 @@ v19_phase "timing reports written"
 assert_nonnegative_timing $timing_rpt
 assert_bus_skew_clean $bus_skew_rpt
 
-write_debug_probes -force $ltx_out
 v19_phase "timing PASSED - writing bitstream"
 write_bitstream -force $bit_out
 v19_phase "BITSTREAM DONE"
 puts "GUARDED_BITSTREAM=$bit_out"
-puts "GUARDED_LTX=$ltx_out"
+puts "GUARDED_LTX=disabled_no_ila"
 
 close_design
 close_project

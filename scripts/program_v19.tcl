@@ -8,6 +8,8 @@ open_hw_target
 set dev [lindex [get_hw_devices] 0]
 current_hw_device $dev
 refresh_hw_device $dev
+catch {set_property PROBES.FILE {} $dev}
+catch {set_property FULL_PROBES.FILE {} $dev}
 set_property PROGRAM.FILE $bitfile $dev
 if {[file exists $ltxfile]} {
     set_property PROBES.FILE $ltxfile $dev

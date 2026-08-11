@@ -79,7 +79,7 @@
         "No_Controller": [ { "value": "1", "resolve_type": "user", "format": "long", "usage": "all" } ],
         "System_Clock": [ { "value": "Differential", "value_src": "user", "resolve_type": "user", "usage": "all" } ],
         "Reference_Clock": [ { "value": "Differential", "value_src": "user", "resolve_type": "user", "usage": "all" } ],
-        "Debug_Signal": [ { "value": "Enable", "value_src": "user", "resolve_type": "user", "usage": "all" } ],
+        "Debug_Signal": [ { "value": "Disable", "value_src": "user", "resolve_type": "user", "usage": "all" } ],
         "IO_Power_Reduction": [ { "value": "false", "resolve_type": "user", "format": "bool", "usage": "all" } ],
         "DCI_Cascade": [ { "value": "false", "resolve_type": "user", "format": "bool", "usage": "all" } ],
         "Default_Bank_Selections": [ { "value": "false", "resolve_type": "user", "format": "bool", "usage": "all" } ],
@@ -283,7 +283,7 @@
         "CLKOUT3_DIVIDE": [ { "value": "0", "resolve_type": "generated", "format": "long", "usage": "all" } ],
         "CLKOUT4_DIVIDE": [ { "value": "0", "resolve_type": "generated", "format": "long", "usage": "all" } ],
         "CLKOUT6_DIVIDE": [ { "value": "0", "resolve_type": "generated", "format": "long", "usage": "all" } ],
-        "Debug_Signal": [ { "value": "Enable", "resolve_type": "generated", "usage": "all" } ],
+        "Debug_Signal": [ { "value": "Disable", "resolve_type": "generated", "usage": "all" } ],
         "Simulation_Mode": [ { "value": "BFM", "resolve_type": "generated", "usage": "all" } ],
         "C0.DDR4_Ecc": [ { "value": "false", "resolve_type": "generated", "format": "bool", "usage": "simulation.tlm" } ]
       },
@@ -317,24 +317,6 @@
         "dbg_clk": [ { "direction": "out" } ],
         "c0_sys_clk_p": [ { "direction": "in", "driver_value": "0" } ],
         "c0_sys_clk_n": [ { "direction": "in", "driver_value": "0" } ],
-        "dbg_rd_data_cmp": [ { "direction": "out", "size_left": "63", "size_right": "0", "driver_value": "0" } ],
-        "dbg_expected_data": [ { "direction": "out", "size_left": "63", "size_right": "0", "driver_value": "0" } ],
-        "dbg_cal_seq": [ { "direction": "out", "size_left": "2", "size_right": "0", "driver_value": "0" } ],
-        "dbg_cal_seq_cnt": [ { "direction": "out", "size_left": "31", "size_right": "0", "driver_value": "0" } ],
-        "dbg_cal_seq_rd_cnt": [ { "direction": "out", "size_left": "7", "size_right": "0", "driver_value": "0" } ],
-        "dbg_rd_valid": [ { "direction": "out" } ],
-        "dbg_cmp_byte": [ { "direction": "out", "size_left": "5", "size_right": "0", "driver_value": "0" } ],
-        "dbg_rd_data": [ { "direction": "out", "size_left": "63", "size_right": "0", "driver_value": "0" } ],
-        "dbg_cplx_config": [ { "direction": "out", "size_left": "15", "size_right": "0", "driver_value": "0" } ],
-        "dbg_cplx_status": [ { "direction": "out", "size_left": "1", "size_right": "0", "driver_value": "0" } ],
-        "dbg_io_address": [ { "direction": "out", "size_left": "27", "size_right": "0", "driver_value": "0" } ],
-        "dbg_pllGate": [ { "direction": "out" } ],
-        "dbg_phy2clb_fixdly_rdy_low": [ { "direction": "out", "size_left": "19", "size_right": "0", "driver_value": "0" } ],
-        "dbg_phy2clb_fixdly_rdy_upp": [ { "direction": "out", "size_left": "19", "size_right": "0", "driver_value": "0" } ],
-        "dbg_phy2clb_phy_rdy_low": [ { "direction": "out", "size_left": "19", "size_right": "0", "driver_value": "0" } ],
-        "dbg_phy2clb_phy_rdy_upp": [ { "direction": "out", "size_left": "19", "size_right": "0", "driver_value": "0" } ],
-        "cal_r0_status": [ { "direction": "out", "size_left": "127", "size_right": "0", "driver_value": "0" } ],
-        "cal_post_status": [ { "direction": "out", "size_left": "8", "size_right": "0", "driver_value": "0" } ],
         "dbg_bus": [ { "direction": "out", "size_left": "511", "size_right": "0", "driver_value": "0" } ],
         "c0_ddr4_adr": [ { "direction": "out", "size_left": "16", "size_right": "0" } ],
         "c0_ddr4_ba": [ { "direction": "out", "size_left": "1", "size_right": "0" } ],
@@ -479,5 +461,5 @@
       }
     }
   },
-  "checksum": "6639c487"
+  "checksum": "7d841507"
 }
