@@ -324,6 +324,11 @@ def build_figure() -> None:
     eo_three_eighths_peak = 1.0 + 2.0 * (eo_scale - 1.0) / three_eighths_support_fraction
     ir_three_eighths_flat = 1.0 + (ir_scale - 1.0) / three_eighths_support_fraction
     ir_three_eighths_peak = 1.0 + 2.0 * (ir_scale - 1.0) / three_eighths_support_fraction
+    full_tile_support_fraction = 1.0
+    eo_full_tile_flat = eo_scale
+    eo_full_tile_peak = 1.0 + 2.0 * (eo_scale - 1.0)
+    ir_full_tile_flat = ir_scale
+    ir_full_tile_peak = 1.0 + 2.0 * (ir_scale - 1.0)
 
     with METRICS_PATH.open("w", newline="") as f:
         writer = csv.writer(f)
@@ -408,6 +413,34 @@ def build_figure() -> None:
                 f"{three_eighths_support_fraction:.9f}",
                 f"{ir_three_eighths_flat:.6f}",
                 f"{ir_three_eighths_peak:.6f}",
+                str(SUMMARY_CSV),
+            ]
+        )
+        writer.writerow(
+            [
+                "EO outer 50 percent of each tile side",
+                f"{eo_scale:.9f}",
+                f"{float(eo['y_stretch_pct']):.6f}",
+                "3840",
+                "640",
+                "6",
+                f"{full_tile_support_fraction:.9f}",
+                f"{eo_full_tile_flat:.6f}",
+                f"{eo_full_tile_peak:.6f}",
+                str(SUMMARY_CSV),
+            ]
+        )
+        writer.writerow(
+            [
+                "IR outer 50 percent of each tile side",
+                f"{ir_scale:.9f}",
+                f"{float(ir['y_stretch_pct']):.6f}",
+                "3576",
+                "596",
+                "6",
+                f"{full_tile_support_fraction:.9f}",
+                f"{ir_full_tile_flat:.6f}",
+                f"{ir_full_tile_peak:.6f}",
                 str(SUMMARY_CSV),
             ]
         )
