@@ -15,6 +15,7 @@ EO_SOURCE = ROOT / "EO_Test4C_R_0.75_P_-5" / "comp" / "Stab_false.bmp"
 OUT_DIR = Path(r"E:\Xylinx\EO_Panorama_V19_M1\output\pdf\assets")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 FIG_PATH = OUT_DIR / "customer_local_overlap_warp_demo.png"
+QUARTER_TILE_FIG_PATH = OUT_DIR / "customer_quarter_tile_warp_demo.png"
 METRICS_PATH = OUT_DIR / "customer_local_overlap_warp_metrics.csv"
 
 
@@ -83,6 +84,14 @@ def make_scale_profile(width: int, global_scale: float, seam_centers: list[float
 
     amplitude = (global_scale - 1.0) * width / area
     return 1.0 + amplitude * profile
+
+
+def make_quarter_tile_profile(width: int, global_scale: float, tile_count: int = 6) -> tuple[np.ndarray, float, float]:
+    tile_width = width / tile_count
+    edge_width = tile_width * 0.25
+    seam_band_width = edge_width * 2.0
+    seam_centers = [i * tile_width for i in range(tile_count + 1)]
+    return make_scale_profile(width, global_scale, seam_centers, seam_band_width), edge_width, seam_band_width
 
 
 def column_vertical_scale(img: Image.Image, scale_by_x: np.ndarray) -> Image.Image:
@@ -184,6 +193,69 @@ def draw_metrics_table(metrics: list[dict[str, str]]) -> Image.Image:
     return img
 
 
+def draw_quarter_tile_metrics(metrics: list[dict[str, str]]) -> Image.Image:
+    img = Image.new("RGB", (760, 300), "white")
+    d = ImageDraw.Draw(img)
+    d.text((0, 0), "25 percent on each tile side", fill=(18, 35, 55), font=FONT_HEAD)
+    y = 48
+    headers = ["Case", "active support", "flat avg", "smooth peak"]
+    xs = [0, 210, 410, 590]
+    for x, h in zip(xs, headers):
+        d.text((x, y), h, fill=(65, 75, 90), font=FONT_SMALL)
+    y += 27
+    d.line([0, y, 744, y], fill=(180, 190, 200), width=1)
+    y += 10
+    for row in metrics:
+        d.rounded_rectangle([0, y - 7, 744, y + 52], radius=6, fill=(246, 248, 251), outline=(220, 226, 234))
+        values = [row["case"], row["support"], row["flat"], row["peak"]]
+        for x, val in zip(xs, values):
+            d.text((x + 10, y + 9), val, fill=(20, 30, 45), font=FONT_BODY if x == 0 else FONT_SMALL)
+        y += 70
+    d.text(
+        (4, y + 4),
+        "Raised-cosine ramps occupy each outer quarter; every tile center remains 1.00x.",
+        fill=(80, 90, 100),
+        font=FONT_SMALL,
+    )
+    return img
+
+
+def draw_profile_comparison(
+    narrow_scale: np.ndarray,
+    quarter_scale: np.ndarray,
+    width: int,
+    height: int,
+) -> Image.Image:
+    img = Image.new("RGB", (width, height), "white")
+    d = ImageDraw.Draw(img)
+    left, top, right, bottom = 54, 22, width - 24, height - 48
+    d.rectangle([left, top, right, bottom], outline=(170, 180, 190), width=1)
+    s_min = 1.0
+    s_max = float(max(np.max(narrow_scale), np.max(quarter_scale))) * 1.04
+    for val in [1.0, 1.5, 2.0, 2.5, 3.0]:
+        if val > s_max:
+            continue
+        y = bottom - int((val - s_min) / (s_max - s_min) * (bottom - top))
+        d.line([left, y, right, y], fill=(230, 235, 240), width=1)
+        d.text((8, y - 8), f"{val:.1f}x", fill=(90, 95, 105), font=FONT_SMALL)
+
+    def plot(scale: np.ndarray, color: tuple[int, int, int], line_width: int) -> None:
+        pts = []
+        step = max(1, len(scale) // 900)
+        for x in range(0, len(scale), step):
+            px = left + int(x / (len(scale) - 1) * (right - left))
+            py = bottom - int((scale[x] - s_min) / (s_max - s_min) * (bottom - top))
+            pts.append((px, py))
+        if len(pts) > 1:
+            d.line(pts, fill=color, width=line_width)
+
+    plot(narrow_scale, (185, 45, 45), 3)
+    plot(quarter_scale, (32, 105, 165), 4)
+    d.text((left, bottom + 13), "red: 48.9 px overlap-only", fill=(185, 45, 45), font=FONT_SMALL)
+    d.text((left + 310, bottom + 13), "blue: outer 25 percent of each tile", fill=(32, 105, 165), font=FONT_SMALL)
+    return img
+
+
 def build_figure() -> None:
     measurements = read_measurements()
     eo = measurements["EO"]
@@ -194,6 +266,11 @@ def build_figure() -> None:
     eo_sw_overlap_fraction, eo_sw_flat, eo_sw_peak = local_warp_numbers(eo_scale, 3840.0, 48.9)
     eo_hw_overlap_fraction, eo_hw_flat, eo_hw_peak = local_warp_numbers(eo_scale, 3840.0, 17.0)
     ir_hw_overlap_fraction, ir_hw_flat, ir_hw_peak = local_warp_numbers(ir_scale, 3576.0, 29.0)
+    quarter_support_fraction = 0.5
+    eo_quarter_flat = 1.0 + (eo_scale - 1.0) / quarter_support_fraction
+    eo_quarter_peak = 1.0 + 2.0 * (eo_scale - 1.0) / quarter_support_fraction
+    ir_quarter_flat = 1.0 + (ir_scale - 1.0) / quarter_support_fraction
+    ir_quarter_peak = 1.0 + 2.0 * (ir_scale - 1.0) / quarter_support_fraction
 
     with METRICS_PATH.open("w", newline="") as f:
         writer = csv.writer(f)
@@ -203,7 +280,7 @@ def build_figure() -> None:
                 "measured_y_scale",
                 "measured_y_stretch_pct",
                 "active_width_px",
-                "overlap_px",
+                "correction_band_width_px",
                 "seam_count",
                 "overlap_fraction",
                 "flat_overlap_average_y_scale",
@@ -222,6 +299,34 @@ def build_figure() -> None:
                 f"{eo_sw_overlap_fraction:.9f}",
                 f"{eo_sw_flat:.6f}",
                 f"{eo_sw_peak:.6f}",
+                str(SUMMARY_CSV),
+            ]
+        )
+        writer.writerow(
+            [
+                "EO outer 25 percent of each tile side",
+                f"{eo_scale:.9f}",
+                f"{float(eo['y_stretch_pct']):.6f}",
+                "3840",
+                "320",
+                "6",
+                f"{quarter_support_fraction:.9f}",
+                f"{eo_quarter_flat:.6f}",
+                f"{eo_quarter_peak:.6f}",
+                str(SUMMARY_CSV),
+            ]
+        )
+        writer.writerow(
+            [
+                "IR outer 25 percent of each tile side",
+                f"{ir_scale:.9f}",
+                f"{float(ir['y_stretch_pct']):.6f}",
+                "3576",
+                "298",
+                "6",
+                f"{quarter_support_fraction:.9f}",
+                f"{ir_quarter_flat:.6f}",
+                f"{ir_quarter_peak:.6f}",
                 str(SUMMARY_CSV),
             ]
         )
@@ -356,8 +461,95 @@ def build_figure() -> None:
 
     canvas.save(FIG_PATH)
 
+    quarter_profile, eo_edge_width, eo_band_width = make_quarter_tile_profile(source.width, eo_scale)
+    quarter_warp = column_vertical_scale(source, quarter_profile)
+
+    quarter_source = label_panel(
+        fit(source, (1650, 206)),
+        "A. Baseline EO panorama from test case",
+        "Six 640 px output tiles; vertical scale is 1.00x",
+    )
+    quarter_global = label_panel(
+        fit(global_warp, (1650, 206)),
+        "B. Same 5.75 percent correction spread globally",
+        "Uniform vertical scale = 1.0575x",
+    )
+    quarter_local = label_panel(
+        fit(quarter_warp, (1650, 206)),
+        "C. Correction spread over 25 percent on both sides of every tile",
+        f"{eo_edge_width:.0f} px per side; {eo_band_width:.0f} px smooth seam zone; peak scale = {eo_quarter_peak:.3f}x",
+    )
+
+    quarter_zooms = []
+    for title, im in [
+        ("baseline seam-area zoom", source.crop(box)),
+        ("48.9 px overlap-only zoom", local_warp.crop(box)),
+        ("25 percent per-side zoom", quarter_warp.crop(box)),
+    ]:
+        panel = fit(im.resize((im.width * 2, im.height * 2), Image.Resampling.NEAREST), (500, 420))
+        quarter_zooms.append(label_panel(panel, title))
+
+    quarter_metrics = draw_quarter_tile_metrics(
+        [
+            {
+                "case": "EO measured",
+                "support": "50.0%",
+                "flat": f"{eo_quarter_flat:.3f}x",
+                "peak": f"{eo_quarter_peak:.3f}x",
+            },
+            {
+                "case": "IR measured",
+                "support": "50.0%",
+                "flat": f"{ir_quarter_flat:.3f}x",
+                "peak": f"{ir_quarter_peak:.3f}x",
+            },
+        ]
+    )
+    comparison_plot = draw_profile_comparison(scale_profile, quarter_profile, 860, 300)
+
+    quarter_canvas = Image.new("RGB", (1800, 1760), "white")
+    qd = ImageDraw.Draw(quarter_canvas)
+    qd.text((44, 28), "Wider local warp: outer 25 percent of every panorama tile", fill=(15, 35, 55), font=FONT_TITLE)
+    qd.text(
+        (44, 76),
+        (
+            f"The same measured EO y correction (+{float(eo['y_stretch_pct']):.2f} percent) is redistributed over "
+            "half of the panorama instead of the narrow physical overlaps."
+        ),
+        fill=(70, 80, 95),
+        font=FONT_BODY,
+    )
+
+    qy = 122
+    for panel in [quarter_source, quarter_global, quarter_local]:
+        quarter_canvas.paste(panel, (74, qy))
+        qy += panel.height + 18
+
+    qy += 6
+    qx = 74
+    for panel in quarter_zooms:
+        quarter_canvas.paste(panel, (qx, qy))
+        qx += panel.width + 30
+
+    quarter_canvas.paste(quarter_metrics, (74, 1412))
+    quarter_canvas.paste(comparison_plot, (870, 1395))
+    qd.text(
+        (74, 1704),
+        "Result: the EO transition is much less conspicuous, but scale still varies from 1.00x at tile centers to 1.23x at seams.",
+        fill=(30, 45, 60),
+        font=FONT_BODY,
+    )
+    qd.text(
+        (74, 1732),
+        "This is a reasonable non-metric display warp to prototype; it does not preserve a single calibrated projection.",
+        fill=(30, 45, 60),
+        font=FONT_BODY,
+    )
+    quarter_canvas.save(QUARTER_TILE_FIG_PATH)
+
 
 if __name__ == "__main__":
     build_figure()
     print(FIG_PATH)
+    print(QUARTER_TILE_FIG_PATH)
     print(METRICS_PATH)
