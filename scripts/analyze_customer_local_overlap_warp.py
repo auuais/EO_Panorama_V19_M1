@@ -16,6 +16,7 @@ OUT_DIR = Path(r"E:\Xylinx\EO_Panorama_V19_M1\output\pdf\assets")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 FIG_PATH = OUT_DIR / "customer_local_overlap_warp_demo.png"
 QUARTER_TILE_FIG_PATH = OUT_DIR / "customer_quarter_tile_warp_demo.png"
+THREE_EIGHTHS_TILE_FIG_PATH = OUT_DIR / "customer_three_eighths_tile_warp_demo.png"
 METRICS_PATH = OUT_DIR / "customer_local_overlap_warp_metrics.csv"
 
 
@@ -86,12 +87,23 @@ def make_scale_profile(width: int, global_scale: float, seam_centers: list[float
     return 1.0 + amplitude * profile
 
 
-def make_quarter_tile_profile(width: int, global_scale: float, tile_count: int = 6) -> tuple[np.ndarray, float, float]:
+def make_tile_edge_profile(
+    width: int,
+    global_scale: float,
+    side_fraction: float,
+    tile_count: int = 6,
+) -> tuple[np.ndarray, float, float]:
+    if not 0.0 < side_fraction <= 0.5:
+        raise ValueError("side_fraction must be in (0, 0.5]")
     tile_width = width / tile_count
-    edge_width = tile_width * 0.25
+    edge_width = tile_width * side_fraction
     seam_band_width = edge_width * 2.0
     seam_centers = [i * tile_width for i in range(tile_count + 1)]
     return make_scale_profile(width, global_scale, seam_centers, seam_band_width), edge_width, seam_band_width
+
+
+def make_quarter_tile_profile(width: int, global_scale: float, tile_count: int = 6) -> tuple[np.ndarray, float, float]:
+    return make_tile_edge_profile(width, global_scale, 0.25, tile_count)
 
 
 def column_vertical_scale(img: Image.Image, scale_by_x: np.ndarray) -> Image.Image:
@@ -193,10 +205,10 @@ def draw_metrics_table(metrics: list[dict[str, str]]) -> Image.Image:
     return img
 
 
-def draw_quarter_tile_metrics(metrics: list[dict[str, str]]) -> Image.Image:
-    img = Image.new("RGB", (760, 300), "white")
+def draw_tile_edge_metrics(metrics: list[dict[str, str]], title: str, note: str) -> Image.Image:
+    img = Image.new("RGB", (760, 125 + 58 * len(metrics)), "white")
     d = ImageDraw.Draw(img)
-    d.text((0, 0), "25 percent on each tile side", fill=(18, 35, 55), font=FONT_HEAD)
+    d.text((0, 0), title, fill=(18, 35, 55), font=FONT_HEAD)
     y = 48
     headers = ["Case", "active support", "flat avg", "smooth peak"]
     xs = [0, 210, 410, 590]
@@ -210,10 +222,10 @@ def draw_quarter_tile_metrics(metrics: list[dict[str, str]]) -> Image.Image:
         values = [row["case"], row["support"], row["flat"], row["peak"]]
         for x, val in zip(xs, values):
             d.text((x + 10, y + 9), val, fill=(20, 30, 45), font=FONT_BODY if x == 0 else FONT_SMALL)
-        y += 70
+        y += 58
     d.text(
         (4, y + 4),
-        "Raised-cosine ramps occupy each outer quarter; every tile center remains 1.00x.",
+        note,
         fill=(80, 90, 100),
         font=FONT_SMALL,
     )
@@ -256,6 +268,42 @@ def draw_profile_comparison(
     return img
 
 
+def draw_wide_profile_comparison(
+    quarter_scale: np.ndarray,
+    three_eighths_scale: np.ndarray,
+    width: int,
+    height: int,
+) -> Image.Image:
+    img = Image.new("RGB", (width, height), "white")
+    d = ImageDraw.Draw(img)
+    left, top, right, bottom = 58, 22, width - 24, height - 48
+    d.rectangle([left, top, right, bottom], outline=(170, 180, 190), width=1)
+    s_min = 1.0
+    s_max = float(max(np.max(quarter_scale), np.max(three_eighths_scale))) * 1.03
+    for val in [1.0, 1.05, 1.10, 1.15, 1.20, 1.25]:
+        if val > s_max:
+            continue
+        y = bottom - int((val - s_min) / (s_max - s_min) * (bottom - top))
+        d.line([left, y, right, y], fill=(230, 235, 240), width=1)
+        d.text((8, y - 8), f"{val:.2f}x", fill=(90, 95, 105), font=FONT_SMALL)
+
+    def plot(scale: np.ndarray, color: tuple[int, int, int]) -> None:
+        pts = []
+        step = max(1, len(scale) // 900)
+        for x in range(0, len(scale), step):
+            px = left + int(x / (len(scale) - 1) * (right - left))
+            py = bottom - int((scale[x] - s_min) / (s_max - s_min) * (bottom - top))
+            pts.append((px, py))
+        if len(pts) > 1:
+            d.line(pts, fill=color, width=4)
+
+    plot(quarter_scale, (32, 105, 165))
+    plot(three_eighths_scale, (35, 135, 85))
+    d.text((left, bottom + 13), "blue: 25 percent per side", fill=(32, 105, 165), font=FONT_SMALL)
+    d.text((left + 300, bottom + 13), "green: 37.5 percent per side", fill=(35, 135, 85), font=FONT_SMALL)
+    return img
+
+
 def build_figure() -> None:
     measurements = read_measurements()
     eo = measurements["EO"]
@@ -271,6 +319,11 @@ def build_figure() -> None:
     eo_quarter_peak = 1.0 + 2.0 * (eo_scale - 1.0) / quarter_support_fraction
     ir_quarter_flat = 1.0 + (ir_scale - 1.0) / quarter_support_fraction
     ir_quarter_peak = 1.0 + 2.0 * (ir_scale - 1.0) / quarter_support_fraction
+    three_eighths_support_fraction = 0.75
+    eo_three_eighths_flat = 1.0 + (eo_scale - 1.0) / three_eighths_support_fraction
+    eo_three_eighths_peak = 1.0 + 2.0 * (eo_scale - 1.0) / three_eighths_support_fraction
+    ir_three_eighths_flat = 1.0 + (ir_scale - 1.0) / three_eighths_support_fraction
+    ir_three_eighths_peak = 1.0 + 2.0 * (ir_scale - 1.0) / three_eighths_support_fraction
 
     with METRICS_PATH.open("w", newline="") as f:
         writer = csv.writer(f)
@@ -327,6 +380,34 @@ def build_figure() -> None:
                 f"{quarter_support_fraction:.9f}",
                 f"{ir_quarter_flat:.6f}",
                 f"{ir_quarter_peak:.6f}",
+                str(SUMMARY_CSV),
+            ]
+        )
+        writer.writerow(
+            [
+                "EO outer 37.5 percent of each tile side",
+                f"{eo_scale:.9f}",
+                f"{float(eo['y_stretch_pct']):.6f}",
+                "3840",
+                "480",
+                "6",
+                f"{three_eighths_support_fraction:.9f}",
+                f"{eo_three_eighths_flat:.6f}",
+                f"{eo_three_eighths_peak:.6f}",
+                str(SUMMARY_CSV),
+            ]
+        )
+        writer.writerow(
+            [
+                "IR outer 37.5 percent of each tile side",
+                f"{ir_scale:.9f}",
+                f"{float(ir['y_stretch_pct']):.6f}",
+                "3576",
+                "447",
+                "6",
+                f"{three_eighths_support_fraction:.9f}",
+                f"{ir_three_eighths_flat:.6f}",
+                f"{ir_three_eighths_peak:.6f}",
                 str(SUMMARY_CSV),
             ]
         )
@@ -489,7 +570,7 @@ def build_figure() -> None:
         panel = fit(im.resize((im.width * 2, im.height * 2), Image.Resampling.NEAREST), (500, 420))
         quarter_zooms.append(label_panel(panel, title))
 
-    quarter_metrics = draw_quarter_tile_metrics(
+    quarter_metrics = draw_tile_edge_metrics(
         [
             {
                 "case": "EO measured",
@@ -503,7 +584,9 @@ def build_figure() -> None:
                 "flat": f"{ir_quarter_flat:.3f}x",
                 "peak": f"{ir_quarter_peak:.3f}x",
             },
-        ]
+        ],
+        "25 percent on each tile side",
+        "Raised-cosine ramps occupy each outer quarter; every tile center remains 1.00x.",
     )
     comparison_plot = draw_profile_comparison(scale_profile, quarter_profile, 860, 300)
 
@@ -547,9 +630,117 @@ def build_figure() -> None:
     )
     quarter_canvas.save(QUARTER_TILE_FIG_PATH)
 
+    three_eighths_profile, eo_three_eighths_edge, eo_three_eighths_band = make_tile_edge_profile(
+        source.width,
+        eo_scale,
+        0.375,
+    )
+    three_eighths_warp = column_vertical_scale(source, three_eighths_profile)
+
+    wide_source = label_panel(
+        fit(source, (1650, 206)),
+        "A. Baseline EO panorama from test case",
+        "Six 640 px output tiles; vertical scale is 1.00x",
+    )
+    wide_quarter = label_panel(
+        fit(quarter_warp, (1650, 206)),
+        "B. Correction over 25 percent on both sides of every tile",
+        f"160 px per side; 320 px seam zone; peak scale = {eo_quarter_peak:.3f}x",
+    )
+    wide_three_eighths = label_panel(
+        fit(three_eighths_warp, (1650, 206)),
+        "C. Correction over 37.5 percent on both sides of every tile",
+        (
+            f"{eo_three_eighths_edge:.0f} px per side; {eo_three_eighths_band:.0f} px seam zone; "
+            f"peak scale = {eo_three_eighths_peak:.3f}x"
+        ),
+    )
+
+    wide_zooms = []
+    for title, im in [
+        ("baseline seam-area zoom", source.crop(box)),
+        ("25 percent per-side zoom", quarter_warp.crop(box)),
+        ("37.5 percent per-side zoom", three_eighths_warp.crop(box)),
+    ]:
+        panel = fit(im.resize((im.width * 2, im.height * 2), Image.Resampling.NEAREST), (500, 420))
+        wide_zooms.append(label_panel(panel, title))
+
+    wide_metrics = draw_tile_edge_metrics(
+        [
+            {
+                "case": "EO, 25% sides",
+                "support": "50.0%",
+                "flat": f"{eo_quarter_flat:.3f}x",
+                "peak": f"{eo_quarter_peak:.3f}x",
+            },
+            {
+                "case": "EO, 37.5% sides",
+                "support": "75.0%",
+                "flat": f"{eo_three_eighths_flat:.3f}x",
+                "peak": f"{eo_three_eighths_peak:.3f}x",
+            },
+            {
+                "case": "IR, 25% sides",
+                "support": "50.0%",
+                "flat": f"{ir_quarter_flat:.3f}x",
+                "peak": f"{ir_quarter_peak:.3f}x",
+            },
+            {
+                "case": "IR, 37.5% sides",
+                "support": "75.0%",
+                "flat": f"{ir_three_eighths_flat:.3f}x",
+                "peak": f"{ir_three_eighths_peak:.3f}x",
+            },
+        ],
+        "25 percent versus 37.5 percent per side",
+        "More support lowers peak scale but reduces the undistorted tile center from 50% to 25%.",
+    )
+    wide_plot = draw_wide_profile_comparison(quarter_profile, three_eighths_profile, 860, 300)
+
+    wide_canvas = Image.new("RGB", (1800, 1860), "white")
+    wd = ImageDraw.Draw(wide_canvas)
+    wd.text((44, 28), "Wider local warp: outer 37.5 percent of every panorama tile", fill=(15, 35, 55), font=FONT_TITLE)
+    wd.text(
+        (44, 76),
+        (
+            f"The measured EO y correction (+{float(eo['y_stretch_pct']):.2f} percent) now occupies 75 percent of "
+            "the panorama, leaving only the central quarter of each tile unchanged."
+        ),
+        fill=(70, 80, 95),
+        font=FONT_BODY,
+    )
+
+    wy = 122
+    for panel in [wide_source, wide_quarter, wide_three_eighths]:
+        wide_canvas.paste(panel, (74, wy))
+        wy += panel.height + 18
+
+    wy += 6
+    wx = 74
+    for panel in wide_zooms:
+        wide_canvas.paste(panel, (wx, wy))
+        wx += panel.width + 30
+
+    wide_canvas.paste(wide_metrics, (74, 1408))
+    wide_canvas.paste(wide_plot, (870, 1422))
+    wd.text(
+        (74, 1806),
+        "Result: EO becomes gentler again, with a 1.153x seam peak, but 75 percent of every tile now has variable scale.",
+        fill=(30, 45, 60),
+        font=FONT_BODY,
+    )
+    wd.text(
+        (74, 1834),
+        "The method is converging toward a global non-metric warp rather than preserving large undistorted camera interiors.",
+        fill=(30, 45, 60),
+        font=FONT_BODY,
+    )
+    wide_canvas.save(THREE_EIGHTHS_TILE_FIG_PATH)
+
 
 if __name__ == "__main__":
     build_figure()
     print(FIG_PATH)
     print(QUARTER_TILE_FIG_PATH)
+    print(THREE_EIGHTHS_TILE_FIG_PATH)
     print(METRICS_PATH)

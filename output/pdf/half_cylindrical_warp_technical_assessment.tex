@@ -61,7 +61,7 @@
 \vspace{8pt}
 
 \begin{abstract}
-This report evaluates whether two 2018 natural-image stitching methods provide a technically valid alternative to the calibrated cylindrical projection used in a real-time, six-camera, 360-degree electro-optical and infrared panoramic system. The analysis first resolves a bibliographic conflation between \emph{Ratio-Preserving Half-Cylindrical Warps for Natural Image Stitching} and the supplied paper \emph{A Natural Shape-Preserving Stereoscopic Image Stitching}. It then examines citation history, evidence of adoption, algorithmic assumptions, measured runtime, projection geometry, compatibility with a deterministic FPGA streaming architecture, and a customer-proposed local-overlap warp variant. The central geometric result is that a rectangular pinhole sensor does not observe a constant vertical elevation range across its horizontal field of view. For a camera sector of half-angle $\alpha$ and vertical half-field $\beta$, the available elevation at azimuth $\theta$ is bounded by $\phi_{\max}(\theta)=\tan^{-1}(\tan\beta\cos\theta)$. No two-dimensional warp can recover rays outside that bound. The reviewed methods improve visual naturalness by scene-dependent rescaling and piecewise warping, but they do not preserve angular geometry or recover vertical field of view. Test-case data show that confining the remaining correction to narrow overlaps creates high-gain seam deformation rather than a calibrated projection. Widening the correction support to the outer 25\% of both sides of every tile makes the EO result substantially smoother and may be practical as a fixed operator-display warp, but it still creates an azimuth-dependent vertical scale and a scalloped validity boundary. The report concludes that these methods may be useful for optional non-metric display rectangling, but they do not substantiate replacing calibrated cylindrical reprojection in the target real-time system.
+This report evaluates whether two 2018 natural-image stitching methods provide a technically valid alternative to the calibrated cylindrical projection used in a real-time, six-camera, 360-degree electro-optical and infrared panoramic system. The analysis first resolves a bibliographic conflation between \emph{Ratio-Preserving Half-Cylindrical Warps for Natural Image Stitching} and the supplied paper \emph{A Natural Shape-Preserving Stereoscopic Image Stitching}. It then examines citation history, evidence of adoption, algorithmic assumptions, measured runtime, projection geometry, compatibility with a deterministic FPGA streaming architecture, and a customer-proposed local-overlap warp variant. The central geometric result is that a rectangular pinhole sensor does not observe a constant vertical elevation range across its horizontal field of view. For a camera sector of half-angle $\alpha$ and vertical half-field $\beta$, the available elevation at azimuth $\theta$ is bounded by $\phi_{\max}(\theta)=\tan^{-1}(\tan\beta\cos\theta)$. No two-dimensional warp can recover rays outside that bound. The reviewed methods improve visual naturalness by scene-dependent rescaling and piecewise warping, but they do not preserve angular geometry or recover vertical field of view. Test-case data show that confining the remaining correction to narrow overlaps creates high-gain seam deformation rather than a calibrated projection. Widening the correction support to the outer 25\% and then 37.5\% of both sides of every tile makes the EO result progressively smoother and may be practical as a fixed operator-display warp, but it still creates an azimuth-dependent vertical scale and a scalloped validity boundary. The report concludes that these methods may be useful for optional non-metric display rectangling, but they do not substantiate replacing calibrated cylindrical reprojection in the target real-time system.
 \end{abstract}
 
 \textbf{Keywords:} panoramic imaging, cylindrical projection, image stitching, vertical field of view, FPGA, multi-camera systems, real-time video, stereoscopic stitching.
@@ -396,11 +396,49 @@ The wider support does not, however, make all four stated objectives simultaneou
 \label{fig:quarter-tile-demo}
 \end{figure}
 
+\subsection{Further wider test: 37.5\% on each side}
+
+The same experiment was repeated with the correction ramp covering the outer $q=0.375$ of both sides of every tile. The active support is therefore
+
+\begin{equation}
+f_{37.5}=2q=0.75,
+\end{equation}
+
+leaving only the central 25\% of each tile at scale $1.0$. For EO, each side ramp is 240 px and the combined seam-centered zone is 480 px wide. For IR, the corresponding ideal widths are 223.5 px per side and 447 px per seam zone.
+
+\begin{table}[H]
+\centering
+\caption{Comparison of the two widened raised-cosine correction fields. Both preserve the measured panorama-average scale; widening support lowers peak deformation while reducing the undistorted camera interior.}
+\label{tab:wide-tile-comparison}
+\small
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+Case & Side fraction & Active support & Undistorted center & Active-band average & Smooth peak \\
+\midrule
+EO, 25\% sides & 25\% & 50\% & 50\% & 1.115$\times$ & 1.230$\times$ \\
+EO, 37.5\% sides & 37.5\% & 75\% & 25\% & 1.077$\times$ & 1.153$\times$ \\
+IR, 25\% sides & 25\% & 50\% & 50\% & 1.355$\times$ & 1.710$\times$ \\
+IR, 37.5\% sides & 37.5\% & 75\% & 25\% & 1.237$\times$ & 1.474$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 37.5\% result is visually gentler. In EO, the peak scale drops from $1.230\times$ to $1.153\times$, a one-third reduction in peak scale excess above unity. The upper and lower scallops become shallower, and the seam-area zoom approaches the baseline more closely. IR also improves, although a $1.474\times$ seam peak remains substantial.
+
+This improvement does not come from recovering geometry; it comes from distributing the same correction over more pixels. Three quarters of every tile now have position-dependent vertical scale, and only a 160 px central strip of each 640 px EO sector remains undistorted. Thus 37.5\% is likely the more natural-looking operator view, while 25\% better preserves a larger camera interior. The choice is a perceptual tuning parameter between deformation amplitude and deformation extent, not a solution to the field-of-view constraint.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{assets/customer_three_eighths_tile_warp_demo.png}
+\caption{Measured EO correction distributed over the outer 37.5\% of each tile side and compared directly with the 25\% case. The 480 px EO seam zone lowers the smooth peak to $1.153\times$ and visibly reduces boundary scalloping. The correction now occupies 75\% of the panorama, demonstrating that the smoother appearance is obtained by spreading non-metric scale variation across most of each tile.}
+\label{fig:three-eighths-tile-demo}
+\end{figure}
+
 \subsection{Implication for the projection choice}
 
 The customer is correct that a non-cylindrical method can preserve more vertical source content for an operator display. The rigorous version of that idea is a calibrated multi-face or perspective-atlas representation, where each camera face keeps its own inverse ray model and the UI renders those faces on a 3-D surface. That approach does not pretend to be one rectangular cylindrical raster.
 
-The proposed adaptive overlap warp is different. It uses a local two-dimensional deformation to make a rectangle look plausible. If the deformation is estimated from image features at runtime, it inherits the problems of feature-dependent still-image stitching: depth dependence, moving-object sensitivity, and seam shimmer. If the wider quarter-tile deformation is instead calibrated offline and held fixed, those temporal estimation problems are avoided and the map is compatible with deterministic FPGA lookup. The remaining limitation is geometric: scale depends on azimuth and there is no single projection model or stable global pixel-to-ray interpretation. The fixed wider warp can be offered as an optional operator view, but it should not replace the metric cylindrical mode used for measurement, stabilization, tracking, and downstream analytics.
+The proposed adaptive overlap warp is different. It uses a local two-dimensional deformation to make a rectangle look plausible. If the deformation is estimated from image features at runtime, it inherits the problems of feature-dependent still-image stitching: depth dependence, moving-object sensitivity, and seam shimmer. If a wider 25\% or 37.5\% tile-edge deformation is instead calibrated offline and held fixed, those temporal estimation problems are avoided and the map is compatible with deterministic FPGA lookup. The remaining limitation is geometric: scale depends on azimuth and there is no single projection model or stable global pixel-to-ray interpretation. The fixed wider warp can be offered as an optional operator view, but it should not replace the metric cylindrical mode used for measurement, stabilization, tracking, and downstream analytics.
 
 \section{Practical Alternatives for the Existing Hardware}
 
@@ -481,14 +519,14 @@ The reviewed literature does not justify replacing the existing calibrated cylin
 
 The vertical-field limitation is dictated by pinhole-ray geometry. At the edge of a $60^\circ$ camera sector, a $51.3^\circ$-vertical EO sensor provides approximately $45.2^\circ$ of common elevation. Filling a full-height rectangle without crop or invalid pixels therefore requires either additional optical vertical coverage or a non-metric deformation. A visually pleasing rectangle is achievable; a geometrically true rectangle containing uncaptured rays is not.
 
-For the existing hardware, the defensible engineering choices are: retain the calibrated cylindrical map for metric operation; optionally expose a masked full-footprint or multi-face perspective atlas; add optical overscan when a full-height metric rectangle is mandatory; and reserve adaptive ratio-preserving or fixed quarter-tile warps for clearly labeled operator-view modes. The new test indicates that the fixed quarter-tile variant is the more credible display prototype because it lowers the measured EO peak scale to $1.23\times$ without requiring runtime feature estimation.
+For the existing hardware, the defensible engineering choices are: retain the calibrated cylindrical map for metric operation; optionally expose a masked full-footprint or multi-face perspective atlas; add optical overscan when a full-height metric rectangle is mandatory; and reserve adaptive ratio-preserving or fixed wide tile-edge warps for clearly labeled operator-view modes. The new tests indicate that fixed 25\% and 37.5\% variants are credible display prototypes because they lower the measured EO peak scale to $1.230\times$ and $1.153\times$, respectively, without requiring runtime feature estimation. The 37.5\% case is smoother but applies variable scale to 75\% of every tile.
 
 \begin{center}
 \fcolorbox{navy}{lightblue}{%
 \begin{minipage}{0.91\textwidth}
 \textbf{Customer-facing technical conclusion.}
 
-The cited work performs perceptual rectangling of still-image pairs using scene-dependent two-dimensional warps. It neither preserves calibrated ray geometry nor recovers the vertical rays absent at sensor corners, and it provides no six-camera, 360-degree, video, thermal, or FPGA validation. Measured EO/IR data show that correction confined to physical overlaps produces unusably high local scale. Expanding the correction to the outer 25\% of each tile side improves the EO result substantially, reducing the smooth peak to $1.23\times$, and is credible as a fixed non-metric operator-view mode. It still varies object scale with azimuth and must either crop the scalloped boundary, retain invalid pixels, or compress the source footprint. A geometrically true full-height rectangle requires additional vertical optical coverage or a masked/multi-face output representation.
+The cited work performs perceptual rectangling of still-image pairs using scene-dependent two-dimensional warps. It neither preserves calibrated ray geometry nor recovers the vertical rays absent at sensor corners, and it provides no six-camera, 360-degree, video, thermal, or FPGA validation. Measured EO/IR data show that correction confined to physical overlaps produces unusably high local scale. Expanding the correction to the outer 25\% and 37.5\% of each tile side improves the EO result substantially, reducing the smooth peak to $1.230\times$ and $1.153\times$, and is credible as a fixed non-metric operator-view mode. The smoother 37.5\% case changes scale over 75\% of each tile. Both variants still vary object scale with azimuth and must either crop the scalloped boundary, retain invalid pixels, or compress the source footprint. A geometrically true full-height rectangle requires additional vertical optical coverage or a masked/multi-face output representation.
 \end{minipage}}
 \end{center}
 
