@@ -218,14 +218,14 @@ class Master:
         print(f"  {label} -> {state}: {detail}")
         return ok
 
-    def trigger_ir_nuc(self, fpga_index, nuc_mode):
+    def trigger_ir_nuc(self, fpga_index, nuc_mode, ack_timeout=20.0):
         """Trigger IR NUC. cam='all' is firmware's sequential all-camera sweep."""
         icd_id = 7 if fpga_index == "all" else fpga_index + 1
         payload = bytearray(5)
         payload[2] = icd_id
         payload[3] = nuc_mode
         self.send(ICD_RITA_PIPA_CAMERA_CONTROL, bytes(payload))
-        found, seen = self.collect(3.0, want=ICD_PIPA_RITA_CAMERA_CONTROL_ACK)
+        found, seen = self.collect(ack_timeout, want=ICD_PIPA_RITA_CAMERA_CONTROL_ACK)
         label = "all" if fpga_index == "all" else f"cam{fpga_index}"
         if found is None:
             print(f"  IR {label} NUC{nuc_mode}: no ACK "
@@ -267,6 +267,8 @@ def main():
     g.add_argument("--mode-only", action="store_true",
                    help="only send MODE_CONTROL(BASIC), touch no camera")
     ap.add_argument("--off-secs", type=float, default=4.0)
+    ap.add_argument("--ack-timeout", type=float, default=20.0,
+                    help="seconds to wait for camera-control ACK")
     ap.add_argument("--no-mode", action="store_true",
                     help="skip the MODE_CONTROL(BASIC) preamble")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -293,7 +295,7 @@ def main():
             if not a.ir:
                 sys.exit("--nuc is only valid with --ir")
             print(f"[{time.strftime('%H:%M:%S')}] IR NUC{a.nuc}")
-            m.trigger_ir_nuc(cam, a.nuc)
+            m.trigger_ir_nuc(cam, a.nuc, a.ack_timeout)
         elif a.cycle:
             print(f"[{time.strftime('%H:%M:%S')}] OFF")
             m.set_power(cam, False, a.ir)
