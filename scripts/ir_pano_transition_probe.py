@@ -135,7 +135,10 @@ def region_stats(frame: np.ndarray) -> dict[str, object]:
 
 
 def capture_ila(tag: str, out_dir: Path) -> Path:
-    vivado = os.environ.get("VIVADO", "vivado")
+    vivado = os.environ.get("VIVADO")
+    if not vivado:
+        default_vivado = Path(r"C:\AMDDesignTools\2025.2\Vivado\bin\vivado.bat")
+        vivado = str(default_vivado) if default_vivado.exists() else "vivado"
     log_path = out_dir / f"vivado_ila_{tag}.log"
     run_checked(
         [vivado, "-mode", "batch", "-source", str(CAPTURE_ILA), "-tclargs", tag],

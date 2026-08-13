@@ -36,6 +36,7 @@ Examples:
   python scripts/eo_cam_power.py --cam 4 --off
   python scripts/eo_cam_power.py --cam 4 --on
   python scripts/eo_cam_power.py --cam all --on
+  python scripts/eo_cam_power.py --ir --cam all --nuc 1
   python scripts/eo_cam_power.py --status
 """
 
@@ -217,6 +218,30 @@ class Master:
         print(f"  {label} -> {state}: {detail}")
         return ok
 
+    def trigger_ir_nuc(self, fpga_index, nuc_mode):
+        """Trigger IR NUC. cam='all' is firmware's sequential all-camera sweep."""
+        icd_id = 7 if fpga_index == "all" else fpga_index + 1
+        payload = bytearray(5)
+        payload[2] = icd_id
+        payload[3] = nuc_mode
+        self.send(ICD_RITA_PIPA_CAMERA_CONTROL, bytes(payload))
+        found, seen = self.collect(3.0, want=ICD_PIPA_RITA_CAMERA_CONTROL_ACK)
+        label = "all" if fpga_index == "all" else f"cam{fpga_index}"
+        if found is None:
+            print(f"  IR {label} NUC{nuc_mode}: no ACK "
+                  f"(saw {', '.join(MSG_NAMES.get(k, hex(k)) for k in seen) or 'nothing'})")
+            return False
+        ack = found[2]
+        status = ack[11:17]
+        if fpga_index == "all":
+            detail = " ".join(f"{i}:{ACK_NAMES.get(s, s)}" for i, s in enumerate(status))
+            ok = bool(status) and all(s == 3 for s in status)
+        else:
+            detail = ACK_NAMES.get(status[fpga_index], status[fpga_index])
+            ok = len(status) == 6 and status[fpga_index] == 3
+        print(f"  IR {label} NUC{nuc_mode}: {detail}")
+        return ok
+
 
 def find_port():
     for p in list_ports.comports():
@@ -236,6 +261,8 @@ def main():
     g.add_argument("--on", action="store_true")
     g.add_argument("--off", action="store_true")
     g.add_argument("--cycle", action="store_true", help="off, wait, on")
+    g.add_argument("--nuc", type=int, choices=(1, 2),
+                   help="trigger IR NUC mode; --cam all runs the firmware's sequential sweep")
     g.add_argument("--status", action="store_true", help="just listen and report frames")
     g.add_argument("--mode-only", action="store_true",
                    help="only send MODE_CONTROL(BASIC), touch no camera")
@@ -262,7 +289,12 @@ def main():
             m.set_mode(ICD_OPERATION_BASIC)
         if a.mode_only:
             return 0
-        if a.cycle:
+        if a.nuc:
+            if not a.ir:
+                sys.exit("--nuc is only valid with --ir")
+            print(f"[{time.strftime('%H:%M:%S')}] IR NUC{a.nuc}")
+            m.trigger_ir_nuc(cam, a.nuc)
+        elif a.cycle:
             print(f"[{time.strftime('%H:%M:%S')}] OFF")
             m.set_power(cam, False, a.ir)
             time.sleep(a.off_secs)
