@@ -71,7 +71,7 @@ module IrV19StreamingRenderer #(
     // True only while idle and the direct line caches are inside the row-0
     // safe window.  The parent uses this as the IR panorama copy-start
     // qualifier; EO panorama must continue to use its DDR replay readiness.
-    output wire        start_ready,
+    output reg         start_ready,
 
     output wire [1:0]  dbg_state,
     output wire [8:0]  dbg_pano_y,
@@ -481,16 +481,18 @@ module IrV19StreamingRenderer #(
     wire row_ready_now = (rows_min >= need_row) && row_window_ok;
     reg row_ready_q;
     always @(posedge clk) begin
-        if (!rst_n)
+        if (!rst_n) begin
             row_ready_q <= 1'b0;
-        else
+            start_ready <= 1'b0;
+        end else begin
             row_ready_q <= row_ready_now;
+            start_ready <= (state == ST_IDLE) && row_ready_now;
+        end
     end
 
     assign frames_valid = (rows_e0 >= 11'd32) && (rows_e1 >= 11'd32) &&
                           (rows_e2 >= 11'd32) && (rows_e3 >= 11'd32) &&
                           (rows_e4 >= 11'd32) && (rows_e5 >= 11'd32);
-    assign start_ready = (state == ST_IDLE) && row_ready_now;
 
     always @(posedge clk) begin
         if (!rst_n || !start_copy) begin
