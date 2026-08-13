@@ -27,6 +27,7 @@ ip_build_tmp/
 ip_build_tmp2/
 timing_trials/
 tmp/
+builds/bit_archive/
 
 # Keep only the recreatable DDR IP source
 ip/*
