@@ -893,6 +893,8 @@ module PanoramaBase_DdrBlackFrame(
     wire        v19_replay_banks_ready;
     wire        v19_src_rd_valid;
     wire [28:0] v19_src_rd_addr;
+    wire [5:0]  ir_pano_cam_present;
+    wire        ir_pano_abort_copy;
     // The source-read port is shared: the six-camera panorama replay owns it
     // normally, the single-camera reader owns it in EO single.  Only one is
     // ever enabled, so this is a select rather than an arbiter.
@@ -948,6 +950,19 @@ module PanoramaBase_DdrBlackFrame(
     wire [5:0]  v19_forfeit_req;
     wire [5:0]  v19_forfeit_ack;
     wire [5:0]  v19_rejoin_shed;
+
+    IrPanoHealthGuard u_ir_pano_health_guard (
+        .clk              (c0_ddr4_ui_clk),
+        .rst              (ui_rst),
+        .ir_stack_mode    ((SRC_SEL == SRC_V19) && ir_stack_ui),
+        .copy_active      (copy_active),
+        .fb_write_pending (fb_write_pending),
+        .copy_progress    (copy_px_valid || (write_retiring && !cmd_write_capture)),
+        .cam_sof_pulse    (ir_cam_sof_pulse),
+        .rejoin_busy      (ir_rejoin_busy),
+        .cam_present      (ir_pano_cam_present),
+        .abort_copy       (ir_pano_abort_copy)
+    );
     wire        v19_release_timeout_seen;
     wire [15:0] v19_dbg_writer0, v19_dbg_writer1, v19_dbg_writer2;
     wire [15:0] v19_dbg_writer3, v19_dbg_writer4, v19_dbg_writer5;
@@ -2020,7 +2035,7 @@ module PanoramaBase_DdrBlackFrame(
             .rst_n      (rst_n),
             .clk        (c0_ddr4_ui_clk),
             .start_copy (v19_render_active && ir_stack_ui),
-            .cam_present(~ir_rejoin_busy),
+            .cam_present(ir_pano_cam_present),
             .cam0_clk(ir0_wr_clk), .cam0_hsync(ir0_wr_hsync), .cam0_vsync(ir0_wr_vsync), .cam0_pixel(ir0_wr_pixel),
             .cam1_clk(ir1_wr_clk), .cam1_hsync(ir1_wr_hsync), .cam1_vsync(ir1_wr_vsync), .cam1_pixel(ir1_wr_pixel),
             .cam2_clk(ir2_wr_clk), .cam2_hsync(ir2_wr_hsync), .cam2_vsync(ir2_wr_vsync), .cam2_pixel(ir2_wr_pixel),
@@ -3226,6 +3241,21 @@ module PanoramaBase_DdrBlackFrame(
                             end
                         end
                     end
+                end
+
+                // Direct-ingress IR panorama must never hold the shared
+                // output writer forever if a mode handoff or camera-side NUC
+                // leaves the renderer waiting for source rows.  The guard
+                // only asserts at a clean beat boundary; the partially written
+                // bank is uncommitted and will be overwritten by the next copy.
+                if (ir_pano_abort_copy) begin
+                    copy_active      <= 1'b0;
+                    fb_write_pending <= 1'b0;
+                    fb_pack_count    <= 6'd0;
+                    fb_burst_count   <= 18'd0;
+                    fb_fold_beat_x   <= 8'd0;
+                    fb_fold_row      <= 10'd0;
+                    fb_pack_buf      <= {DDR_APP_DATA_W{1'b0}};
                 end
 
                 // A retired camera write can hand this held-command slot
