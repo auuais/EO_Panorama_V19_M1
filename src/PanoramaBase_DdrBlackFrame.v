@@ -895,6 +895,7 @@ module PanoramaBase_DdrBlackFrame(
     wire [28:0] v19_src_rd_addr;
     wire [5:0]  ir_pano_cam_present;
     wire        ir_pano_abort_copy;
+    wire        ir_pano_start_ready;
     // The source-read port is shared: the six-camera panorama replay owns it
     // normally, the single-camera reader owns it in EO single.  Only one is
     // ever enabled, so this is a select rather than an arbiter.
@@ -1270,11 +1271,17 @@ module PanoramaBase_DdrBlackFrame(
     // pulse trigger for the ramp.
     wire copy_start_trig = (SRC_SEL == SRC_EO0RAW)
         ? (eo0_frame_edge_ui && eo_frames_valid)
-        // The V19 source is DDR-de-skewed.  Start a panorama copy when all six
-        // camera banks are available; the replay engine below is held in IDLE
-        // until copy_active, so each copy pass begins from source row zero and
-        // the renderer's row gates consume synchronized DDR rows on the same
-        // phase instead of chasing a free-running replay cache.
+        // The EO V19 source is DDR-de-skewed.  Start an EO panorama copy when
+        // all participating camera banks are available; the replay engine
+        // below is held in IDLE until copy_active, so each copy pass begins
+        // from source row zero and the renderer's row gates consume
+        // synchronized DDR rows on the same phase instead of chasing a
+        // free-running replay cache.
+        //
+        // IR panorama is different: it renders directly from the live IR line
+        // caches, so using EO replay readiness lets a mode handoff start at
+        // row 511 and park forever behind the strict row-window gate.  Its
+        // start qualifier comes from the IR renderer's own row-window test.
         // In IR single mode the same output-frame back-end is fed by the IR
         // capture buffer instead of the panorama replay, so the copy starts
         // on the selected IR camera's frame pulse rather than on a panorama
@@ -1282,6 +1289,7 @@ module PanoramaBase_DdrBlackFrame(
         : (SRC_SEL == SRC_V19)
         ? (ir_single_ui ? (ir_start_pending || (ir_stale && frame_edge))
          : eo_single_ui ? (v19_eo_start_pending || (v19_eo_stale && frame_edge))
+         : ir_stack_ui  ? ir_pano_start_ready
                         : v19_replay_banks_ready)
         : (SRC_SEL == SRC_EOSTK || SRC_SEL == SRC_EO0)
         ? (frame_edge && (eo_frames_valid || eo_frames_ready_seen))
@@ -1318,8 +1326,10 @@ module PanoramaBase_DdrBlackFrame(
     // [54] DDR calibrated, [53] camera-FIFO overflow, [52] displayed-bank
     // write conflict, [51] output FIFO overflow, [50:0] renderer word2.
     assign v19_dbg_rows_word2_strobe =
-        {4'hD, copy_start_trig, v19_rows_start_aligned,
-         v19_replay_banks_ready, v19_replay_frame_edge_ui,
+        {4'hD, copy_start_trig,
+         (ir_stack_ui ? ir_pano_start_ready : v19_rows_start_aligned),
+         (ir_stack_ui ? v19_frames_valid : v19_replay_banks_ready),
+         v19_replay_frame_edge_ui,
          running, c0_init_calib_complete,
          (dbg_capture_overflow_seen || v19_descriptor_collision_seen ||
           v19_no_common_epoch_seen), dbg_bank_conflict_seen,
@@ -2047,6 +2057,7 @@ module PanoramaBase_DdrBlackFrame(
             .px_data    (ir_rnd_px_data),
             .frame_done (ir_rnd_frame_done),
             .frames_valid(ir_rnd_frames_valid),
+            .start_ready(ir_pano_start_ready),
             .dbg_state(), .dbg_pano_y(), .dbg_pano_x(),
             .dbg_rows_min(), .dbg_row_target(), .dbg_word(ir_render_dbg)
         );

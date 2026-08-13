@@ -68,6 +68,10 @@ module IrV19StreamingRenderer #(
     output reg  [15:0] px_data,
     output reg         frame_done,
     output wire        frames_valid,
+    // True only while idle and the direct line caches are inside the row-0
+    // safe window.  The parent uses this as the IR panorama copy-start
+    // qualifier; EO panorama must continue to use its DDR replay readiness.
+    output wire        start_ready,
 
     output wire [1:0]  dbg_state,
     output wire [8:0]  dbg_pano_y,
@@ -288,7 +292,7 @@ module IrV19StreamingRenderer #(
     // lx within the segment is just the low 6 bits: ox0 = seg*64 by
     // construction, which is exactly why the ROM record can drop ox0.
     always @(posedge clk) begin
-        if (!rst_n) begin
+        if (!rst_n || !start_copy) begin
             v <= 9'd0;
             hit_ok[7] <= 1'b0; hit_ok[8] <= 1'b0; hit_ok[9] <= 1'b0;
         end else if (advance) begin
@@ -424,7 +428,7 @@ module IrV19StreamingRenderer #(
     // 4:2:2 as {Y, C} to match the shared fold/copy back end. IR has no chroma,
     // so it is synthesized neutral here and never stored anywhere upstream.
     always @(posedge clk) begin
-        if (!rst_n) begin
+        if (!rst_n || !start_copy) begin
             px_valid <= 1'b0; px_data <= `IR_V19_BLACK_PIXEL; frame_done <= 1'b0;
         end else if (advance) begin
             px_valid <= v[8];
@@ -474,20 +478,25 @@ module IrV19StreamingRenderer #(
     wire [10:0] gate_last_safe_rows = gate_min_row + 11'd30;
     wire row_window_ok = (STRICT_ROW_WINDOW == 0) ? 1'b1 :
                          (rows_max <= gate_last_safe_rows);
+    wire row_ready_now = (rows_min >= need_row) && row_window_ok;
     reg row_ready_q;
     always @(posedge clk) begin
         if (!rst_n)
             row_ready_q <= 1'b0;
         else
-            row_ready_q <= (rows_min >= need_row) && row_window_ok;
+            row_ready_q <= row_ready_now;
     end
 
     assign frames_valid = (rows_e0 >= 11'd32) && (rows_e1 >= 11'd32) &&
                           (rows_e2 >= 11'd32) && (rows_e3 >= 11'd32) &&
                           (rows_e4 >= 11'd32) && (rows_e5 >= 11'd32);
+    assign start_ready = (state == ST_IDLE) && row_ready_now;
 
     always @(posedge clk) begin
-        if (!rst_n) begin
+        if (!rst_n || !start_copy) begin
+            // start_copy is a transaction level, not a one-cycle pulse.  If
+            // the parent abandons a stalled copy after a NUC/mode handoff, the
+            // renderer must forget any ROW_WAIT/OUT state before the retry.
             state <= ST_IDLE; pano_x <= 12'd0; pano_y <= 9'd0; rom_row_base <= 15'd0; started <= 1'b0;
             gate_settle <= 2'd0;
         end else begin
@@ -495,7 +504,7 @@ module IrV19StreamingRenderer #(
                 ST_IDLE: begin
                     pano_x <= 12'd0; pano_y <= 9'd0; rom_row_base <= 15'd0;
                     gate_settle <= 2'd0;
-                    if (start_copy) begin state <= ST_ROW_WAIT; started <= 1'b1; end
+                    if (start_ready) begin state <= ST_ROW_WAIT; started <= 1'b1; end
                 end
                 ST_ROW_WAIT: begin
                     if (gate_settle != GATE_SETTLE)

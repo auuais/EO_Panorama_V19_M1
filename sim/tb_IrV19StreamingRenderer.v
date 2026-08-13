@@ -41,6 +41,7 @@ module tb_IrV19StreamingRenderer;
     reg         px_ready;
     wire [15:0] px_data;
     wire        frame_done, frames_valid;
+    wire        start_ready;
     wire [1:0]  dbg_state;
     wire [8:0]  dbg_pano_y;
     wire [11:0] dbg_pano_x;
@@ -67,6 +68,7 @@ module tb_IrV19StreamingRenderer;
         .cam5_clk(cclk), .cam5_hsync(chs), .cam5_vsync(cvs), .cam5_pixel(cpx),
         .px_valid(px_valid), .px_ready(px_ready), .px_data(px_data),
         .frame_done(frame_done), .frames_valid(frames_valid),
+        .start_ready(start_ready),
         .dbg_state(dbg_state), .dbg_pano_y(dbg_pano_y), .dbg_pano_x(dbg_pano_x),
         .dbg_rows_min(), .dbg_row_target(), .dbg_word()
     );
@@ -76,7 +78,7 @@ module tb_IrV19StreamingRenderer;
 
     integer fed_rows;
     integer x, y, frame, rows_this_frame;
-    integer late_start;
+    integer late_start, abort_before_ready, frames_to_feed;
 
     // Camera raster: vsync is active high, as in the hardware-proven IR single
     // path; each row is 640 pixels with hsync high, then a blanking gap.
@@ -91,9 +93,11 @@ module tb_IrV19StreamingRenderer;
     // (tb_IrV19LineCacheAlign) caught the pairing directly: wr_x=0 px=1.
     initial begin
         cvs = 0; chs = 0; fed_rows = 0;
-        late_start = $test$plusargs("late_start");
+        abort_before_ready = $test$plusargs("abort_before_ready");
+        late_start = $test$plusargs("late_start") || abort_before_ready;
+        frames_to_feed = abort_before_ready ? 3 : (late_start ? 2 : 1);
         repeat (20) @(negedge cclk);
-        for (frame = 0; frame < (late_start ? 2 : 1); frame = frame + 1) begin
+        for (frame = 0; frame < frames_to_feed; frame = frame + 1) begin
             cvs = 1;                              // rising edge = frame start
             fed_rows = 0;
             rows_this_frame = (late_start && frame == 0) ? 110 : FEED_ROWS;
@@ -168,10 +172,11 @@ module tb_IrV19StreamingRenderer;
     end
 
     integer got, errs, first_bad;
+    reg collect;
     reg [15:0] seen [0:ROWS*PANO_W-1];
 
     always @(posedge clk) begin
-        if (rst_n && px_valid && px_ready && got < ROWS*PANO_W) begin
+        if (rst_n && collect && px_valid && px_ready && got < ROWS*PANO_W) begin
             seen[got] = px_data;
             got = got + 1;
         end
@@ -192,18 +197,57 @@ module tb_IrV19StreamingRenderer;
 
     integer i, blackcnt;
     initial begin
-        errs = 0; got = 0; first_bad = -1; blackcnt = 0;
+        errs = 0; got = 0; first_bad = -1; blackcnt = 0; collect = 1'b1;
         repeat (10) @(posedge clk);
         rst_n = 1;
 
+        if ($test$plusargs("abort_before_ready")) begin
+            collect = 1'b0;
+
+            wait (fed_rows >= 100);
+            @(posedge clk); start_copy = 1'b1;
+            repeat (50) @(posedge clk);
+            if (dbg_state !== 2'd0) begin
+                $display("  FAIL: unsafe late start left IDLE, state=%0d", dbg_state);
+                errs = errs + 1;
+            end else begin
+                $display("  negative control: unsafe late start was held in IDLE");
+            end
+            start_copy = 1'b0;
+            repeat (8) @(posedge clk);
+            if (dbg_state !== 2'd0) begin
+                $display("  FAIL: start_copy deassertion did not leave renderer idle");
+                errs = errs + 1;
+            end
+
+            wait (start_ready);
+            @(posedge clk); start_copy = 1'b1;
+            wait (dbg_state == 2'd2);
+            repeat (20) @(posedge clk);
+            start_copy = 1'b0;
+            repeat (8) @(posedge clk);
+            if (dbg_state !== 2'd0 || px_valid !== 1'b0) begin
+                $display("  FAIL: abandoned IR panorama copy did not reset cleanly; state=%0d px_valid=%b",
+                         dbg_state, px_valid);
+                errs = errs + 1;
+            end else begin
+                $display("  negative control: abandoned copy resets renderer transaction");
+            end
+
+            wait (fed_rows == 0);
+            wait (start_ready);
+            got = 0; first_bad = -1; blackcnt = 0; collect = 1'b1;
+            @(posedge clk); start_copy = 1'b1;
+        end else begin
         // Normal starts inside the 32-line cache window. +late_start waits
         // until the first row's source span has already been overwritten,
         // proving the upper row-window gate waits for the next frame.
-        if ($test$plusargs("late_start"))
-            wait (fed_rows >= 100);
-        else
-            wait (fed_rows >= 45);
-        @(posedge clk); start_copy = 1'b1;
+            if ($test$plusargs("late_start"))
+                wait (fed_rows >= 100);
+            else
+                wait (fed_rows >= 45);
+            @(posedge clk); start_copy = 1'b1;
+        end
 
         wait (got >= ROWS*PANO_W);
         repeat (20) @(posedge clk);
