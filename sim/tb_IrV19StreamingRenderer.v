@@ -45,6 +45,8 @@ module tb_IrV19StreamingRenderer;
     wire [1:0]  dbg_state;
     wire [8:0]  dbg_pano_y;
     wire [11:0] dbg_pano_x;
+    wire [10:0] dbg_rows_min;
+    wire [10:0] dbg_row_target;
 
     `ifdef IR_V19_OLD_ROW_GATE
     localparam integer STRICT_ROW_WINDOW = 0;
@@ -59,7 +61,8 @@ module tb_IrV19StreamingRenderer;
     IrV19StreamingRenderer #(
         .STRICT_ROW_WINDOW(STRICT_ROW_WINDOW)
     ) dut (
-        .rst_n(rst_n), .clk(clk), .start_copy(start_copy), .cam_present(cam_present),
+        .rst_n(rst_n), .clk(clk), .start_copy(start_copy),
+        .source_frame_reset(1'b0), .cam_present(cam_present),
         .cam0_clk(cclk), .cam0_hsync(chs), .cam0_vsync(cvs), .cam0_pixel(cpx),
         .cam1_clk(cclk), .cam1_hsync(chs), .cam1_vsync(cvs), .cam1_pixel(cpx),
         .cam2_clk(cclk), .cam2_hsync(chs), .cam2_vsync(cvs), .cam2_pixel(cpx),
@@ -70,7 +73,9 @@ module tb_IrV19StreamingRenderer;
         .frame_done(frame_done), .frames_valid(frames_valid),
         .start_ready(start_ready),
         .dbg_state(dbg_state), .dbg_pano_y(dbg_pano_y), .dbg_pano_x(dbg_pano_x),
-        .dbg_rows_min(), .dbg_row_target(), .dbg_word()
+        .dbg_rows_min(dbg_rows_min), .dbg_row_target(dbg_row_target),
+        .source_need_valid(), .source_need_row(), .source_start_row(),
+        .dbg_word()
     );
 
     reg [15:0] golden [0:ROWS*PANO_W-1];
@@ -190,8 +195,9 @@ module tb_IrV19StreamingRenderer;
         forever begin
             repeat (200000) @(posedge clk);
             hb = hb + 1;
-            $display("  [hb %0d] t=%0t fed_rows=%0d got=%0d state=%0d y=%0d x=%0d",
-                     hb, $time, fed_rows, got, dbg_state, dbg_pano_y, dbg_pano_x);
+            $display("  [hb %0d] t=%0t fed_rows=%0d got=%0d state=%0d start=%b ready=%b rows=%0d need=%0d y=%0d x=%0d",
+                     hb, $time, fed_rows, got, dbg_state, start_copy, start_ready,
+                     dbg_rows_min, dbg_row_target, dbg_pano_y, dbg_pano_x);
         end
     end
 
@@ -245,7 +251,7 @@ module tb_IrV19StreamingRenderer;
             if ($test$plusargs("late_start"))
                 wait (fed_rows >= 100);
             else
-                wait (fed_rows >= 45);
+                wait (start_ready);
             @(posedge clk); start_copy = 1'b1;
         end
 

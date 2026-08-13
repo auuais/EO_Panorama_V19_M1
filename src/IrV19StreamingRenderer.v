@@ -1,13 +1,12 @@
 `timescale 1ns / 1ps
 `include "IrV19PanoramaParams.vh"
 
-// IR panorama renderer, direct ingress.
+// IR panorama renderer.
 //
-// Six IR cameras feed six line caches directly -- no DDR ring, no frame-set
-// lease, no replay. That is only sound because the cameras are genlock slaves
-// whose frame starts agree to within 274 ns (measured 2026-08-06, after the
-// generator was corrected from 59.94 Hz to 29.97 Hz), and because the RowRun
-// tables show the working set for any one output row is at most 13 source rows.
+// Six source rasters feed six line caches.  The current top-level feeds those
+// rasters from IrV19DdrReplay, so mode/NUC interruptions are absorbed by the
+// same DDR frame-set machinery used by EO while this renderer keeps the small
+// row-window cache and one-pixel-per-cycle RowRun pipeline.
 //
 // Initiation interval is 1. The budget forces it: 3576x480 at 30 Hz is
 // 1,716,480 renderer pixels against 7.78 M ui_clk cycles per frame, before the
@@ -51,6 +50,7 @@ module IrV19StreamingRenderer #(
     input  wire rst_n,
     input  wire clk,                  // ui_clk
     input  wire start_copy,
+    input  wire source_frame_reset,
     // One bit per camera; low means that camera is not streaming. An absent
     // camera must not hold the row gate low forever, and its unique region is
     // rendered black rather than showing whatever is stale in its cache.
@@ -68,9 +68,9 @@ module IrV19StreamingRenderer #(
     output reg  [15:0] px_data,
     output reg         frame_done,
     output wire        frames_valid,
-    // True only while idle and the direct line caches are inside the row-0
-    // safe window.  The parent uses this as the IR panorama copy-start
-    // qualifier; EO panorama must continue to use its DDR replay readiness.
+    // True only while idle and the line caches are inside the row-0 safe
+    // window.  Retained for debug and for benches that drive live rasters; the
+    // DDR-backed top-level starts from the replay/frame-set bank lease.
     output reg         start_ready,
 
     output wire [1:0]  dbg_state,
@@ -78,6 +78,9 @@ module IrV19StreamingRenderer #(
     output wire [11:0] dbg_pano_x,
     output wire [10:0] dbg_rows_min,
     output wire [10:0] dbg_row_target,
+    output wire        source_need_valid,
+    output wire [10:0] source_need_row,
+    output wire [10:0] source_start_row,
     output wire [63:0] dbg_word
 );
     localparam integer W      = `IR_V19_PER_CAM_W_MAX;   // 621
@@ -106,22 +109,22 @@ module IrV19StreamingRenderer #(
     wire        hit_y0 [0:5];
     wire        hit_y1 [0:5];
 
-    IrV19LineCache u_lc0 (.rst_n(rst_n), .wr_clk(cam0_clk), .wr_hsync(cam0_hsync), .wr_vsync(cam0_vsync), .wr_frame_reset(1'b0), .wr_pixel(cam0_pixel),
+    IrV19LineCache u_lc0 (.rst_n(rst_n), .wr_clk(cam0_clk), .wr_hsync(cam0_hsync), .wr_vsync(cam0_vsync), .wr_frame_reset(source_frame_reset), .wr_start_row(source_start_row), .wr_pixel(cam0_pixel),
         .rd_clk(clk), .rd_en(advance), .rd_x(rd_x[0]), .rd_y0(rd_y0[0]), .rd_y1(rd_y1[0]), .rd_pixel_y0(px_y0[0]), .rd_pixel_y1(px_y1[0]),
         .captured_rows(rows[0]), .frame_toggle(), .field_height(), .current_epoch(), .rd_hit_y0(hit_y0[0]), .rd_hit_y1(hit_y1[0]));
-    IrV19LineCache u_lc1 (.rst_n(rst_n), .wr_clk(cam1_clk), .wr_hsync(cam1_hsync), .wr_vsync(cam1_vsync), .wr_frame_reset(1'b0), .wr_pixel(cam1_pixel),
+    IrV19LineCache u_lc1 (.rst_n(rst_n), .wr_clk(cam1_clk), .wr_hsync(cam1_hsync), .wr_vsync(cam1_vsync), .wr_frame_reset(source_frame_reset), .wr_start_row(source_start_row), .wr_pixel(cam1_pixel),
         .rd_clk(clk), .rd_en(advance), .rd_x(rd_x[1]), .rd_y0(rd_y0[1]), .rd_y1(rd_y1[1]), .rd_pixel_y0(px_y0[1]), .rd_pixel_y1(px_y1[1]),
         .captured_rows(rows[1]), .frame_toggle(), .field_height(), .current_epoch(), .rd_hit_y0(hit_y0[1]), .rd_hit_y1(hit_y1[1]));
-    IrV19LineCache u_lc2 (.rst_n(rst_n), .wr_clk(cam2_clk), .wr_hsync(cam2_hsync), .wr_vsync(cam2_vsync), .wr_frame_reset(1'b0), .wr_pixel(cam2_pixel),
+    IrV19LineCache u_lc2 (.rst_n(rst_n), .wr_clk(cam2_clk), .wr_hsync(cam2_hsync), .wr_vsync(cam2_vsync), .wr_frame_reset(source_frame_reset), .wr_start_row(source_start_row), .wr_pixel(cam2_pixel),
         .rd_clk(clk), .rd_en(advance), .rd_x(rd_x[2]), .rd_y0(rd_y0[2]), .rd_y1(rd_y1[2]), .rd_pixel_y0(px_y0[2]), .rd_pixel_y1(px_y1[2]),
         .captured_rows(rows[2]), .frame_toggle(), .field_height(), .current_epoch(), .rd_hit_y0(hit_y0[2]), .rd_hit_y1(hit_y1[2]));
-    IrV19LineCache u_lc3 (.rst_n(rst_n), .wr_clk(cam3_clk), .wr_hsync(cam3_hsync), .wr_vsync(cam3_vsync), .wr_frame_reset(1'b0), .wr_pixel(cam3_pixel),
+    IrV19LineCache u_lc3 (.rst_n(rst_n), .wr_clk(cam3_clk), .wr_hsync(cam3_hsync), .wr_vsync(cam3_vsync), .wr_frame_reset(source_frame_reset), .wr_start_row(source_start_row), .wr_pixel(cam3_pixel),
         .rd_clk(clk), .rd_en(advance), .rd_x(rd_x[3]), .rd_y0(rd_y0[3]), .rd_y1(rd_y1[3]), .rd_pixel_y0(px_y0[3]), .rd_pixel_y1(px_y1[3]),
         .captured_rows(rows[3]), .frame_toggle(), .field_height(), .current_epoch(), .rd_hit_y0(hit_y0[3]), .rd_hit_y1(hit_y1[3]));
-    IrV19LineCache u_lc4 (.rst_n(rst_n), .wr_clk(cam4_clk), .wr_hsync(cam4_hsync), .wr_vsync(cam4_vsync), .wr_frame_reset(1'b0), .wr_pixel(cam4_pixel),
+    IrV19LineCache u_lc4 (.rst_n(rst_n), .wr_clk(cam4_clk), .wr_hsync(cam4_hsync), .wr_vsync(cam4_vsync), .wr_frame_reset(source_frame_reset), .wr_start_row(source_start_row), .wr_pixel(cam4_pixel),
         .rd_clk(clk), .rd_en(advance), .rd_x(rd_x[4]), .rd_y0(rd_y0[4]), .rd_y1(rd_y1[4]), .rd_pixel_y0(px_y0[4]), .rd_pixel_y1(px_y1[4]),
         .captured_rows(rows[4]), .frame_toggle(), .field_height(), .current_epoch(), .rd_hit_y0(hit_y0[4]), .rd_hit_y1(hit_y1[4]));
-    IrV19LineCache u_lc5 (.rst_n(rst_n), .wr_clk(cam5_clk), .wr_hsync(cam5_hsync), .wr_vsync(cam5_vsync), .wr_frame_reset(1'b0), .wr_pixel(cam5_pixel),
+    IrV19LineCache u_lc5 (.rst_n(rst_n), .wr_clk(cam5_clk), .wr_hsync(cam5_hsync), .wr_vsync(cam5_vsync), .wr_frame_reset(source_frame_reset), .wr_start_row(source_start_row), .wr_pixel(cam5_pixel),
         .rd_clk(clk), .rd_en(advance), .rd_x(rd_x[5]), .rd_y0(rd_y0[5]), .rd_y1(rd_y1[5]), .rd_pixel_y0(px_y0[5]), .rd_pixel_y1(px_y1[5]),
         .captured_rows(rows[5]), .frame_toggle(), .field_height(), .current_epoch(), .rd_hit_y0(hit_y0[5]), .rd_hit_y1(hit_y1[5]));
 
@@ -540,6 +543,13 @@ module IrV19StreamingRenderer #(
     assign dbg_pano_x     = pano_x;
     assign dbg_rows_min   = rows_min;
     assign dbg_row_target = need_row;
+    assign source_need_valid = start_copy;
+    // Replay's dbg_row names the source row currently being emitted; this
+    // cache's captured_rows names the next row available after a completed
+    // write.  Ask replay to stop one source row before the lower gate target
+    // so the 32-line IR cache window is not overrun by a one-row prefetch.
+    assign source_need_row   = (need_row == 11'd0) ? 11'd0 : (need_row - 11'd1);
+    assign source_start_row  = gate_min_row;
     // Exactly 64 bits. The previous version concatenated to 60 and was
     // assigned to a 64-bit output, so it was left-padded with zeros and the
     // signature did not sit at [63:60] -- it would have decoded as garbage.

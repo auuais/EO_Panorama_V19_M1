@@ -36,6 +36,7 @@ module IrV19LineCache #(
     input  wire wr_hsync,
     input  wire wr_vsync,
     input  wire wr_frame_reset,
+    input  wire [10:0] wr_start_row,
     input  wire [PIX_W-1:0] wr_pixel,
     input  wire rd_clk,
     // Read enable. Same reason as the ROM's: the renderer stalls when its
@@ -101,6 +102,7 @@ module IrV19LineCache #(
     // additional active line is accepted.
     wire wr_frame_restart = wr_frame_reset || wr_frame_start || wrap_pending;
     wire wr_line_complete = wr_active && (wr_x == WIDTH-1);
+    wire [AW-1:0] restart_row = wr_frame_reset ? wr_start_row : {AW{1'b0}};
 
     always @(posedge wr_clk) begin
         if (!rst_n) begin
@@ -117,9 +119,9 @@ module IrV19LineCache #(
                 field_height_wr <= wr_y;
                 field_height_gray_wr <= bin_to_gray(wr_y);
                 wr_x     <= 0;
-                wr_y     <= 0;
-                wr_rows_gray <= 0;
-                wr_slot  <= 0;
+                wr_y     <= restart_row;
+                wr_rows_gray <= bin_to_gray(restart_row);
+                wr_slot  <= restart_row[SLOT_W-1:0];
                 wrap_pending <= 1'b0;
                 frame_tog <= ~frame_tog;
                 wr_epoch <= wr_epoch + 1'b1;

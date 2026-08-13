@@ -209,6 +209,8 @@ module PanoramaBase_DdrBlackFrame(
     localparam [28:0]  BANK1_BASE    = BEATS_TOTAL_MAX * ADDR_STRIDE;
     localparam [28:0]  V19_SRC_BASE_ADDR    = 29'd2100000;
     localparam [28:0]  V19_SRC_FRAME_STRIDE = 29'd1036800;  // 1920*1080*2 bytes, low-256 payload: 129600 beats * 8
+    localparam [28:0]  IR_V19_SRC_BASE_ADDR    = 29'd28000000;
+    localparam [28:0]  IR_V19_SRC_FRAME_STRIDE = 29'd81920;  // 640*512*1 byte: 10240 beats * 8
     // Four leased frame banks per camera (4 * 1,036,800 = 4,147,200), plus a
     // deliberate 8-address stagger so the six cameras do not share a DRAM bank.
     //
@@ -229,6 +231,8 @@ module PanoramaBase_DdrBlackFrame(
     // overlaps its neighbour.
     localparam [28:0]  V19_SRC_CAM_STRIDE   = 29'd4147208;
     localparam [28:0]  V19_SRC_ROW_STRIDE   = 29'd960;      // 120 beats/row * 8
+    localparam [28:0]  IR_V19_SRC_CAM_STRIDE = 29'd327688;  // four 81,920-address banks + 8-address bank stagger
+    localparam [28:0]  IR_V19_SRC_ROW_STRIDE = 29'd160;     // 20 beats/row * 8
     // 2026-07-07: tried temporarily dropping this to 4 (see
     // docs/DDR_EO_PANORAMA_FIX_PLAN.md section 17) to test whether the
     // ILA-confirmed first-64-bit-chunk-of-every-read-burst corruption was
@@ -891,6 +895,8 @@ module PanoramaBase_DdrBlackFrame(
     wire        eo_frames_valid;  // all six EO tile buffers have captured >=1 frame
     wire        v19_replay_frame_edge_ui;
     wire        v19_replay_banks_ready;
+    wire        irv19_replay_frame_edge_ui;
+    wire        irv19_replay_banks_ready;
     wire        v19_src_rd_valid;
     wire [28:0] v19_src_rd_addr;
     wire [5:0]  ir_pano_cam_present;
@@ -901,6 +907,8 @@ module PanoramaBase_DdrBlackFrame(
     // ever enabled, so this is a select rather than an arbiter.
     wire        v19_replay_rd_valid;
     wire [28:0] v19_replay_rd_addr;
+    wire        irv19_replay_rd_valid;
+    wire [28:0] irv19_replay_rd_addr;
     // Declared at module scope because copy_start_trig references them and it
     // appears before the generate block; Vivado's elaborator binds a forward
     // reference inside a generate to an implicit local net otherwise.
@@ -921,25 +929,46 @@ module PanoramaBase_DdrBlackFrame(
     wire [2:0]  v19_replay_dbg_state;
     wire        v19_cap0_empty, v19_cap1_empty, v19_cap2_empty;
     wire        v19_cap3_empty, v19_cap4_empty, v19_cap5_empty;
+    wire        irv19_cap0_empty, irv19_cap1_empty, irv19_cap2_empty;
+    wire        irv19_cap3_empty, irv19_cap4_empty, irv19_cap5_empty;
     wire        v19_cap0_marker, v19_cap1_marker, v19_cap2_marker;
     wire        v19_cap3_marker, v19_cap4_marker, v19_cap5_marker;
+    wire        irv19_cap0_marker, irv19_cap1_marker, irv19_cap2_marker;
+    wire        irv19_cap3_marker, irv19_cap4_marker, irv19_cap5_marker;
     wire [1:0]  v19_cap0_marker_bank, v19_cap1_marker_bank, v19_cap2_marker_bank;
     wire [1:0]  v19_cap3_marker_bank, v19_cap4_marker_bank, v19_cap5_marker_bank;
+    wire [1:0]  irv19_cap0_marker_bank, irv19_cap1_marker_bank, irv19_cap2_marker_bank;
+    wire [1:0]  irv19_cap3_marker_bank, irv19_cap4_marker_bank, irv19_cap5_marker_bank;
     wire [15:0] v19_cap0_marker_epoch, v19_cap1_marker_epoch, v19_cap2_marker_epoch;
     wire [15:0] v19_cap3_marker_epoch, v19_cap4_marker_epoch, v19_cap5_marker_epoch;
+    wire [15:0] irv19_cap0_marker_epoch, irv19_cap1_marker_epoch, irv19_cap2_marker_epoch;
+    wire [15:0] irv19_cap3_marker_epoch, irv19_cap4_marker_epoch, irv19_cap5_marker_epoch;
     wire [28:0] v19_cap0_addr, v19_cap1_addr, v19_cap2_addr;
     wire [28:0] v19_cap3_addr, v19_cap4_addr, v19_cap5_addr;
+    wire [28:0] irv19_cap0_addr, irv19_cap1_addr, irv19_cap2_addr;
+    wire [28:0] irv19_cap3_addr, irv19_cap4_addr, irv19_cap5_addr;
     wire [DDR_APP_DATA_W-1:0] v19_cap0_data, v19_cap1_data, v19_cap2_data;
     wire [DDR_APP_DATA_W-1:0] v19_cap3_data, v19_cap4_data, v19_cap5_data;
+    wire [DDR_APP_DATA_W-1:0] irv19_cap0_data, irv19_cap1_data, irv19_cap2_data;
+    wire [DDR_APP_DATA_W-1:0] irv19_cap3_data, irv19_cap4_data, irv19_cap5_data;
     reg         v19_cap0_pop, v19_cap1_pop, v19_cap2_pop;
     reg         v19_cap3_pop, v19_cap4_pop, v19_cap5_pop;
+    reg         irv19_cap0_pop, irv19_cap1_pop, irv19_cap2_pop;
+    reg         irv19_cap3_pop, irv19_cap4_pop, irv19_cap5_pop;
     wire [5:0]  v19_cap_desc_valid;
+    wire [5:0]  irv19_cap_desc_valid;
     wire [1:0]  v19_cap0_desc_bank, v19_cap1_desc_bank, v19_cap2_desc_bank;
     wire [1:0]  v19_cap3_desc_bank, v19_cap4_desc_bank, v19_cap5_desc_bank;
+    wire [1:0]  irv19_cap0_desc_bank, irv19_cap1_desc_bank, irv19_cap2_desc_bank;
+    wire [1:0]  irv19_cap3_desc_bank, irv19_cap4_desc_bank, irv19_cap5_desc_bank;
     wire [15:0] v19_cap0_desc_epoch, v19_cap1_desc_epoch, v19_cap2_desc_epoch;
     wire [15:0] v19_cap3_desc_epoch, v19_cap4_desc_epoch, v19_cap5_desc_epoch;
+    wire [15:0] irv19_cap0_desc_epoch, irv19_cap1_desc_epoch, irv19_cap2_desc_epoch;
+    wire [15:0] irv19_cap3_desc_epoch, irv19_cap4_desc_epoch, irv19_cap5_desc_epoch;
     wire [5:0]  v19_free_valid;
     wire [5:0]  v19_free_ready;
+    wire [5:0]  irv19_free_valid;
+    wire [5:0]  irv19_free_ready;
 
     // Rejoin supervisor plumbing.  See src/EoV19CamRejoin.v for why a camera
     // power cycle needs every one of these re-baselined together.
@@ -951,6 +980,14 @@ module PanoramaBase_DdrBlackFrame(
     wire [5:0]  v19_forfeit_req;
     wire [5:0]  v19_forfeit_ack;
     wire [5:0]  v19_rejoin_shed;
+    wire [5:0]  irv19_join_enable;
+    wire [5:0]  irv19_cap_fifo_rst;
+    wire [5:0]  irv19_free_fifo_rst;
+    wire [5:0]  irv19_cam_alive_tgl;
+    wire [5:0]  irv19_rejoin_busy;
+    wire [5:0]  irv19_forfeit_req;
+    wire [5:0]  irv19_forfeit_ack;
+    wire [5:0]  irv19_rejoin_shed;
 
     IrPanoHealthGuard u_ir_pano_health_guard (
         .clk              (c0_ddr4_ui_clk),
@@ -965,6 +1002,7 @@ module PanoramaBase_DdrBlackFrame(
         .abort_copy       (ir_pano_abort_copy)
     );
     wire        v19_release_timeout_seen;
+    wire        irv19_release_timeout_seen;
     wire [15:0] v19_dbg_writer0, v19_dbg_writer1, v19_dbg_writer2;
     wire [15:0] v19_dbg_writer3, v19_dbg_writer4, v19_dbg_writer5;
     wire [3:0]  v19_rejoin_state0, v19_rejoin_state1, v19_rejoin_state2;
@@ -1007,22 +1045,37 @@ module PanoramaBase_DdrBlackFrame(
     end
     wire [1:0]  v19_free_bank0, v19_free_bank1, v19_free_bank2;
     wire [1:0]  v19_free_bank3, v19_free_bank4, v19_free_bank5;
+    wire [1:0]  irv19_free_bank0, irv19_free_bank1, irv19_free_bank2;
+    wire [1:0]  irv19_free_bank3, irv19_free_bank4, irv19_free_bank5;
     wire        v19_frameset_lease_valid;
     wire [15:0] v19_frameset_lease_epoch;
     wire [1:0]  v19_frameset_bank0, v19_frameset_bank1, v19_frameset_bank2;
     wire [1:0]  v19_frameset_bank3, v19_frameset_bank4, v19_frameset_bank5;
+    wire        irv19_frameset_lease_valid;
+    wire [15:0] irv19_frameset_lease_epoch;
+    wire [1:0]  irv19_frameset_bank0, irv19_frameset_bank1, irv19_frameset_bank2;
+    wire [1:0]  irv19_frameset_bank3, irv19_frameset_bank4, irv19_frameset_bank5;
     wire        v19_descriptor_collision_seen;
     wire        v19_no_common_epoch_seen;
     wire [23:0] v19_descriptor_valid_map;
     wire [3:0]  v19_frameset_dbg_state;
+    wire        irv19_descriptor_collision_seen;
+    wire        irv19_no_common_epoch_seen;
+    wire [23:0] irv19_descriptor_valid_map;
+    wire [3:0]  irv19_frameset_dbg_state;
     wire        v19_cap0_overflow, v19_cap1_overflow, v19_cap2_overflow;
     wire        v19_cap3_overflow, v19_cap4_overflow, v19_cap5_overflow;
     wire [11:0] v19_cap0_level, v19_cap1_level, v19_cap2_level;
     wire [11:0] v19_cap3_level, v19_cap4_level, v19_cap5_level;
+    wire        irv19_cap0_overflow, irv19_cap1_overflow, irv19_cap2_overflow;
+    wire        irv19_cap3_overflow, irv19_cap4_overflow, irv19_cap5_overflow;
+    wire [11:0] irv19_cap0_level, irv19_cap1_level, irv19_cap2_level;
+    wire [11:0] irv19_cap3_level, irv19_cap4_level, irv19_cap5_level;
     // Per-camera liveness, driven by the EoV19CamPresence instances inside
     // the SRC_V19 generate block.  Declared at module scope because
     // v19_rows_start_aligned above consumes it well before that block.
     wire [5:0] v19_cam_present;
+    wire [5:0] irv19_cam_present;
 
     //------------------------------------------------------------------------
     // Frame-set lease release.
@@ -1078,9 +1131,13 @@ module PanoramaBase_DdrBlackFrame(
                                   (fb_burst_count == active_beats - 18'd1);
     wire v19_consumer_done = (SRC_SEL == SRC_V19) &&
                              (v19_copy_frame_done || !v19_panorama_consuming);
+    wire irv19_consumer_done = (SRC_SEL == SRC_V19) &&
+                               (v19_copy_frame_done || !ir_stack_ui);
 
     wire [10:0] v19_cap0_row, v19_cap1_row, v19_cap2_row;
     wire [10:0] v19_cap3_row, v19_cap4_row, v19_cap5_row;
+    wire [10:0] irv19_cap0_row, irv19_cap1_row, irv19_cap2_row;
+    wire [10:0] irv19_cap3_row, irv19_cap4_row, irv19_cap5_row;
     reg  [11:0] v19_cap0_peak, v19_cap1_peak, v19_cap2_peak;
     reg  [11:0] v19_cap3_peak, v19_cap4_peak, v19_cap5_peak;
     // A capture FIFO is only a candidate for the write arbiter when it holds
@@ -1088,12 +1145,39 @@ module PanoramaBase_DdrBlackFrame(
     // supervisor is re-initialising would hand the DDR write engine a garbage
     // address, and a phantom marker would corrupt the frame-set manager's
     // ownership ring.
-    wire v19_cap0_selectable = !v19_cap0_empty && !v19_rejoin_busy[0];
-    wire v19_cap1_selectable = !v19_cap1_empty && !v19_rejoin_busy[1];
-    wire v19_cap2_selectable = !v19_cap2_empty && !v19_rejoin_busy[2];
-    wire v19_cap3_selectable = !v19_cap3_empty && !v19_rejoin_busy[3];
-    wire v19_cap4_selectable = !v19_cap4_empty && !v19_rejoin_busy[4];
-    wire v19_cap5_selectable = !v19_cap5_empty && !v19_rejoin_busy[5];
+    wire irv19_capture_active = (SRC_SEL == SRC_V19) && ir_stack_ui;
+    wire cap0_empty_mux = irv19_capture_active ? irv19_cap0_empty : v19_cap0_empty;
+    wire cap1_empty_mux = irv19_capture_active ? irv19_cap1_empty : v19_cap1_empty;
+    wire cap2_empty_mux = irv19_capture_active ? irv19_cap2_empty : v19_cap2_empty;
+    wire cap3_empty_mux = irv19_capture_active ? irv19_cap3_empty : v19_cap3_empty;
+    wire cap4_empty_mux = irv19_capture_active ? irv19_cap4_empty : v19_cap4_empty;
+    wire cap5_empty_mux = irv19_capture_active ? irv19_cap5_empty : v19_cap5_empty;
+    wire [5:0] cap_rejoin_busy_mux = irv19_capture_active ? irv19_rejoin_busy : v19_rejoin_busy;
+    wire [28:0] cap0_addr_mux = irv19_capture_active ? irv19_cap0_addr : v19_cap0_addr;
+    wire [28:0] cap1_addr_mux = irv19_capture_active ? irv19_cap1_addr : v19_cap1_addr;
+    wire [28:0] cap2_addr_mux = irv19_capture_active ? irv19_cap2_addr : v19_cap2_addr;
+    wire [28:0] cap3_addr_mux = irv19_capture_active ? irv19_cap3_addr : v19_cap3_addr;
+    wire [28:0] cap4_addr_mux = irv19_capture_active ? irv19_cap4_addr : v19_cap4_addr;
+    wire [28:0] cap5_addr_mux = irv19_capture_active ? irv19_cap5_addr : v19_cap5_addr;
+    wire [DDR_APP_DATA_W-1:0] cap0_data_mux = irv19_capture_active ? irv19_cap0_data : v19_cap0_data;
+    wire [DDR_APP_DATA_W-1:0] cap1_data_mux = irv19_capture_active ? irv19_cap1_data : v19_cap1_data;
+    wire [DDR_APP_DATA_W-1:0] cap2_data_mux = irv19_capture_active ? irv19_cap2_data : v19_cap2_data;
+    wire [DDR_APP_DATA_W-1:0] cap3_data_mux = irv19_capture_active ? irv19_cap3_data : v19_cap3_data;
+    wire [DDR_APP_DATA_W-1:0] cap4_data_mux = irv19_capture_active ? irv19_cap4_data : v19_cap4_data;
+    wire [DDR_APP_DATA_W-1:0] cap5_data_mux = irv19_capture_active ? irv19_cap5_data : v19_cap5_data;
+    wire cap0_marker_mux = irv19_capture_active ? irv19_cap0_marker : v19_cap0_marker;
+    wire cap1_marker_mux = irv19_capture_active ? irv19_cap1_marker : v19_cap1_marker;
+    wire cap2_marker_mux = irv19_capture_active ? irv19_cap2_marker : v19_cap2_marker;
+    wire cap3_marker_mux = irv19_capture_active ? irv19_cap3_marker : v19_cap3_marker;
+    wire cap4_marker_mux = irv19_capture_active ? irv19_cap4_marker : v19_cap4_marker;
+    wire cap5_marker_mux = irv19_capture_active ? irv19_cap5_marker : v19_cap5_marker;
+
+    wire v19_cap0_selectable = !cap0_empty_mux && !cap_rejoin_busy_mux[0];
+    wire v19_cap1_selectable = !cap1_empty_mux && !cap_rejoin_busy_mux[1];
+    wire v19_cap2_selectable = !cap2_empty_mux && !cap_rejoin_busy_mux[2];
+    wire v19_cap3_selectable = !cap3_empty_mux && !cap_rejoin_busy_mux[3];
+    wire v19_cap4_selectable = !cap4_empty_mux && !cap_rejoin_busy_mux[4];
+    wire v19_cap5_selectable = !cap5_empty_mux && !cap_rejoin_busy_mux[5];
 
     // Consecutive capture beats served from one camera before the arbiter
     // rotates.
@@ -1147,71 +1231,71 @@ module PanoramaBase_DdrBlackFrame(
         end
     end
 
+    wire [5:0] cap_selectable_mux = {v19_cap5_selectable, v19_cap4_selectable,
+                                     v19_cap3_selectable, v19_cap2_selectable,
+                                     v19_cap1_selectable, v19_cap0_selectable};
+
+    function [28:0] cap_addr_by_sel;
+        input [2:0] sel;
+        begin
+            case (sel)
+                3'd0: cap_addr_by_sel = cap0_addr_mux;
+                3'd1: cap_addr_by_sel = cap1_addr_mux;
+                3'd2: cap_addr_by_sel = cap2_addr_mux;
+                3'd3: cap_addr_by_sel = cap3_addr_mux;
+                3'd4: cap_addr_by_sel = cap4_addr_mux;
+                default: cap_addr_by_sel = cap5_addr_mux;
+            endcase
+        end
+    endfunction
+
+    function [DDR_APP_DATA_W-1:0] cap_data_by_sel;
+        input [2:0] sel;
+        begin
+            case (sel)
+                3'd0: cap_data_by_sel = cap0_data_mux;
+                3'd1: cap_data_by_sel = cap1_data_mux;
+                3'd2: cap_data_by_sel = cap2_data_mux;
+                3'd3: cap_data_by_sel = cap3_data_mux;
+                3'd4: cap_data_by_sel = cap4_data_mux;
+                default: cap_data_by_sel = cap5_data_mux;
+            endcase
+        end
+    endfunction
+
+    function cap_marker_by_sel;
+        input [2:0] sel;
+        begin
+            case (sel)
+                3'd0: cap_marker_by_sel = cap0_marker_mux;
+                3'd1: cap_marker_by_sel = cap1_marker_mux;
+                3'd2: cap_marker_by_sel = cap2_marker_mux;
+                3'd3: cap_marker_by_sel = cap3_marker_mux;
+                3'd4: cap_marker_by_sel = cap4_marker_mux;
+                default: cap_marker_by_sel = cap5_marker_mux;
+            endcase
+        end
+    endfunction
+
+    integer cap_scan_i;
+    reg [3:0] cap_scan_sel;
     always @* begin
         v19_cap_sel_valid = 1'b0;
         v19_cap_sel = v19_cap_rr;
         v19_cap_sel_addr = 29'd0;
         v19_cap_sel_data = {DDR_APP_DATA_W{1'b0}};
         v19_cap_sel_marker = 1'b0;
-        case (v19_cap_rr)
-            3'd0: begin
-                if (v19_cap0_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
-                else if (v19_cap1_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
-                else if (v19_cap2_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
-                else if (v19_cap3_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
-                else if (v19_cap4_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
-                else if (v19_cap5_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
+        for (cap_scan_i = 0; cap_scan_i < 6; cap_scan_i = cap_scan_i + 1) begin
+            cap_scan_sel = {1'b0, v19_cap_rr} + cap_scan_i[3:0];
+            if (cap_scan_sel >= 4'd6)
+                cap_scan_sel = cap_scan_sel - 4'd6;
+            if (!v19_cap_sel_valid && cap_selectable_mux[cap_scan_sel[2:0]]) begin
+                v19_cap_sel_valid = 1'b1;
+                v19_cap_sel = cap_scan_sel[2:0];
+                v19_cap_sel_addr = cap_addr_by_sel(cap_scan_sel[2:0]);
+                v19_cap_sel_data = cap_data_by_sel(cap_scan_sel[2:0]);
+                v19_cap_sel_marker = cap_marker_by_sel(cap_scan_sel[2:0]);
             end
-            3'd1: begin
-                if (v19_cap1_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
-                else if (v19_cap2_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
-                else if (v19_cap3_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
-                else if (v19_cap4_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
-                else if (v19_cap5_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
-                else if (v19_cap0_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
-            end
-            3'd2: begin
-                if (v19_cap2_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
-                else if (v19_cap3_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
-                else if (v19_cap4_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
-                else if (v19_cap5_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
-                else if (v19_cap0_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
-                else if (v19_cap1_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
-            end
-            3'd3: begin
-                if (v19_cap3_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
-                else if (v19_cap4_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
-                else if (v19_cap5_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
-                else if (v19_cap0_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
-                else if (v19_cap1_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
-                else if (v19_cap2_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
-            end
-            3'd4: begin
-                if (v19_cap4_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
-                else if (v19_cap5_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
-                else if (v19_cap0_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
-                else if (v19_cap1_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
-                else if (v19_cap2_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
-                else if (v19_cap3_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
-            end
-            default: begin
-                if (v19_cap5_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd5; v19_cap_sel_addr=v19_cap5_addr; v19_cap_sel_data=v19_cap5_data; end
-                else if (v19_cap0_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd0; v19_cap_sel_addr=v19_cap0_addr; v19_cap_sel_data=v19_cap0_data; end
-                else if (v19_cap1_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd1; v19_cap_sel_addr=v19_cap1_addr; v19_cap_sel_data=v19_cap1_data; end
-                else if (v19_cap2_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd2; v19_cap_sel_addr=v19_cap2_addr; v19_cap_sel_data=v19_cap2_data; end
-                else if (v19_cap3_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd3; v19_cap_sel_addr=v19_cap3_addr; v19_cap_sel_data=v19_cap3_data; end
-                else if (v19_cap4_selectable) begin v19_cap_sel_valid=1'b1; v19_cap_sel=3'd4; v19_cap_sel_addr=v19_cap4_addr; v19_cap_sel_data=v19_cap4_data; end
-            end
-        endcase
-        if (v19_cap_sel_valid) begin
-            case (v19_cap_sel)
-                3'd0: v19_cap_sel_marker=v19_cap0_marker;
-                3'd1: v19_cap_sel_marker=v19_cap1_marker;
-                3'd2: v19_cap_sel_marker=v19_cap2_marker;
-                3'd3: v19_cap_sel_marker=v19_cap3_marker;
-                3'd4: v19_cap_sel_marker=v19_cap4_marker;
-                default: v19_cap_sel_marker=v19_cap5_marker;
-            endcase
         end
     end
     wire [63:0] v19_dbg_bus;
@@ -1278,10 +1362,9 @@ module PanoramaBase_DdrBlackFrame(
         // synchronized DDR rows on the same phase instead of chasing a
         // free-running replay cache.
         //
-        // IR panorama is different: it renders directly from the live IR line
-        // caches, so using EO replay readiness lets a mode handoff start at
-        // row 511 and park forever behind the strict row-window gate.  Its
-        // start qualifier comes from the IR renderer's own row-window test.
+        // IR panorama now uses its own DDR frame-set/replay path.  Starting
+        // from the IR bank lease lets the replay seed the renderer's small
+        // line caches from the exact source row window needed for the pass.
         // In IR single mode the same output-frame back-end is fed by the IR
         // capture buffer instead of the panorama replay, so the copy starts
         // on the selected IR camera's frame pulse rather than on a panorama
@@ -1289,7 +1372,7 @@ module PanoramaBase_DdrBlackFrame(
         : (SRC_SEL == SRC_V19)
         ? (ir_single_ui ? (ir_start_pending || (ir_stale && frame_edge))
          : eo_single_ui ? (v19_eo_start_pending || (v19_eo_stale && frame_edge))
-         : ir_stack_ui  ? ir_pano_start_ready
+         : ir_stack_ui  ? irv19_replay_banks_ready
                         : v19_replay_banks_ready)
         : (SRC_SEL == SRC_EOSTK || SRC_SEL == SRC_EO0)
         ? (frame_edge && (eo_frames_valid || eo_frames_ready_seen))
@@ -1328,7 +1411,7 @@ module PanoramaBase_DdrBlackFrame(
     assign v19_dbg_rows_word2_strobe =
         {4'hD, copy_start_trig,
          (ir_stack_ui ? ir_pano_start_ready : v19_rows_start_aligned),
-         (ir_stack_ui ? v19_frames_valid : v19_replay_banks_ready),
+         (ir_stack_ui ? irv19_replay_banks_ready : v19_replay_banks_ready),
          v19_replay_frame_edge_ui,
          running, c0_init_calib_complete,
          (dbg_capture_overflow_seen || v19_descriptor_collision_seen ||
@@ -1476,6 +1559,7 @@ module PanoramaBase_DdrBlackFrame(
         wire [10:0] v19_source_need_row;
         wire [10:0] v19_source_start_row;
         wire        v19_replay_clk;
+        wire        irv19_replay_clk;
         reg         v19_render_active;
         wire        v19_cam0_hsync, v19_cam0_vsync;
         wire        v19_cam1_hsync, v19_cam1_vsync;
@@ -1485,9 +1569,20 @@ module PanoramaBase_DdrBlackFrame(
         wire        v19_cam5_hsync, v19_cam5_vsync;
         wire [19:0] v19_cam0_pixel, v19_cam1_pixel, v19_cam2_pixel;
         wire [19:0] v19_cam3_pixel, v19_cam4_pixel, v19_cam5_pixel;
+        wire        irv19_cam0_hsync, irv19_cam0_vsync;
+        wire        irv19_cam1_hsync, irv19_cam1_vsync;
+        wire        irv19_cam2_hsync, irv19_cam2_vsync;
+        wire        irv19_cam3_hsync, irv19_cam3_vsync;
+        wire        irv19_cam4_hsync, irv19_cam4_vsync;
+        wire        irv19_cam5_hsync, irv19_cam5_vsync;
+        wire [7:0]  irv19_cam0_pixel, irv19_cam1_pixel, irv19_cam2_pixel;
+        wire [7:0]  irv19_cam3_pixel, irv19_cam4_pixel, irv19_cam5_pixel;
+        wire        irv19_source_need_valid;
+        wire [10:0] irv19_source_need_row;
+        wire [10:0] irv19_source_start_row;
 
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 0))) u_v19_cap0 (
-            .rst_n(rst_n), .capture_enable(running),
+            .rst_n(rst_n), .capture_enable(running && !ir_stack_ui),
             .join_enable(v19_join_enable[0]),
             .cap_fifo_rst_req(v19_cap_fifo_rst[0]),
             .free_fifo_rst_req(v19_free_fifo_rst[0]),
@@ -1505,7 +1600,7 @@ module PanoramaBase_DdrBlackFrame(
             .fifo_level_ui(v19_cap0_level), .dbg_row_ui(v19_cap0_row),
             .dbg_writer_ui(v19_dbg_writer0));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 1))) u_v19_cap1 (
-            .rst_n(rst_n), .capture_enable(running),
+            .rst_n(rst_n), .capture_enable(running && !ir_stack_ui),
             .join_enable(v19_join_enable[1]),
             .cap_fifo_rst_req(v19_cap_fifo_rst[1]),
             .free_fifo_rst_req(v19_free_fifo_rst[1]),
@@ -1523,7 +1618,7 @@ module PanoramaBase_DdrBlackFrame(
             .fifo_level_ui(v19_cap1_level), .dbg_row_ui(v19_cap1_row),
             .dbg_writer_ui(v19_dbg_writer1));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 2))) u_v19_cap2 (
-            .rst_n(rst_n), .capture_enable(running),
+            .rst_n(rst_n), .capture_enable(running && !ir_stack_ui),
             .join_enable(v19_join_enable[2]),
             .cap_fifo_rst_req(v19_cap_fifo_rst[2]),
             .free_fifo_rst_req(v19_free_fifo_rst[2]),
@@ -1541,7 +1636,7 @@ module PanoramaBase_DdrBlackFrame(
             .fifo_level_ui(v19_cap2_level), .dbg_row_ui(v19_cap2_row),
             .dbg_writer_ui(v19_dbg_writer2));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 3))) u_v19_cap3 (
-            .rst_n(rst_n), .capture_enable(running),
+            .rst_n(rst_n), .capture_enable(running && !ir_stack_ui),
             .join_enable(v19_join_enable[3]),
             .cap_fifo_rst_req(v19_cap_fifo_rst[3]),
             .free_fifo_rst_req(v19_free_fifo_rst[3]),
@@ -1559,7 +1654,7 @@ module PanoramaBase_DdrBlackFrame(
             .fifo_level_ui(v19_cap3_level), .dbg_row_ui(v19_cap3_row),
             .dbg_writer_ui(v19_dbg_writer3));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 4))) u_v19_cap4 (
-            .rst_n(rst_n), .capture_enable(running),
+            .rst_n(rst_n), .capture_enable(running && !ir_stack_ui),
             .join_enable(v19_join_enable[4]),
             .cap_fifo_rst_req(v19_cap_fifo_rst[4]),
             .free_fifo_rst_req(v19_free_fifo_rst[4]),
@@ -1577,7 +1672,7 @@ module PanoramaBase_DdrBlackFrame(
             .fifo_level_ui(v19_cap4_level), .dbg_row_ui(v19_cap4_row),
             .dbg_writer_ui(v19_dbg_writer4));
         EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 5))) u_v19_cap5 (
-            .rst_n(rst_n), .capture_enable(running),
+            .rst_n(rst_n), .capture_enable(running && !ir_stack_ui),
             .join_enable(v19_join_enable[5]),
             .cap_fifo_rst_req(v19_cap_fifo_rst[5]),
             .free_fifo_rst_req(v19_free_fifo_rst[5]),
@@ -1594,6 +1689,145 @@ module PanoramaBase_DdrBlackFrame(
             .desc_epoch_ui(v19_cap5_desc_epoch), .fifo_overflow_seen_ui(v19_cap5_overflow),
             .fifo_level_ui(v19_cap5_level), .dbg_row_ui(v19_cap5_row),
             .dbg_writer_ui(v19_dbg_writer5));
+
+        EoV19DdrCamWriter #(
+            .PIX_W(8), .INPUT_W(640),
+            .CAM_BASE_ADDR(IR_V19_SRC_BASE_ADDR + (IR_V19_SRC_CAM_STRIDE * 0)),
+            .FRAME_STRIDE_ADDR(IR_V19_SRC_FRAME_STRIDE),
+            .ROW_STRIDE_ADDR(IR_V19_SRC_ROW_STRIDE)
+        ) u_irv19_cap0 (
+            .rst_n(rst_n), .capture_enable(running && ir_stack_ui),
+            .join_enable(irv19_join_enable[0]),
+            .cap_fifo_rst_req(irv19_cap_fifo_rst[0]),
+            .free_fifo_rst_req(irv19_free_fifo_rst[0]),
+            .cam_alive_tgl(irv19_cam_alive_tgl[0]),
+            .rejoin_busy_ui(irv19_rejoin_busy[0]),
+            .global_epoch_gray_ui(v19_global_epoch_gray),
+            .cam_clk(ir0_wr_clk), .cam_hsync(ir0_wr_hsync), .cam_vsync(~ir0_wr_vsync), .cam_pixel({ir0_wr_pixel, 12'd0}),
+            .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(irv19_cap0_pop), .fifo_empty(irv19_cap0_empty),
+            .fifo_addr(irv19_cap0_addr), .fifo_data(irv19_cap0_data), .fifo_is_marker(irv19_cap0_marker),
+            .fifo_marker_bank(irv19_cap0_marker_bank), .fifo_marker_epoch(irv19_cap0_marker_epoch),
+            .free_bank_valid_ui(irv19_free_valid[0]), .free_bank_ui(irv19_free_bank0),
+            .free_bank_ready_ui(irv19_free_ready[0]),
+            .desc_valid_ui(irv19_cap_desc_valid[0]), .desc_bank_ui(irv19_cap0_desc_bank),
+            .desc_epoch_ui(irv19_cap0_desc_epoch), .fifo_overflow_seen_ui(irv19_cap0_overflow),
+            .fifo_level_ui(irv19_cap0_level), .dbg_row_ui(irv19_cap0_row),
+            .dbg_writer_ui());
+        EoV19DdrCamWriter #(
+            .PIX_W(8), .INPUT_W(640),
+            .CAM_BASE_ADDR(IR_V19_SRC_BASE_ADDR + (IR_V19_SRC_CAM_STRIDE * 1)),
+            .FRAME_STRIDE_ADDR(IR_V19_SRC_FRAME_STRIDE),
+            .ROW_STRIDE_ADDR(IR_V19_SRC_ROW_STRIDE)
+        ) u_irv19_cap1 (
+            .rst_n(rst_n), .capture_enable(running && ir_stack_ui),
+            .join_enable(irv19_join_enable[1]),
+            .cap_fifo_rst_req(irv19_cap_fifo_rst[1]),
+            .free_fifo_rst_req(irv19_free_fifo_rst[1]),
+            .cam_alive_tgl(irv19_cam_alive_tgl[1]),
+            .rejoin_busy_ui(irv19_rejoin_busy[1]),
+            .global_epoch_gray_ui(v19_global_epoch_gray),
+            .cam_clk(ir1_wr_clk), .cam_hsync(ir1_wr_hsync), .cam_vsync(~ir1_wr_vsync), .cam_pixel({ir1_wr_pixel, 12'd0}),
+            .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(irv19_cap1_pop), .fifo_empty(irv19_cap1_empty),
+            .fifo_addr(irv19_cap1_addr), .fifo_data(irv19_cap1_data), .fifo_is_marker(irv19_cap1_marker),
+            .fifo_marker_bank(irv19_cap1_marker_bank), .fifo_marker_epoch(irv19_cap1_marker_epoch),
+            .free_bank_valid_ui(irv19_free_valid[1]), .free_bank_ui(irv19_free_bank1),
+            .free_bank_ready_ui(irv19_free_ready[1]),
+            .desc_valid_ui(irv19_cap_desc_valid[1]), .desc_bank_ui(irv19_cap1_desc_bank),
+            .desc_epoch_ui(irv19_cap1_desc_epoch), .fifo_overflow_seen_ui(irv19_cap1_overflow),
+            .fifo_level_ui(irv19_cap1_level), .dbg_row_ui(irv19_cap1_row),
+            .dbg_writer_ui());
+        EoV19DdrCamWriter #(
+            .PIX_W(8), .INPUT_W(640),
+            .CAM_BASE_ADDR(IR_V19_SRC_BASE_ADDR + (IR_V19_SRC_CAM_STRIDE * 2)),
+            .FRAME_STRIDE_ADDR(IR_V19_SRC_FRAME_STRIDE),
+            .ROW_STRIDE_ADDR(IR_V19_SRC_ROW_STRIDE)
+        ) u_irv19_cap2 (
+            .rst_n(rst_n), .capture_enable(running && ir_stack_ui),
+            .join_enable(irv19_join_enable[2]),
+            .cap_fifo_rst_req(irv19_cap_fifo_rst[2]),
+            .free_fifo_rst_req(irv19_free_fifo_rst[2]),
+            .cam_alive_tgl(irv19_cam_alive_tgl[2]),
+            .rejoin_busy_ui(irv19_rejoin_busy[2]),
+            .global_epoch_gray_ui(v19_global_epoch_gray),
+            .cam_clk(ir2_wr_clk), .cam_hsync(ir2_wr_hsync), .cam_vsync(~ir2_wr_vsync), .cam_pixel({ir2_wr_pixel, 12'd0}),
+            .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(irv19_cap2_pop), .fifo_empty(irv19_cap2_empty),
+            .fifo_addr(irv19_cap2_addr), .fifo_data(irv19_cap2_data), .fifo_is_marker(irv19_cap2_marker),
+            .fifo_marker_bank(irv19_cap2_marker_bank), .fifo_marker_epoch(irv19_cap2_marker_epoch),
+            .free_bank_valid_ui(irv19_free_valid[2]), .free_bank_ui(irv19_free_bank2),
+            .free_bank_ready_ui(irv19_free_ready[2]),
+            .desc_valid_ui(irv19_cap_desc_valid[2]), .desc_bank_ui(irv19_cap2_desc_bank),
+            .desc_epoch_ui(irv19_cap2_desc_epoch), .fifo_overflow_seen_ui(irv19_cap2_overflow),
+            .fifo_level_ui(irv19_cap2_level), .dbg_row_ui(irv19_cap2_row),
+            .dbg_writer_ui());
+        EoV19DdrCamWriter #(
+            .PIX_W(8), .INPUT_W(640),
+            .CAM_BASE_ADDR(IR_V19_SRC_BASE_ADDR + (IR_V19_SRC_CAM_STRIDE * 3)),
+            .FRAME_STRIDE_ADDR(IR_V19_SRC_FRAME_STRIDE),
+            .ROW_STRIDE_ADDR(IR_V19_SRC_ROW_STRIDE)
+        ) u_irv19_cap3 (
+            .rst_n(rst_n), .capture_enable(running && ir_stack_ui),
+            .join_enable(irv19_join_enable[3]),
+            .cap_fifo_rst_req(irv19_cap_fifo_rst[3]),
+            .free_fifo_rst_req(irv19_free_fifo_rst[3]),
+            .cam_alive_tgl(irv19_cam_alive_tgl[3]),
+            .rejoin_busy_ui(irv19_rejoin_busy[3]),
+            .global_epoch_gray_ui(v19_global_epoch_gray),
+            .cam_clk(ir3_wr_clk), .cam_hsync(ir3_wr_hsync), .cam_vsync(~ir3_wr_vsync), .cam_pixel({ir3_wr_pixel, 12'd0}),
+            .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(irv19_cap3_pop), .fifo_empty(irv19_cap3_empty),
+            .fifo_addr(irv19_cap3_addr), .fifo_data(irv19_cap3_data), .fifo_is_marker(irv19_cap3_marker),
+            .fifo_marker_bank(irv19_cap3_marker_bank), .fifo_marker_epoch(irv19_cap3_marker_epoch),
+            .free_bank_valid_ui(irv19_free_valid[3]), .free_bank_ui(irv19_free_bank3),
+            .free_bank_ready_ui(irv19_free_ready[3]),
+            .desc_valid_ui(irv19_cap_desc_valid[3]), .desc_bank_ui(irv19_cap3_desc_bank),
+            .desc_epoch_ui(irv19_cap3_desc_epoch), .fifo_overflow_seen_ui(irv19_cap3_overflow),
+            .fifo_level_ui(irv19_cap3_level), .dbg_row_ui(irv19_cap3_row),
+            .dbg_writer_ui());
+        EoV19DdrCamWriter #(
+            .PIX_W(8), .INPUT_W(640),
+            .CAM_BASE_ADDR(IR_V19_SRC_BASE_ADDR + (IR_V19_SRC_CAM_STRIDE * 4)),
+            .FRAME_STRIDE_ADDR(IR_V19_SRC_FRAME_STRIDE),
+            .ROW_STRIDE_ADDR(IR_V19_SRC_ROW_STRIDE)
+        ) u_irv19_cap4 (
+            .rst_n(rst_n), .capture_enable(running && ir_stack_ui),
+            .join_enable(irv19_join_enable[4]),
+            .cap_fifo_rst_req(irv19_cap_fifo_rst[4]),
+            .free_fifo_rst_req(irv19_free_fifo_rst[4]),
+            .cam_alive_tgl(irv19_cam_alive_tgl[4]),
+            .rejoin_busy_ui(irv19_rejoin_busy[4]),
+            .global_epoch_gray_ui(v19_global_epoch_gray),
+            .cam_clk(ir4_wr_clk), .cam_hsync(ir4_wr_hsync), .cam_vsync(~ir4_wr_vsync), .cam_pixel({ir4_wr_pixel, 12'd0}),
+            .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(irv19_cap4_pop), .fifo_empty(irv19_cap4_empty),
+            .fifo_addr(irv19_cap4_addr), .fifo_data(irv19_cap4_data), .fifo_is_marker(irv19_cap4_marker),
+            .fifo_marker_bank(irv19_cap4_marker_bank), .fifo_marker_epoch(irv19_cap4_marker_epoch),
+            .free_bank_valid_ui(irv19_free_valid[4]), .free_bank_ui(irv19_free_bank4),
+            .free_bank_ready_ui(irv19_free_ready[4]),
+            .desc_valid_ui(irv19_cap_desc_valid[4]), .desc_bank_ui(irv19_cap4_desc_bank),
+            .desc_epoch_ui(irv19_cap4_desc_epoch), .fifo_overflow_seen_ui(irv19_cap4_overflow),
+            .fifo_level_ui(irv19_cap4_level), .dbg_row_ui(irv19_cap4_row),
+            .dbg_writer_ui());
+        EoV19DdrCamWriter #(
+            .PIX_W(8), .INPUT_W(640),
+            .CAM_BASE_ADDR(IR_V19_SRC_BASE_ADDR + (IR_V19_SRC_CAM_STRIDE * 5)),
+            .FRAME_STRIDE_ADDR(IR_V19_SRC_FRAME_STRIDE),
+            .ROW_STRIDE_ADDR(IR_V19_SRC_ROW_STRIDE)
+        ) u_irv19_cap5 (
+            .rst_n(rst_n), .capture_enable(running && ir_stack_ui),
+            .join_enable(irv19_join_enable[5]),
+            .cap_fifo_rst_req(irv19_cap_fifo_rst[5]),
+            .free_fifo_rst_req(irv19_free_fifo_rst[5]),
+            .cam_alive_tgl(irv19_cam_alive_tgl[5]),
+            .rejoin_busy_ui(irv19_rejoin_busy[5]),
+            .global_epoch_gray_ui(v19_global_epoch_gray),
+            .cam_clk(ir5_wr_clk), .cam_hsync(ir5_wr_hsync), .cam_vsync(~ir5_wr_vsync), .cam_pixel({ir5_wr_pixel, 12'd0}),
+            .ui_clk(c0_ddr4_ui_clk), .ui_rst(ui_rst), .fifo_rd_en(irv19_cap5_pop), .fifo_empty(irv19_cap5_empty),
+            .fifo_addr(irv19_cap5_addr), .fifo_data(irv19_cap5_data), .fifo_is_marker(irv19_cap5_marker),
+            .fifo_marker_bank(irv19_cap5_marker_bank), .fifo_marker_epoch(irv19_cap5_marker_epoch),
+            .free_bank_valid_ui(irv19_free_valid[5]), .free_bank_ui(irv19_free_bank5),
+            .free_bank_ready_ui(irv19_free_ready[5]),
+            .desc_valid_ui(irv19_cap_desc_valid[5]), .desc_bank_ui(irv19_cap5_desc_bank),
+            .desc_epoch_ui(irv19_cap5_desc_epoch), .fifo_overflow_seen_ui(irv19_cap5_overflow),
+            .fifo_level_ui(irv19_cap5_level), .dbg_row_ui(irv19_cap5_row),
+            .dbg_writer_ui());
 
         // Per-camera liveness.  Every frame-set / row-window decision below
         // used to be an unconditional six-way AND, so one dead camera stopped
@@ -1686,6 +1920,85 @@ module PanoramaBase_DdrBlackFrame(
             .dbg_state(v19_frameset_dbg_state)
         );
 
+        EoV19CamPresence u_irv19_pres0 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .activity(irv19_cap0_row), .activity_pulse(irv19_cap_desc_valid[0]), .present(irv19_cam_present[0]));
+        EoV19CamPresence u_irv19_pres1 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .activity(irv19_cap1_row), .activity_pulse(irv19_cap_desc_valid[1]), .present(irv19_cam_present[1]));
+        EoV19CamPresence u_irv19_pres2 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .activity(irv19_cap2_row), .activity_pulse(irv19_cap_desc_valid[2]), .present(irv19_cam_present[2]));
+        EoV19CamPresence u_irv19_pres3 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .activity(irv19_cap3_row), .activity_pulse(irv19_cap_desc_valid[3]), .present(irv19_cam_present[3]));
+        EoV19CamPresence u_irv19_pres4 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .activity(irv19_cap4_row), .activity_pulse(irv19_cap_desc_valid[4]), .present(irv19_cam_present[4]));
+        EoV19CamPresence u_irv19_pres5 (.clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .activity(irv19_cap5_row), .activity_pulse(irv19_cap_desc_valid[5]), .present(irv19_cam_present[5]));
+
+        EoV19CamRejoin u_irv19_rejoin0 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
+            .cam_alive_tgl(irv19_cam_alive_tgl[0]), .desc_valid(irv19_cap_desc_valid[0]),
+            .rejoin_busy(irv19_rejoin_busy[0]), .forfeit_ack(irv19_forfeit_ack[0]),
+            .join_enable(irv19_join_enable[0]), .cap_fifo_rst_req(irv19_cap_fifo_rst[0]),
+            .free_fifo_rst_req(irv19_free_fifo_rst[0]), .forfeit_req(irv19_forfeit_req[0]),
+            .dbg_state(), .shed_sticky(irv19_rejoin_shed[0]));
+        EoV19CamRejoin u_irv19_rejoin1 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
+            .cam_alive_tgl(irv19_cam_alive_tgl[1]), .desc_valid(irv19_cap_desc_valid[1]),
+            .rejoin_busy(irv19_rejoin_busy[1]), .forfeit_ack(irv19_forfeit_ack[1]),
+            .join_enable(irv19_join_enable[1]), .cap_fifo_rst_req(irv19_cap_fifo_rst[1]),
+            .free_fifo_rst_req(irv19_free_fifo_rst[1]), .forfeit_req(irv19_forfeit_req[1]),
+            .dbg_state(), .shed_sticky(irv19_rejoin_shed[1]));
+        EoV19CamRejoin u_irv19_rejoin2 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
+            .cam_alive_tgl(irv19_cam_alive_tgl[2]), .desc_valid(irv19_cap_desc_valid[2]),
+            .rejoin_busy(irv19_rejoin_busy[2]), .forfeit_ack(irv19_forfeit_ack[2]),
+            .join_enable(irv19_join_enable[2]), .cap_fifo_rst_req(irv19_cap_fifo_rst[2]),
+            .free_fifo_rst_req(irv19_free_fifo_rst[2]), .forfeit_req(irv19_forfeit_req[2]),
+            .dbg_state(), .shed_sticky(irv19_rejoin_shed[2]));
+        EoV19CamRejoin u_irv19_rejoin3 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
+            .cam_alive_tgl(irv19_cam_alive_tgl[3]), .desc_valid(irv19_cap_desc_valid[3]),
+            .rejoin_busy(irv19_rejoin_busy[3]), .forfeit_ack(irv19_forfeit_ack[3]),
+            .join_enable(irv19_join_enable[3]), .cap_fifo_rst_req(irv19_cap_fifo_rst[3]),
+            .free_fifo_rst_req(irv19_free_fifo_rst[3]), .forfeit_req(irv19_forfeit_req[3]),
+            .dbg_state(), .shed_sticky(irv19_rejoin_shed[3]));
+        EoV19CamRejoin u_irv19_rejoin4 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
+            .cam_alive_tgl(irv19_cam_alive_tgl[4]), .desc_valid(irv19_cap_desc_valid[4]),
+            .rejoin_busy(irv19_rejoin_busy[4]), .forfeit_ack(irv19_forfeit_ack[4]),
+            .join_enable(irv19_join_enable[4]), .cap_fifo_rst_req(irv19_cap_fifo_rst[4]),
+            .free_fifo_rst_req(irv19_free_fifo_rst[4]), .forfeit_req(irv19_forfeit_req[4]),
+            .dbg_state(), .shed_sticky(irv19_rejoin_shed[4]));
+        EoV19CamRejoin u_irv19_rejoin5 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
+            .cam_alive_tgl(irv19_cam_alive_tgl[5]), .desc_valid(irv19_cap_desc_valid[5]),
+            .rejoin_busy(irv19_rejoin_busy[5]), .forfeit_ack(irv19_forfeit_ack[5]),
+            .join_enable(irv19_join_enable[5]), .cap_fifo_rst_req(irv19_cap_fifo_rst[5]),
+            .free_fifo_rst_req(irv19_free_fifo_rst[5]), .forfeit_req(irv19_forfeit_req[5]),
+            .dbg_state(), .shed_sticky(irv19_rejoin_shed[5]));
+
+        EoV19FrameSetManager u_irv19_frameset (
+            .cam_present(irv19_cam_present),
+            .clk(c0_ddr4_ui_clk), .rst(ui_rst), .enable(running && ir_stack_ui),
+            .desc_valid(irv19_cap_desc_valid),
+            .desc_bank0(irv19_cap0_desc_bank), .desc_bank1(irv19_cap1_desc_bank),
+            .desc_bank2(irv19_cap2_desc_bank), .desc_bank3(irv19_cap3_desc_bank),
+            .desc_bank4(irv19_cap4_desc_bank), .desc_bank5(irv19_cap5_desc_bank),
+            .desc_epoch0(irv19_cap0_desc_epoch), .desc_epoch1(irv19_cap1_desc_epoch),
+            .desc_epoch2(irv19_cap2_desc_epoch), .desc_epoch3(irv19_cap3_desc_epoch),
+            .desc_epoch4(irv19_cap4_desc_epoch), .desc_epoch5(irv19_cap5_desc_epoch),
+            .consumer_done(irv19_consumer_done),
+            .free_valid(irv19_free_valid),
+            .free_bank0(irv19_free_bank0), .free_bank1(irv19_free_bank1),
+            .free_bank2(irv19_free_bank2), .free_bank3(irv19_free_bank3),
+            .free_bank4(irv19_free_bank4), .free_bank5(irv19_free_bank5),
+            .free_ready(irv19_free_ready),
+            .lease_valid(irv19_frameset_lease_valid),
+            .lease_epoch(irv19_frameset_lease_epoch),
+            .lease_bank0(irv19_frameset_bank0), .lease_bank1(irv19_frameset_bank1),
+            .lease_bank2(irv19_frameset_bank2), .lease_bank3(irv19_frameset_bank3),
+            .lease_bank4(irv19_frameset_bank4), .lease_bank5(irv19_frameset_bank5),
+            .forfeit_req(irv19_forfeit_req), .forfeit_ack(irv19_forfeit_ack),
+            .release_timeout_seen(irv19_release_timeout_seen),
+            .descriptor_collision_seen(irv19_descriptor_collision_seen),
+            .rings_full_no_common_seen(irv19_no_common_epoch_seen),
+            .descriptor_valid_map(irv19_descriptor_valid_map),
+            .dbg_state(irv19_frameset_dbg_state)
+        );
+
         EoV19DdrReplay #(
             .CAM0_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 0)),
             .CAM1_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 1)),
@@ -1695,7 +2008,7 @@ module PanoramaBase_DdrBlackFrame(
             .CAM5_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 5))
         ) u_v19_replay (
             .rst_n(rst_n), .clk(c0_ddr4_ui_clk), .ui_rst(ui_rst),
-            .run_enable(running && v19_render_active),
+            .run_enable(running && v19_render_active && !ir_stack_ui),
             .lease_valid(v19_frameset_lease_valid),
             .bank0(v19_frameset_bank0), .bank1(v19_frameset_bank1),
             .bank2(v19_frameset_bank2), .bank3(v19_frameset_bank3),
@@ -1707,7 +2020,7 @@ module PanoramaBase_DdrBlackFrame(
             // Gate the accept with ownership too, so the replay's in-flight
             // accounting can never be advanced by an accept meant for the EO
             // reader (it is held in reset then, but this makes it structural).
-            .rd_req_ready(v19_src_rd_ready && !v19_src_owner_is_eo),
+            .rd_req_ready(v19_src_rd_ready && !v19_src_owner_is_eo && !ir_stack_ui),
             .rd_data_valid(v19_replay_rd_data_valid),
             .rd_data(v19_src_rd_data), .replay_clk(v19_replay_clk),
             .replay_hsync0(v19_cam0_hsync), .replay_vsync0(v19_cam0_vsync), .replay_pixel0(v19_cam0_pixel),
@@ -1719,6 +2032,40 @@ module PanoramaBase_DdrBlackFrame(
             .frame_edge(v19_replay_frame_edge_ui), .dbg_row(v19_replay_dbg_row),
             .dbg_state(v19_replay_dbg_state), .dbg_word(v19_replay_dbg_word),
             .banks_ready(v19_replay_banks_ready)
+        );
+
+        IrV19DdrReplay #(
+            .CAM0_BASE_ADDR(IR_V19_SRC_BASE_ADDR + (IR_V19_SRC_CAM_STRIDE * 0)),
+            .CAM1_BASE_ADDR(IR_V19_SRC_BASE_ADDR + (IR_V19_SRC_CAM_STRIDE * 1)),
+            .CAM2_BASE_ADDR(IR_V19_SRC_BASE_ADDR + (IR_V19_SRC_CAM_STRIDE * 2)),
+            .CAM3_BASE_ADDR(IR_V19_SRC_BASE_ADDR + (IR_V19_SRC_CAM_STRIDE * 3)),
+            .CAM4_BASE_ADDR(IR_V19_SRC_BASE_ADDR + (IR_V19_SRC_CAM_STRIDE * 4)),
+            .CAM5_BASE_ADDR(IR_V19_SRC_BASE_ADDR + (IR_V19_SRC_CAM_STRIDE * 5)),
+            .FRAME_STRIDE_ADDR(IR_V19_SRC_FRAME_STRIDE),
+            .ROW_STRIDE_ADDR(IR_V19_SRC_ROW_STRIDE)
+        ) u_irv19_replay (
+            .rst_n(rst_n), .clk(c0_ddr4_ui_clk), .ui_rst(ui_rst),
+            .run_enable(running && v19_render_active && ir_stack_ui),
+            .lease_valid(irv19_frameset_lease_valid),
+            .bank0(irv19_frameset_bank0), .bank1(irv19_frameset_bank1),
+            .bank2(irv19_frameset_bank2), .bank3(irv19_frameset_bank3),
+            .bank4(irv19_frameset_bank4), .bank5(irv19_frameset_bank5),
+            .source_need_valid(irv19_source_need_valid),
+            .source_need_row(irv19_source_need_row),
+            .source_start_row(irv19_source_start_row),
+            .rd_req_valid(irv19_replay_rd_valid), .rd_req_addr(irv19_replay_rd_addr),
+            .rd_req_ready(v19_src_rd_ready && !v19_src_owner_is_eo && ir_stack_ui),
+            .rd_data_valid(v19_replay_rd_data_valid),
+            .rd_data(v19_src_rd_data),
+            .replay_clk(irv19_replay_clk),
+            .replay_hsync0(irv19_cam0_hsync), .replay_vsync0(irv19_cam0_vsync), .replay_pixel0(irv19_cam0_pixel),
+            .replay_hsync1(irv19_cam1_hsync), .replay_vsync1(irv19_cam1_vsync), .replay_pixel1(irv19_cam1_pixel),
+            .replay_hsync2(irv19_cam2_hsync), .replay_vsync2(irv19_cam2_vsync), .replay_pixel2(irv19_cam2_pixel),
+            .replay_hsync3(irv19_cam3_hsync), .replay_vsync3(irv19_cam3_vsync), .replay_pixel3(irv19_cam3_pixel),
+            .replay_hsync4(irv19_cam4_hsync), .replay_vsync4(irv19_cam4_vsync), .replay_pixel4(irv19_cam4_pixel),
+            .replay_hsync5(irv19_cam5_hsync), .replay_vsync5(irv19_cam5_vsync), .replay_pixel5(irv19_cam5_pixel),
+            .frame_edge(irv19_replay_frame_edge_ui), .dbg_row(), .dbg_state(), .dbg_word(),
+            .banks_ready(irv19_replay_banks_ready)
         );
         always @(posedge c0_ddr4_ui_clk) begin
             if (ui_rst || !rst_n)
@@ -1935,8 +2282,12 @@ module PanoramaBase_DdrBlackFrame(
 
         wire        eo_rd_valid;
         wire [28:0] eo_rd_addr;
-        assign v19_src_rd_valid = eo_mode ? eo_rd_valid : v19_replay_rd_valid;
-        assign v19_src_rd_addr  = eo_mode ? eo_rd_addr  : v19_replay_rd_addr;
+        assign v19_src_rd_valid = eo_mode ? eo_rd_valid
+                                 : ir_stack_ui ? irv19_replay_rd_valid
+                                               : v19_replay_rd_valid;
+        assign v19_src_rd_addr  = eo_mode ? eo_rd_addr
+                                 : ir_stack_ui ? irv19_replay_rd_addr
+                                               : v19_replay_rd_addr;
         wire        eo_px_valid;
         wire [15:0] eo_px_data;
         // The reader is stalled by exactly what stalls the packer, so its
@@ -2033,25 +2384,25 @@ module PanoramaBase_DdrBlackFrame(
         );
 
         //--------------------------------------------------------------------
-        // IR panorama (mode 0x14), direct ingress.
+        // IR panorama (mode 0x14), DDR-backed ingress.
         //
-        // The six IR cameras feed line caches straight from their pixel clocks
-        // -- no DDR ring, no frame-set lease, no replay -- which is sound only
-        // because they are 30 Hz genlock slaves starting within 274 ns of each
-        // other, and because the RowRun tables bound the working set for any
-        // one output row at 13 source rows.
+        // The six IR cameras are written into the same four-bank frame-set
+        // scheme used by EO, then replayed into the renderer's small line
+        // caches on demand.  The renderer still owns the RowRun geometry; DDR
+        // owns mode/NUC resilience and common-frame selection.
         //--------------------------------------------------------------------
         IrV19StreamingRenderer u_ir_renderer (
             .rst_n      (rst_n),
             .clk        (c0_ddr4_ui_clk),
             .start_copy (v19_render_active && ir_stack_ui),
-            .cam_present(ir_pano_cam_present),
-            .cam0_clk(ir0_wr_clk), .cam0_hsync(ir0_wr_hsync), .cam0_vsync(ir0_wr_vsync), .cam0_pixel(ir0_wr_pixel),
-            .cam1_clk(ir1_wr_clk), .cam1_hsync(ir1_wr_hsync), .cam1_vsync(ir1_wr_vsync), .cam1_pixel(ir1_wr_pixel),
-            .cam2_clk(ir2_wr_clk), .cam2_hsync(ir2_wr_hsync), .cam2_vsync(ir2_wr_vsync), .cam2_pixel(ir2_wr_pixel),
-            .cam3_clk(ir3_wr_clk), .cam3_hsync(ir3_wr_hsync), .cam3_vsync(ir3_wr_vsync), .cam3_pixel(ir3_wr_pixel),
-            .cam4_clk(ir4_wr_clk), .cam4_hsync(ir4_wr_hsync), .cam4_vsync(ir4_wr_vsync), .cam4_pixel(ir4_wr_pixel),
-            .cam5_clk(ir5_wr_clk), .cam5_hsync(ir5_wr_hsync), .cam5_vsync(ir5_wr_vsync), .cam5_pixel(ir5_wr_pixel),
+            .source_frame_reset(irv19_replay_frame_edge_ui),
+            .cam_present(irv19_cam_present),
+            .cam0_clk(irv19_replay_clk), .cam0_hsync(irv19_cam0_hsync), .cam0_vsync(irv19_cam0_vsync), .cam0_pixel(irv19_cam0_pixel),
+            .cam1_clk(irv19_replay_clk), .cam1_hsync(irv19_cam1_hsync), .cam1_vsync(irv19_cam1_vsync), .cam1_pixel(irv19_cam1_pixel),
+            .cam2_clk(irv19_replay_clk), .cam2_hsync(irv19_cam2_hsync), .cam2_vsync(irv19_cam2_vsync), .cam2_pixel(irv19_cam2_pixel),
+            .cam3_clk(irv19_replay_clk), .cam3_hsync(irv19_cam3_hsync), .cam3_vsync(irv19_cam3_vsync), .cam3_pixel(irv19_cam3_pixel),
+            .cam4_clk(irv19_replay_clk), .cam4_hsync(irv19_cam4_hsync), .cam4_vsync(irv19_cam4_vsync), .cam4_pixel(irv19_cam4_pixel),
+            .cam5_clk(irv19_replay_clk), .cam5_hsync(irv19_cam5_hsync), .cam5_vsync(irv19_cam5_vsync), .cam5_pixel(irv19_cam5_pixel),
             .px_valid   (ir_rnd_px_valid),
             .px_ready   (v19_ir_px_ready_q),
             .px_data    (ir_rnd_px_data),
@@ -2059,7 +2410,11 @@ module PanoramaBase_DdrBlackFrame(
             .frames_valid(ir_rnd_frames_valid),
             .start_ready(ir_pano_start_ready),
             .dbg_state(), .dbg_pano_y(), .dbg_pano_x(),
-            .dbg_rows_min(), .dbg_row_target(), .dbg_word(ir_render_dbg)
+            .dbg_rows_min(), .dbg_row_target(),
+            .source_need_valid(irv19_source_need_valid),
+            .source_need_row(irv19_source_need_row),
+            .source_start_row(irv19_source_start_row),
+            .dbg_word(ir_render_dbg)
         );
         assign v19_frame_done   = ir_stack_ui ? ir_rnd_frame_done   : eo_rnd_frame_done;
         assign v19_frames_valid = ir_stack_ui ? ir_rnd_frames_valid : eo_rnd_frames_valid;
@@ -2925,6 +3280,12 @@ module PanoramaBase_DdrBlackFrame(
             v19_cap3_pop     <= 1'b0;
             v19_cap4_pop     <= 1'b0;
             v19_cap5_pop     <= 1'b0;
+            irv19_cap0_pop    <= 1'b0;
+            irv19_cap1_pop    <= 1'b0;
+            irv19_cap2_pop    <= 1'b0;
+            irv19_cap3_pop    <= 1'b0;
+            irv19_cap4_pop    <= 1'b0;
+            irv19_cap5_pop    <= 1'b0;
             v19_cap_marker_pop_pending <= 1'b0;
             v19_replay_rd_data_valid <= 1'b0;
             eo_src_rd_data_valid     <= 1'b0;
@@ -2940,6 +3301,12 @@ module PanoramaBase_DdrBlackFrame(
             v19_cap3_pop         <= 1'b0;
             v19_cap4_pop         <= 1'b0;
             v19_cap5_pop         <= 1'b0;
+            irv19_cap0_pop       <= 1'b0;
+            irv19_cap1_pop       <= 1'b0;
+            irv19_cap2_pop       <= 1'b0;
+            irv19_cap3_pop       <= 1'b0;
+            irv19_cap4_pop       <= 1'b0;
+            irv19_cap5_pop       <= 1'b0;
             if (v19_cap_marker_pop_pending)
                 v19_cap_marker_pop_pending <= 1'b0;
             v19_replay_rd_data_valid <= 1'b0;
@@ -3009,7 +3376,10 @@ module PanoramaBase_DdrBlackFrame(
                 ((SRC_SEL == SRC_V19) &&
                  (v19_cap0_overflow || v19_cap1_overflow ||
                   v19_cap2_overflow || v19_cap3_overflow ||
-                  v19_cap4_overflow || v19_cap5_overflow)))
+                  v19_cap4_overflow || v19_cap5_overflow ||
+                  irv19_cap0_overflow || irv19_cap1_overflow ||
+                  irv19_cap2_overflow || irv19_cap3_overflow ||
+                  irv19_cap4_overflow || irv19_cap5_overflow)))
                 dbg_beat_overflow <= 1'b1;
             if (beat_fifo_overflow || pix_fifo_overflow)
                 dbg_output_fifo_overflow_seen <= 1'b1;
@@ -3018,7 +3388,10 @@ module PanoramaBase_DdrBlackFrame(
             if ((SRC_SEL == SRC_V19) &&
                 (v19_cap0_overflow || v19_cap1_overflow ||
                  v19_cap2_overflow || v19_cap3_overflow ||
-                 v19_cap4_overflow || v19_cap5_overflow))
+                 v19_cap4_overflow || v19_cap5_overflow ||
+                 irv19_cap0_overflow || irv19_cap1_overflow ||
+                 irv19_cap2_overflow || irv19_cap3_overflow ||
+                 irv19_cap4_overflow || irv19_cap5_overflow))
                 dbg_capture_overflow_seen <= 1'b1;
 
             //----------------------------------------------------------------
@@ -3316,14 +3689,25 @@ module PanoramaBase_DdrBlackFrame(
                         // and now has four owned DDR banks.  Round-robin drain
                         // uses all remaining command slots without being able
                         // to starve scan, replay, or panorama publication.
-                        case (v19_cap_sel)
-                            3'd0: v19_cap0_pop <= 1'b1;
-                            3'd1: v19_cap1_pop <= 1'b1;
-                            3'd2: v19_cap2_pop <= 1'b1;
-                            3'd3: v19_cap3_pop <= 1'b1;
-                            3'd4: v19_cap4_pop <= 1'b1;
-                            default: v19_cap5_pop <= 1'b1;
-                        endcase
+                        if (irv19_capture_active) begin
+                            case (v19_cap_sel)
+                                3'd0: irv19_cap0_pop <= 1'b1;
+                                3'd1: irv19_cap1_pop <= 1'b1;
+                                3'd2: irv19_cap2_pop <= 1'b1;
+                                3'd3: irv19_cap3_pop <= 1'b1;
+                                3'd4: irv19_cap4_pop <= 1'b1;
+                                default: irv19_cap5_pop <= 1'b1;
+                            endcase
+                        end else begin
+                            case (v19_cap_sel)
+                                3'd0: v19_cap0_pop <= 1'b1;
+                                3'd1: v19_cap1_pop <= 1'b1;
+                                3'd2: v19_cap2_pop <= 1'b1;
+                                3'd3: v19_cap3_pop <= 1'b1;
+                                3'd4: v19_cap4_pop <= 1'b1;
+                                default: v19_cap5_pop <= 1'b1;
+                            endcase
+                        end
                         // Batched round-robin.  Rotating on EVERY accepted
                         // command sent six consecutive writes to six different
                         // cameras, whose frame regions are ~4.1 M addresses

@@ -22,7 +22,7 @@ module tb_IrV19LineCacheAlign;
 
     IrV19LineCache dut (
         .rst_n(rst_n), .wr_clk(wclk), .wr_hsync(hs), .wr_vsync(vs),
-        .wr_frame_reset(1'b0), .wr_pixel(px),
+        .wr_frame_reset(1'b0), .wr_start_row(11'd0), .wr_pixel(px),
         .rd_clk(rclk), .rd_en(1'b1), .rd_x(rx), .rd_y0(ry0), .rd_y1(ry1),
         .rd_pixel_y0(p0), .rd_pixel_y1(p1),
         .captured_rows(rows), .frame_toggle(), .field_height(),
