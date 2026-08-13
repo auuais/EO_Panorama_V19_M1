@@ -86,6 +86,7 @@ module IrV19LineCache #(
     reg [AW-1:0] wr_rows_gray;
     reg [SLOT_W-1:0] wr_slot;
     reg wr_hsync_d, wr_vsync_d, frame_tog;
+    reg wrap_pending;
     reg [EPOCH_W-1:0] wr_epoch;
     reg [AW-1:0] field_height_wr;
     reg [AW-1:0] field_height_gray_wr;
@@ -93,7 +94,12 @@ module IrV19LineCache #(
     // IR camera vsync is active high here, matching IrSelectedFrameBuffer.
     wire wr_active        = wr_hsync && wr_vsync;
     wire wr_frame_start   = wr_vsync && !wr_vsync_d;
-    wire wr_frame_restart = wr_frame_reset || wr_frame_start;
+    // NUC can stop/restart the IR stream without delivering a clean vsync
+    // edge to this direct panorama cache.  If that happens, the old counter
+    // saturated at row 511 forever and the renderer never saw row zero again.
+    // Complete row 511 normally, then synthesize a frame boundary before any
+    // additional active line is accepted.
+    wire wr_frame_restart = wr_frame_reset || wr_frame_start || wrap_pending;
     wire wr_line_complete = wr_active && (wr_x == WIDTH-1);
 
     always @(posedge wr_clk) begin
@@ -101,6 +107,7 @@ module IrV19LineCache #(
             wr_x <= 0; wr_y <= 0; wr_slot <= 0;
             wr_rows_gray <= 0;
             wr_hsync_d <= 0; wr_vsync_d <= 0;
+            wrap_pending <= 1'b0;
             frame_tog <= 0; wr_epoch <= 0;
             field_height_wr <= 0; field_height_gray_wr <= 0;
         end else begin
@@ -113,6 +120,7 @@ module IrV19LineCache #(
                 wr_y     <= 0;
                 wr_rows_gray <= 0;
                 wr_slot  <= 0;
+                wrap_pending <= 1'b0;
                 frame_tog <= ~frame_tog;
                 wr_epoch <= wr_epoch + 1'b1;
             end else if (wr_active) begin
@@ -121,6 +129,7 @@ module IrV19LineCache #(
                     if (wr_y == HEIGHT_LAST) begin
                         wr_y <= wr_y;
                         wr_rows_gray <= bin_to_gray(wr_y);
+                        wrap_pending <= 1'b1;
                     end else begin
                         wr_y <= wr_y + 11'd1;
                         wr_rows_gray <= bin_to_gray(wr_y + 11'd1);

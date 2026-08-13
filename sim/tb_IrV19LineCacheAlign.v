@@ -29,7 +29,7 @@ module tb_IrV19LineCacheAlign;
         .current_epoch(), .rd_hit_y0(), .rd_hit_y1()
     );
 
-    integer x, y, errs;
+    integer x, y, errs, missing_vsync_restart;
 
     // All stimulus moves on the NEGEDGE. The first version assigned hs/px
     // right after @(posedge wclk) -- i.e., in the same timestep the DUT
@@ -65,9 +65,27 @@ module tb_IrV19LineCacheAlign;
 
     initial begin
         errs = 0;
+        missing_vsync_restart = $test$plusargs("missing_vsync_restart");
         repeat (6) @(negedge wclk);
         rst_n = 1;
         repeat (4) @(negedge wclk);
+
+        if (missing_vsync_restart) begin
+            vs = 1;
+            for (y = 0; y < 512 + 45; y = y + 1) feed_row(y);
+            repeat (12) @(posedge rclk);
+            if (rows > 11'd100) begin
+                $display("  FAIL: missing-vsync stream left rows saturated at %0d", rows);
+                errs = errs + 1;
+            end else begin
+                $display("  negative control: missing-vsync stream wrapped rows to %0d", rows);
+            end
+            check_addr(11'd36);
+            if (errs == 0) $display("PASS - cache recovers when vsync restart is missed");
+            else           $display("FAIL - %0d missing-vsync recovery errors", errs);
+            $finish;
+        end
+
         vs = 1;                              // active-high frame, matching IR hardware
         for (y = 0; y < 8; y = y + 1) feed_row(y);
         @(negedge wclk); vs = 0;
@@ -105,5 +123,5 @@ module tb_IrV19LineCacheAlign;
         end
     end
 
-    initial begin #3_000_000; $display("FAIL - timeout"); $finish; end
+    initial begin #20_000_000; $display("FAIL - timeout"); $finish; end
 endmodule
