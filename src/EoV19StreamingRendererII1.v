@@ -133,9 +133,9 @@ module EoV19StreamingRendererII1 #(
     wire [10:0] first_need_row = scale_row(row_max_y0[0]) + 11'd2;
     wire [10:0] first_start_row = scale_row(row_min_y0[0]);
     // With captured_rows == R the 64-entry ring holds source rows
-    // [R-64, R-1], so the ready edge R = gate_max_row+2 remains resident when
-    // gate_max_row-gate_min_row <= 61 only if the overrun bound is +63.
-    // The 2026-08-06 EO maps have four top-edge rows with exactly that span.
+    // [R-64, R-1], so the true contract is gate_min_row >= R-64, i.e. an
+    // overrun bound of gate_min_row + 64.  Use +62 to keep two rows of
+    // implementation margin while staying strictly inside the ring.
     //
     // The old +60 bound predated the row-window fix in
     // scripts/v19_generate_render_runs.py.  row_max_y0/row_min_y0 now
@@ -154,18 +154,18 @@ module EoV19StreamingRendererII1 #(
                          (rows3 >= gate_need_row || !cam_present[3]) &&
                          (rows4 >= gate_need_row || !cam_present[4]) &&
                          (rows5 >= gate_need_row || !cam_present[5]);
-    wire gate_upper_ok = (rows0 >= gate_min_row) && (rows0 <= gate_min_row + 11'd63) &&
-                         (rows1 >= gate_min_row) && (rows1 <= gate_min_row + 11'd63) &&
-                         (rows2 >= gate_min_row) && (rows2 <= gate_min_row + 11'd63) &&
-                         (rows3 >= gate_min_row) && (rows3 <= gate_min_row + 11'd63) &&
-                         (rows4 >= gate_min_row) && (rows4 <= gate_min_row + 11'd63) &&
-                         (rows5 >= gate_min_row) && (rows5 <= gate_min_row + 11'd63);
-    wire gate_overrun = (cam_present[0] && rows0 > gate_min_row + 11'd63) ||
-                        (cam_present[1] && rows1 > gate_min_row + 11'd63) ||
-                        (cam_present[2] && rows2 > gate_min_row + 11'd63) ||
-                        (cam_present[3] && rows3 > gate_min_row + 11'd63) ||
-                        (cam_present[4] && rows4 > gate_min_row + 11'd63) ||
-                        (cam_present[5] && rows5 > gate_min_row + 11'd63);
+    wire gate_upper_ok = (rows0 >= gate_min_row) && (rows0 <= gate_min_row + 11'd62) &&
+                         (rows1 >= gate_min_row) && (rows1 <= gate_min_row + 11'd62) &&
+                         (rows2 >= gate_min_row) && (rows2 <= gate_min_row + 11'd62) &&
+                         (rows3 >= gate_min_row) && (rows3 <= gate_min_row + 11'd62) &&
+                         (rows4 >= gate_min_row) && (rows4 <= gate_min_row + 11'd62) &&
+                         (rows5 >= gate_min_row) && (rows5 <= gate_min_row + 11'd62);
+    wire gate_overrun = (cam_present[0] && rows0 > gate_min_row + 11'd62) ||
+                        (cam_present[1] && rows1 > gate_min_row + 11'd62) ||
+                        (cam_present[2] && rows2 > gate_min_row + 11'd62) ||
+                        (cam_present[3] && rows3 > gate_min_row + 11'd62) ||
+                        (cam_present[4] && rows4 > gate_min_row + 11'd62) ||
+                        (cam_present[5] && rows5 > gate_min_row + 11'd62);
     // epoch_consistent is DIAGNOSTIC ONLY -- it must never gate a pass start.
     //
     // EoV19LineCache gives each camera a free-running 2-bit epoch incremented
