@@ -3920,6 +3920,7 @@ module PanoramaBase_DdrBlackFrame(
     // non-V19 fallback-only probe slots are tied to zero rather than
     // reintroducing that IP configuration.
     //------------------------------------------------------------------------
+`ifndef QSPI_NO_ILA
     dbg_ila_0 u_dbg_ila_0 (
         .clk     (c0_ddr4_ui_clk),
         .probe0  (copy_px_valid),
@@ -3986,6 +3987,7 @@ module PanoramaBase_DdrBlackFrame(
         .probe26 (read_gap_counter),
         .probe27 (rd_tag_count)
     );
+`endif
 
     //------------------------------------------------------------------------
     // HD renderer (rd_clk).  Streams the committed frame into the SRC_SEL

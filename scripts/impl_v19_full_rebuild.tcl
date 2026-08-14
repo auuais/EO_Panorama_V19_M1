@@ -1,6 +1,25 @@
 set project_root [file normalize [file join [file dirname [info script]] ..]]
 source [file join $project_root scripts v19_fileset.tcl]
 
+set place_directive "Default"
+set place_directive_set 0
+set reuse_synth 0
+set qspi_no_ila 0
+foreach arg $argv {
+    if {$arg eq ""} {
+        continue
+    } elseif {$arg eq "reuse-synth"} {
+        set reuse_synth 1
+    } elseif {$arg eq "noila" || $arg eq "qspi-no-ila"} {
+        set qspi_no_ila 1
+    } elseif {!$place_directive_set} {
+        set place_directive $arg
+        set place_directive_set 1
+    } else {
+        error "Unexpected argument '$arg'; expected one place directive plus optional reuse-synth/noila"
+    }
+}
+
 # Progress reporting.
 #
 # Only synthesis shows up in an open Vivado GUI, because it is the one stage
@@ -35,9 +54,27 @@ if {![catch {open $v19_progress_file w} fh]} {
     close $fh
 }
 open_project [file join $project_root EO_Panorama_V19_M1.xpr]
+set project_default_defines [get_property verilog_define [get_filesets sources_1]]
+while {[set define_idx [lsearch -exact $project_default_defines QSPI_NO_ILA]] >= 0} {
+    set project_default_defines [lreplace $project_default_defines $define_idx $define_idx]
+}
+set current_defines $project_default_defines
+set define_idx [lsearch -exact $current_defines QSPI_NO_ILA]
+if {$qspi_no_ila} {
+    if {$define_idx < 0} {
+        lappend current_defines QSPI_NO_ILA
+    }
+    puts "QSPI_NO_ILA build enabled: RTL ILA instances and ILA IPs are excluded"
+} else {
+    if {$define_idx >= 0} {
+        set current_defines [lreplace $current_defines $define_idx $define_idx]
+    }
+}
+set_property verilog_define $current_defines [get_filesets sources_1]
+
 # Never trust the .xpr's current fileset: batch runs have dropped source
 # entries on close_project, which fails the next elaboration.
-v19_refresh_fileset $project_root
+v19_refresh_fileset $project_root $qspi_no_ila
 set_param general.maxThreads 8
 
 proc parse_design_timing_summary {rpt} {
@@ -87,13 +124,10 @@ set synth_run [get_runs synth_1]
 set_property AUTO_INCREMENTAL_CHECKPOINT 0 $synth_run
 set_property INCREMENTAL_CHECKPOINT "" $synth_run
 
-# Second argument "reuse-synth" re-implements from the existing synthesis
+# Optional argument "reuse-synth" re-implements from the existing synthesis
 # checkpoint.  Only valid when the RTL has not changed since that checkpoint --
 # use it to retry placement after a MIG-internal skew failure, never after a
 # source edit.
-set reuse_synth 0
-if {[llength $argv] > 1 && [lindex $argv 1] eq "reuse-synth"} { set reuse_synth 1 }
-
 if {$reuse_synth} {
     puts "reusing existing synth_1 checkpoint (RTL assumed unchanged)"
 } else {
@@ -122,11 +156,13 @@ if {![file exists $synth_dcp]} {
     error "Synthesized checkpoint not found: $synth_dcp"
 }
 
-set ip_files [list \
-    [file join $project_root ip dbg_ila_1 dbg_ila_1.xci] \
-    [file join $project_root ip dbg_ila_0 dbg_ila_0.xci] \
-    [file join $project_root ip ddr4_sub64 ddr4_sub64.xci] \
-]
+set ip_files [list [file join $project_root ip ddr4_sub64 ddr4_sub64.xci]]
+if {!$qspi_no_ila} {
+    set ip_files [concat [list \
+        [file join $project_root ip dbg_ila_1 dbg_ila_1.xci] \
+        [file join $project_root ip dbg_ila_0 dbg_ila_0.xci] \
+    ] $ip_files]
+}
 set xdc_files [list \
     [file join $project_root constraints camera_base.xdc] \
     [file join $project_root constraints ddr4_sub64_firstpass.xdc] \
@@ -158,6 +194,11 @@ set route_rpt     [file join $impl_dir "${top}_route_status_routed.rpt"]
 # open_checkpoint sees the synthesized top DCP but leaves the ILA/MIG IP as
 # black boxes; the generated Vivado run resolves those cells by reading the
 # IP .xci files before link_design.
+if {$qspi_no_ila} {
+    v19_phase "restoring debug-capable project fileset"
+    set_property verilog_define $project_default_defines [get_filesets sources_1]
+    v19_refresh_fileset $project_root 0
+}
 close_project
 create_project -in_memory -part $part
 set_property design_mode GateLvl [current_fileset]
@@ -178,15 +219,13 @@ v19_phase "link_design"
 link_design -top $top -part $part
 
 # Placement directive, overridable from the command line:
-#   vivado ... -source scripts/impl_v19_full_rebuild.tcl -tclargs <place_directive>
+#   vivado ... -source scripts/impl_v19_full_rebuild.tcl -tclargs <place_directive> ?reuse-synth? ?noila?
 # The DDR4 PHY carries MIG-internal Min Skew checks between RXTX_BITSLICE pins
 # that are sensitive to how the rest of the design places around them.  An
 # unrelated logic edit can push one of those negative (seen 2026-08-02:
 # WPWS -0.269 on xiphy_rxtx_bitslice/D[2] with setup and hold both clean), and
 # re-running an identical build is pointless because Vivado is deterministic.
 # Changing the directive re-places the design without touching logic.
-set place_directive "Default"
-if {[llength $argv] > 0} { set place_directive [lindex $argv 0] }
 puts "place_design directive: $place_directive"
 
 v19_phase "opt_design"
@@ -217,12 +256,20 @@ v19_phase "timing reports written"
 assert_nonnegative_timing $timing_rpt
 assert_bus_skew_clean $bus_skew_rpt
 
-write_debug_probes -force $ltx_out
+if {$qspi_no_ila} {
+    v19_phase "no-ILA build: skipping debug probe file"
+} else {
+    write_debug_probes -force $ltx_out
+}
 v19_phase "timing PASSED - writing bitstream"
 write_bitstream -force $bit_out
 v19_phase "BITSTREAM DONE"
 puts "GUARDED_BITSTREAM=$bit_out"
-puts "GUARDED_LTX=$ltx_out"
+if {$qspi_no_ila} {
+    puts "GUARDED_LTX=disabled_no_ila"
+} else {
+    puts "GUARDED_LTX=$ltx_out"
+}
 
 close_design
 close_project

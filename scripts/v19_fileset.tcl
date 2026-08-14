@@ -19,7 +19,7 @@ proc v19_add_if_missing {path {fileset sources_1}} {
     }
 }
 
-proc v19_refresh_fileset {project_root} {
+proc v19_refresh_fileset {project_root {skip_debug_ip 0}} {
     foreach src [lsort [glob -nocomplain [file join $project_root src *.v]]] {
         v19_add_if_missing $src
     }
@@ -35,9 +35,20 @@ proc v19_refresh_fileset {project_root} {
                       [file join $project_root constraints ddr4_sub64_firstpass.xdc]] {
         v19_add_if_missing $xdc constrs_1
     }
-    foreach xci [list [file join $project_root ip ddr4_sub64 ddr4_sub64.xci] \
-                      [file join $project_root ip dbg_ila_0 dbg_ila_0.xci] \
-                      [file join $project_root ip dbg_ila_1 dbg_ila_1.xci]] {
+    set ip_defs [list [file join $project_root ip ddr4_sub64 ddr4_sub64.xci]]
+    set debug_ip_defs [list [file join $project_root ip dbg_ila_0 dbg_ila_0.xci] \
+                            [file join $project_root ip dbg_ila_1 dbg_ila_1.xci]]
+    if {$skip_debug_ip} {
+        foreach xci $debug_ip_defs {
+            set existing [get_files -quiet [file normalize $xci]]
+            if {[llength $existing]} {
+                remove_files $existing
+            }
+        }
+    } else {
+        set ip_defs [concat $ip_defs $debug_ip_defs]
+    }
+    foreach xci $ip_defs {
         if {![file exists $xci]} { error "Required IP definition is missing: $xci" }
         v19_add_if_missing $xci
     }

@@ -17,6 +17,7 @@
 set -u
 cd "$(dirname "$0")/.."
 VIVADO="C:/AMDDesignTools/2025.2/Vivado/bin/vivado.bat"
+EXTRA_TCLARGS=("$@")
 
 # Refuse to run twice.  Two sweeps sharing EO_Panorama_V19_M1.runs/synth_1
 # corrupt each other's checkpoint -- observed as
@@ -48,7 +49,7 @@ for d in "${DIRECTIVES[@]}"; do
     fi
     "$VIVADO" -mode batch -nojournal -nolog \
         -source scripts/impl_v19_full_rebuild.tcl \
-        -tclargs "$d" $reuse > build_live_console.log 2>&1
+        -tclargs "$d" $reuse "${EXTRA_TCLARGS[@]}" > build_live_console.log 2>&1
     rc=$?
     summary=$(grep -E "^Routed timing summary:" build_live_console.log | tail -1)
     echo "  $d -> rc=$rc  $summary" | tee -a build_sweep_result.txt
