@@ -988,6 +988,9 @@ module PanoramaBase_DdrBlackFrame(
     wire [5:0]  irv19_forfeit_req;
     wire [5:0]  irv19_forfeit_ack;
     wire [5:0]  irv19_rejoin_shed;
+    wire        v19_capture_family_active;
+    wire        irv19_mode_force_rejoin;
+    wire        v19_mode_force_rejoin;
 
     IrPanoHealthGuard u_ir_pano_health_guard (
         .clk              (c0_ddr4_ui_clk),
@@ -1146,6 +1149,22 @@ module PanoramaBase_DdrBlackFrame(
     // address, and a phantom marker would corrupt the frame-set manager's
     // ownership ring.
     wire irv19_capture_active = (SRC_SEL == SRC_V19) && ir_stack_ui;
+    assign v19_capture_family_active = (SRC_SEL == SRC_V19) && !ir_stack_ui;
+    reg v19_capture_family_active_q;
+    reg irv19_capture_active_q;
+    always @(posedge c0_ddr4_ui_clk) begin
+        if (ui_rst || !running) begin
+            v19_capture_family_active_q <= 1'b0;
+            irv19_capture_active_q <= 1'b0;
+        end else begin
+            v19_capture_family_active_q <= v19_capture_family_active;
+            irv19_capture_active_q <= irv19_capture_active;
+        end
+    end
+    assign v19_mode_force_rejoin =
+        running && (v19_capture_family_active ^ v19_capture_family_active_q);
+    assign irv19_mode_force_rejoin =
+        running && (irv19_capture_active ^ irv19_capture_active_q);
     wire cap0_empty_mux = irv19_capture_active ? irv19_cap0_empty : v19_cap0_empty;
     wire cap1_empty_mux = irv19_capture_active ? irv19_cap1_empty : v19_cap1_empty;
     wire cap2_empty_mux = irv19_capture_active ? irv19_cap2_empty : v19_cap2_empty;
@@ -1857,36 +1876,42 @@ module PanoramaBase_DdrBlackFrame(
         EoV19CamRejoin u_v19_rejoin0 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
             .cam_alive_tgl(v19_cam_alive_tgl[0]), .desc_valid(v19_cap_desc_valid[0]),
             .rejoin_busy(v19_rejoin_busy[0]), .forfeit_ack(v19_forfeit_ack[0]),
+            .force_rejoin(v19_mode_force_rejoin),
             .join_enable(v19_join_enable[0]), .cap_fifo_rst_req(v19_cap_fifo_rst[0]),
             .free_fifo_rst_req(v19_free_fifo_rst[0]), .forfeit_req(v19_forfeit_req[0]),
             .dbg_state(v19_rejoin_state0), .shed_sticky(v19_rejoin_shed[0]));
         EoV19CamRejoin u_v19_rejoin1 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
             .cam_alive_tgl(v19_cam_alive_tgl[1]), .desc_valid(v19_cap_desc_valid[1]),
             .rejoin_busy(v19_rejoin_busy[1]), .forfeit_ack(v19_forfeit_ack[1]),
+            .force_rejoin(v19_mode_force_rejoin),
             .join_enable(v19_join_enable[1]), .cap_fifo_rst_req(v19_cap_fifo_rst[1]),
             .free_fifo_rst_req(v19_free_fifo_rst[1]), .forfeit_req(v19_forfeit_req[1]),
             .dbg_state(v19_rejoin_state1), .shed_sticky(v19_rejoin_shed[1]));
         EoV19CamRejoin u_v19_rejoin2 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
             .cam_alive_tgl(v19_cam_alive_tgl[2]), .desc_valid(v19_cap_desc_valid[2]),
             .rejoin_busy(v19_rejoin_busy[2]), .forfeit_ack(v19_forfeit_ack[2]),
+            .force_rejoin(v19_mode_force_rejoin),
             .join_enable(v19_join_enable[2]), .cap_fifo_rst_req(v19_cap_fifo_rst[2]),
             .free_fifo_rst_req(v19_free_fifo_rst[2]), .forfeit_req(v19_forfeit_req[2]),
             .dbg_state(v19_rejoin_state2), .shed_sticky(v19_rejoin_shed[2]));
         EoV19CamRejoin u_v19_rejoin3 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
             .cam_alive_tgl(v19_cam_alive_tgl[3]), .desc_valid(v19_cap_desc_valid[3]),
             .rejoin_busy(v19_rejoin_busy[3]), .forfeit_ack(v19_forfeit_ack[3]),
+            .force_rejoin(v19_mode_force_rejoin),
             .join_enable(v19_join_enable[3]), .cap_fifo_rst_req(v19_cap_fifo_rst[3]),
             .free_fifo_rst_req(v19_free_fifo_rst[3]), .forfeit_req(v19_forfeit_req[3]),
             .dbg_state(v19_rejoin_state3), .shed_sticky(v19_rejoin_shed[3]));
         EoV19CamRejoin u_v19_rejoin4 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
             .cam_alive_tgl(v19_cam_alive_tgl[4]), .desc_valid(v19_cap_desc_valid[4]),
             .rejoin_busy(v19_rejoin_busy[4]), .forfeit_ack(v19_forfeit_ack[4]),
+            .force_rejoin(v19_mode_force_rejoin),
             .join_enable(v19_join_enable[4]), .cap_fifo_rst_req(v19_cap_fifo_rst[4]),
             .free_fifo_rst_req(v19_free_fifo_rst[4]), .forfeit_req(v19_forfeit_req[4]),
             .dbg_state(v19_rejoin_state4), .shed_sticky(v19_rejoin_shed[4]));
         EoV19CamRejoin u_v19_rejoin5 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
             .cam_alive_tgl(v19_cam_alive_tgl[5]), .desc_valid(v19_cap_desc_valid[5]),
             .rejoin_busy(v19_rejoin_busy[5]), .forfeit_ack(v19_forfeit_ack[5]),
+            .force_rejoin(v19_mode_force_rejoin),
             .join_enable(v19_join_enable[5]), .cap_fifo_rst_req(v19_cap_fifo_rst[5]),
             .free_fifo_rst_req(v19_free_fifo_rst[5]), .forfeit_req(v19_forfeit_req[5]),
             .dbg_state(v19_rejoin_state5), .shed_sticky(v19_rejoin_shed[5]));
@@ -1936,36 +1961,42 @@ module PanoramaBase_DdrBlackFrame(
         EoV19CamRejoin u_irv19_rejoin0 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
             .cam_alive_tgl(irv19_cam_alive_tgl[0]), .desc_valid(irv19_cap_desc_valid[0]),
             .rejoin_busy(irv19_rejoin_busy[0]), .forfeit_ack(irv19_forfeit_ack[0]),
+            .force_rejoin(irv19_mode_force_rejoin),
             .join_enable(irv19_join_enable[0]), .cap_fifo_rst_req(irv19_cap_fifo_rst[0]),
             .free_fifo_rst_req(irv19_free_fifo_rst[0]), .forfeit_req(irv19_forfeit_req[0]),
             .dbg_state(), .shed_sticky(irv19_rejoin_shed[0]));
         EoV19CamRejoin u_irv19_rejoin1 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
             .cam_alive_tgl(irv19_cam_alive_tgl[1]), .desc_valid(irv19_cap_desc_valid[1]),
             .rejoin_busy(irv19_rejoin_busy[1]), .forfeit_ack(irv19_forfeit_ack[1]),
+            .force_rejoin(irv19_mode_force_rejoin),
             .join_enable(irv19_join_enable[1]), .cap_fifo_rst_req(irv19_cap_fifo_rst[1]),
             .free_fifo_rst_req(irv19_free_fifo_rst[1]), .forfeit_req(irv19_forfeit_req[1]),
             .dbg_state(), .shed_sticky(irv19_rejoin_shed[1]));
         EoV19CamRejoin u_irv19_rejoin2 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
             .cam_alive_tgl(irv19_cam_alive_tgl[2]), .desc_valid(irv19_cap_desc_valid[2]),
             .rejoin_busy(irv19_rejoin_busy[2]), .forfeit_ack(irv19_forfeit_ack[2]),
+            .force_rejoin(irv19_mode_force_rejoin),
             .join_enable(irv19_join_enable[2]), .cap_fifo_rst_req(irv19_cap_fifo_rst[2]),
             .free_fifo_rst_req(irv19_free_fifo_rst[2]), .forfeit_req(irv19_forfeit_req[2]),
             .dbg_state(), .shed_sticky(irv19_rejoin_shed[2]));
         EoV19CamRejoin u_irv19_rejoin3 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
             .cam_alive_tgl(irv19_cam_alive_tgl[3]), .desc_valid(irv19_cap_desc_valid[3]),
             .rejoin_busy(irv19_rejoin_busy[3]), .forfeit_ack(irv19_forfeit_ack[3]),
+            .force_rejoin(irv19_mode_force_rejoin),
             .join_enable(irv19_join_enable[3]), .cap_fifo_rst_req(irv19_cap_fifo_rst[3]),
             .free_fifo_rst_req(irv19_free_fifo_rst[3]), .forfeit_req(irv19_forfeit_req[3]),
             .dbg_state(), .shed_sticky(irv19_rejoin_shed[3]));
         EoV19CamRejoin u_irv19_rejoin4 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
             .cam_alive_tgl(irv19_cam_alive_tgl[4]), .desc_valid(irv19_cap_desc_valid[4]),
             .rejoin_busy(irv19_rejoin_busy[4]), .forfeit_ack(irv19_forfeit_ack[4]),
+            .force_rejoin(irv19_mode_force_rejoin),
             .join_enable(irv19_join_enable[4]), .cap_fifo_rst_req(irv19_cap_fifo_rst[4]),
             .free_fifo_rst_req(irv19_free_fifo_rst[4]), .forfeit_req(irv19_forfeit_req[4]),
             .dbg_state(), .shed_sticky(irv19_rejoin_shed[4]));
         EoV19CamRejoin u_irv19_rejoin5 (.clk(c0_ddr4_ui_clk), .rst(ui_rst), .tick_ms(v19_tick_ms),
             .cam_alive_tgl(irv19_cam_alive_tgl[5]), .desc_valid(irv19_cap_desc_valid[5]),
             .rejoin_busy(irv19_rejoin_busy[5]), .forfeit_ack(irv19_forfeit_ack[5]),
+            .force_rejoin(irv19_mode_force_rejoin),
             .join_enable(irv19_join_enable[5]), .cap_fifo_rst_req(irv19_cap_fifo_rst[5]),
             .free_fifo_rst_req(irv19_free_fifo_rst[5]), .forfeit_req(irv19_forfeit_req[5]),
             .dbg_state(), .shed_sticky(irv19_rejoin_shed[5]));

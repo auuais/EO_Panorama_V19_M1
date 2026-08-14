@@ -38,6 +38,11 @@
 // good, make the manager forfeit every record of that camera's banks, then
 // re-enable and let the normal seeding path issue exactly four fresh tokens.
 //
+// The same protocol is also used by mode-transition force_rejoin.  A mode mux
+// can disable a DDR capture family while a writer privately owns a bank token;
+// without an explicit forfeit that token is leaked, and after enough EO/IR hops
+// every camera can run out of banks even though its clock never disappeared.
+//
 // INTERLOCKS THAT MATTER
 //
 //   * The protocol is entered ONLY from a clock-loss event.  At power-on the
@@ -78,6 +83,7 @@ module EoV19CamRejoin #(
     input  wire desc_valid,       // this camera's completion-descriptor strobe
     input  wire rejoin_busy,      // either of this camera's FIFOs mid-reset
     input  wire forfeit_ack,      // manager applied the forfeit
+    input  wire force_rejoin,     // mode boundary: rebuild this token/FIFO pool
 
     output reg  join_enable,
     output reg  cap_fifo_rst_req,
@@ -131,7 +137,19 @@ module EoV19CamRejoin #(
             if (tgl_edge) lost_ctr <= {LOST_BITS{1'b0}};
             else if (!lost_expired) lost_ctr <= lost_ctr + 1'b1;
 
-            case (state)
+            if (force_rejoin &&
+                ((state == ST_IDLE) || (state == ST_RUN) ||
+                 (state == ST_CONFIRM) || (state == ST_SHED))) begin
+                join_enable <= 1'b0;
+                cap_fifo_rst_req <= 1'b0;
+                free_fifo_rst_req <= 1'b0;
+                ms_ctr <= 12'd0;
+                attempts <= 2'd0;
+                if (lost_expired)
+                    state <= ST_LOST;
+                else
+                    state <= ST_QUIESCE;
+            end else case (state)
                 ST_IDLE: begin
                     // Wait for this camera to show a clock for the first time.
                     // Entering the protocol from here would re-baseline a
