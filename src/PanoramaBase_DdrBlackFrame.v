@@ -1191,12 +1191,45 @@ module PanoramaBase_DdrBlackFrame(
     wire cap4_marker_mux = irv19_capture_active ? irv19_cap4_marker : v19_cap4_marker;
     wire cap5_marker_mux = irv19_capture_active ? irv19_cap5_marker : v19_cap5_marker;
 
-    wire v19_cap0_selectable = !cap0_empty_mux && !cap_rejoin_busy_mux[0];
-    wire v19_cap1_selectable = !cap1_empty_mux && !cap_rejoin_busy_mux[1];
-    wire v19_cap2_selectable = !cap2_empty_mux && !cap_rejoin_busy_mux[2];
-    wire v19_cap3_selectable = !cap3_empty_mux && !cap_rejoin_busy_mux[3];
-    wire v19_cap4_selectable = !cap4_empty_mux && !cap_rejoin_busy_mux[4];
-    wire v19_cap5_selectable = !cap5_empty_mux && !cap_rejoin_busy_mux[5];
+    // A capture FIFO is only a candidate for the write arbiter when it holds
+    // data, is not mid-reset, AND that camera's own pop strobe is not already
+    // in flight.
+    //
+    // v19_capN_pop / irv19_capN_pop are REGISTERED strobes, so the rd_en they
+    // drive reaches the FWFT FIFO one ui_clk after the launch that requested
+    // it, and dout still shows the OLD head during that cycle.  The
+    // write-retire handoff below
+    //
+    //     if (!issue_busy || (write_retiring && cmd_write_capture))
+    //
+    // can launch again in exactly that cycle, and its comment used to claim
+    // the head "was popped when the retiring request was launched".  It was
+    // not.  The second launch re-read the same head -- writing that beat to
+    // DDR twice -- and then popped a SECOND entry, which was consumed without
+    // ever being launched.  Its 16 source pixels (32 for IR) were never
+    // written, so the bank kept whatever an older frame had left at that
+    // address: invisible on a static scene, and sparse displaced dashes on a
+    // moving one.
+    //
+    // Proven against the real writer and its real xpm_fifo_async in
+    // sim/tb_EoV19CaptureLaunchPop.v: at the measured hardware duty it loses
+    // 3.9% of capture beats and wastes ~10% of capture write commands on
+    // duplicates; with this guard every beat is launched exactly once.
+    //
+    // Both families are OR-ed rather than muxed on irv19_capture_active.  The
+    // mux would read the wrong family for one cycle across a mode change, and
+    // only the active family ever asserts a pop, so the OR costs nothing.
+    wire [5:0] cap_pop_inflight = {
+        v19_cap5_pop | irv19_cap5_pop, v19_cap4_pop | irv19_cap4_pop,
+        v19_cap3_pop | irv19_cap3_pop, v19_cap2_pop | irv19_cap2_pop,
+        v19_cap1_pop | irv19_cap1_pop, v19_cap0_pop | irv19_cap0_pop};
+
+    wire v19_cap0_selectable = !cap0_empty_mux && !cap_rejoin_busy_mux[0] && !cap_pop_inflight[0];
+    wire v19_cap1_selectable = !cap1_empty_mux && !cap_rejoin_busy_mux[1] && !cap_pop_inflight[1];
+    wire v19_cap2_selectable = !cap2_empty_mux && !cap_rejoin_busy_mux[2] && !cap_pop_inflight[2];
+    wire v19_cap3_selectable = !cap3_empty_mux && !cap_rejoin_busy_mux[3] && !cap_pop_inflight[3];
+    wire v19_cap4_selectable = !cap4_empty_mux && !cap_rejoin_busy_mux[4] && !cap_pop_inflight[4];
+    wire v19_cap5_selectable = !cap5_empty_mux && !cap_rejoin_busy_mux[5] && !cap_pop_inflight[5];
 
     // Consecutive capture beats served from one camera before the arbiter
     // rotates.
@@ -3676,10 +3709,14 @@ module PanoramaBase_DdrBlackFrame(
                 // A retired camera write can hand this held-command slot
                 // directly to the next request.  The previous implementation
                 // forced one idle ui_clk cycle after every capture beat even
-                // when both MIG write channels accepted together.  Camera
-                // FIFO traffic is safe for this handoff because its FIFO head
-                // was popped when the retiring request was launched; all
+                // when both MIG write channels accepted together.  All
                 // read/output address state remains stable when selected here.
+                //
+                // Camera FIFO traffic is NOT automatically safe for this
+                // handoff: the retiring request's pop is still in flight, so
+                // that camera's head has not moved yet.  cap_pop_inflight in
+                // v19_capN_selectable carries the guard -- see its declaration
+                // for the beats this cost before it was added.
                 if (!issue_busy || (write_retiring && cmd_write_capture)) begin
                     if (scan_want) begin
                         // Hard real-time consumer: maintain the HD-SDI scan
