@@ -93,7 +93,7 @@ def hexval(text):
         return 0
 
 
-def report(path):
+def report(path, legacy=False):
     header, data = load(path)
     n = len(data)
     if n == 0:
@@ -121,11 +121,16 @@ def report(path):
                 counts[name] += (bus >> bit) & 1
         if cap_col is not None:
             cap = hexval(row[cap_col])
-            overflow |= (cap >> 54) & 0x3F
-            cap_dup |= (cap >> 53) & 1
-            cap_gap |= (cap >> 52) & 1
-            for c in range(6):
-                peaks[c] = max(peaks[c], (cap >> (4 + 8 * c)) & 0xFF)
+            if legacy:
+                overflow |= (cap >> 48) & 0x3F
+                for c in range(6):
+                    peaks[c] = max(peaks[c], ((cap >> (9 * c)) & 0x1FF) * 8)
+            else:
+                overflow |= (cap >> 54) & 0x3F
+                cap_dup |= (cap >> 53) & 1
+                cap_gap |= (cap >> 52) & 1
+                for c in range(6):
+                    peaks[c] = max(peaks[c], ((cap >> (4 + 8 * c)) & 0xFF) * 16)
 
     print(f"=== {Path(path).name}   {n} samples ===")
     order = ["running", "write_retiring", "scan_active", "copy_active",
@@ -142,9 +147,12 @@ def report(path):
 
     print(f"  per-camera capture FIFO peak (entries), overflow=0b{overflow:06b}")
     for c in range(6):
-        print(f"    cam{c}: {peaks[c] * 16:<7} {'#' * min(40, peaks[c])}")
-    print(f"  capture stream integrity: dup_seen={cap_dup}  gap_seen={cap_gap}"
-          + ("   <-- MUST BE 0/0" if (cap_dup or cap_gap) else "   ok"))
+        print(f"    cam{c}: {peaks[c]:<7} {'#' * min(40, peaks[c] // 16)}")
+    if legacy:
+        print("  capture stream integrity: not present in this build")
+    else:
+        print(f"  capture stream integrity: dup_seen={cap_dup}  gap_seen={cap_gap}"
+              + ("   <-- MUST BE 0/0" if (cap_dup or cap_gap) else "   ok"))
 
     alive = sum(1 for p in peaks if p > 0)
     fv = counts.get("frames_valid", 0)
@@ -163,7 +171,13 @@ def report(path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        sys.exit("usage: v19_decode_capture.py <ila.csv> [...]")
-    for p in sys.argv[1:]:
-        report(p)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    # Captures taken before the capture-stream integrity alarms were added pack
+    # the same probe differently: overflow at [53:48] and six 9-bit peaks in
+    # 8-entry units.  The signature nibble is 0xC in both, so the layout cannot
+    # be told from the word -- say which one you have.
+    legacy = "--legacy" in sys.argv
+    if not args:
+        sys.exit("usage: v19_decode_capture.py [--legacy] <ila.csv> [...]")
+    for a in args:
+        report(a, legacy)

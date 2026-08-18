@@ -95,11 +95,12 @@ def main():
     if not frames:
         sys.exit("no frames given")
 
+    per_frame = []
     print(f"{'frame':<22} {'phase0':>8} {'others':>8} {'excess':>8}  verdict")
     for path in frames:
         Y = luma(path)
         hist, counts = scan(Y, a.flat)
-        others = np.concatenate([hist[1:]])
+        others = hist[1:]
         base = others.mean()
         p0 = hist[0]
         excess = (p0 / base - 1.0) * 100 if base > 0 else 0.0
@@ -109,6 +110,22 @@ def main():
         verdict = "DROPOUTS" if sigma > 4 else ("suspicious" if sigma > 2 else "clean")
         print(f"{os.path.basename(path):<22} {p0:8.4f} {base:8.4f} "
               f"{excess:+7.1f}%  {verdict} ({sigma:+.1f} sigma)")
+        per_frame.append(excess)
+
+    # A single frame carries only a fraction of a percent of signal, so the
+    # useful statistic is the mean excess across the set with the standard
+    # error of that mean.  The sign test is the honest one: under the null,
+    # phase 0 is above the other fifteen half the time.
+    if len(per_frame) > 2:
+        e = np.array(per_frame)
+        sem = e.std(ddof=1) / np.sqrt(len(e))
+        pos = int((e > 0).sum())
+        print()
+        print(f"  aggregate over {len(e)} frames: "
+              f"phase-0 excess {e.mean():+.2f}% +/- {sem:.2f}% (sem), "
+              f"{e.mean()/sem if sem else 0:+.1f} sigma")
+        print(f"  frames with phase 0 above the other fifteen: {pos}/{len(e)}"
+              f"   (expect ~{len(e)/2:.0f} if the capture stream is exact)")
     return 0
 
 
