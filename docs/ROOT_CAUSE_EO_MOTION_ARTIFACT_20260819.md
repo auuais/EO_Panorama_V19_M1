@@ -118,9 +118,13 @@ either signature; bank restarts are ~1 M addresses apart and fall outside the
 gap window by construction. The compare is pipelined one cycle behind the
 launch so it stays out of the arbiter's critical path.
 
-FIFO peaks moved from 8-entry to 16-entry units to make room.
-`scripts/v19_decode_capture.py` decodes the new layout and prints the two
-alarms first.
+FIFO peaks share the same word.  They were briefly moved to 16-entry units to
+make room, which destroyed them -- a healthy board's capture FIFOs sit at 0-8
+entries, so every peak quantised to zero and the decoder's verdict flipped to
+"capture DEAD" on a working board (`6734e26` puts them back to 8-entry
+saturating units).  `scripts/v19_decode_capture.py` decodes the layout and
+prints the two alarms first; pass `--legacy` for captures taken before this
+change.
 
 ## 6. What this retires from the earlier plans
 
@@ -137,16 +141,69 @@ alarms first.
   urgency is lower now that ~10% of capture write commands stop being wasted.
 * **The retry-bank collision theory** — already dead; nothing here revives it.
 
-## 7. Still open
+## 7. Hardware result
 
-* **Visual confirmation needs a moving scene.** A static-scene detector was
-  tried (`scripts/eo_beat_dropout_scan.py`: lost beats always span
-  `x0..x0+15` with `x0` a multiple of 16, so their edges land on a 16-pixel
-  grid that ordinary picture content has no reason to prefer). It is sound but
-  not sensitive enough here: measured per-pixel temporal noise on the settled
-  rig is only 1.35 LSB, so a stale block differs from a fresh one by ~1.9 LSB
-  against a flat-region step floor of ~1.1 LSB. Keep the tool for a scene with
-  a real temporal gradient; use the moving checkerboard for the acceptance run.
+Routed clean on the first directive, with better margin than the baseline:
+WNS +0.128, WHS +0.010, WPWS +0.054, all totals zero (`dbd4658` was WPWS
++0.002). The user confirmed the artifact gone by eye.
+
+### 7.1 The artifact is one capture beat, measured
+
+`scripts/eo_beat_run_scan.py` settles this from a **single frame**, with no
+reference frame and no moving target. A stale run sits in ONE row, so it
+differs from both vertical neighbours while those two agree with each other --
+a real scene edge cannot do that, because it makes consecutive rows differ
+progressively rather than singling one out. And a capture beat is exactly 16
+YUV422 pixels, so a dropped one must land on the 16-pixel grid. Nothing else in
+the datapath has a 16-pixel period.
+
+On the user's artifact capture from the `EO_Panorama_V19_M1_IR_DDR` fork
+(`captures/EO3_artifact_evidence/frame_20260819_042305.png`): **47 isolated
+runs, 30 ending exactly at x = 15 (mod 16)** against a 6.25% chance rate,
+P = 7e-25. Individual fits are exact -- row 116 -> 528..543, rows 117 and 122
+-> 1232..1247, row 131 -> 1120..1135.
+
+### 7.2 Controlled three-way comparison
+
+One scene (the bench checkerboard), 20 frames each, identical exposure
+(mean 51.8) and noise (temporal std 9.1-9.3). "Excess" is against a
+permutation null that reshuffles run positions while keeping their widths.
+
+| build | runs | fit a whole beat | null | excess beat-aligned | per frame |
+|---|---:|---:|---:|---:|---:|
+| batch 32, no guard | 5484 | 71.8% | 22.5% | 2702 | **135** |
+| batch 1, no guard (`b42774a`) | 3746 | 58.1% | 19.3% | 1455 | **73** |
+| batch 1, **guard** | 2004 | 40.2% | 16.2% | 480 | **24** |
+
+Batch 32 -> 1 is the `f9c4a61` mitigation, now quantified at 1.9x. **The guard
+adds a further 3.0x**, 5.6x combined. This also confirms the `d5c7078` bisect
+quantitatively: batching did not introduce the fault, it multiplied it, by
+keeping the arbiter on one camera long enough for the one-beat offset to build.
+
+Applied to the historical captures, the same test gives a monotone gradient:
+`Still_rig` (2026-08-05, batch 32) 15% at phase 15, P = 3e-6;
+`static_reference` (2026-08-06, batch 1) 11%, P = 8e-4; tonight's fixed builds
+4.2% and 7%, i.e. **at or below the 6.25% null**.
+
+### 7.3 Electrical invariant
+
+`cap_dup_seen = 0` and `cap_gap_seen = 0` across three ILA windows with capture
+provably running (`write_retiring` 160-231 per 2048 samples), no FIFO overflow,
+no bank conflict. Retired DDR writes rose from 36.7 to 94.1 per 1000 cycles
+toward the 115 the frame rate needs, and the command register spends 27% less
+time holding a stalled read.
+
+## 8. Still open
+
+* **The residual 24 beat-aligned runs per frame.** The guard makes the launched
+  address stream provably exact -- `cap_gap_seen` and `cap_dup_seen` both read
+  0, and those alarms fire on precisely the anomaly in question -- so the
+  residual is most likely the optical detector's own floor: the permutation
+  null reshuffles positions but keeps the width distribution, and on this scene
+  the checker feature scale is itself close to 16 px, so scene features fit the
+  grid more often than the shuffle predicts. Worth re-measuring on a scene
+  whose dominant feature size is deliberately NOT a multiple of 16 before
+  concluding a second mechanism exists.
 * **EO single does not lease the bank it reads.** `eo_bank_q` latches
   `cam_last_bank[eo_sel]` and the writer is free to re-acquire that bank. With
   four banks and a read that takes well under a frame there are ~3 frames of
