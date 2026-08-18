@@ -1088,12 +1088,40 @@ module PanoramaBase_DdrBlackFrame(
     // supervisor is re-initialising would hand the DDR write engine a garbage
     // address, and a phantom marker would corrupt the frame-set manager's
     // ownership ring.
-    wire v19_cap0_selectable = !v19_cap0_empty && !v19_rejoin_busy[0];
-    wire v19_cap1_selectable = !v19_cap1_empty && !v19_rejoin_busy[1];
-    wire v19_cap2_selectable = !v19_cap2_empty && !v19_rejoin_busy[2];
-    wire v19_cap3_selectable = !v19_cap3_empty && !v19_rejoin_busy[3];
-    wire v19_cap4_selectable = !v19_cap4_empty && !v19_rejoin_busy[4];
-    wire v19_cap5_selectable = !v19_cap5_empty && !v19_rejoin_busy[5];
+    //
+    // ...AND that camera's own pop strobe is not already in flight.
+    //
+    // v19_capN_pop is a REGISTERED strobe, so the rd_en it drives reaches the
+    // FWFT FIFO one ui_clk after the launch that requested it, and dout still
+    // shows the OLD head during that cycle.  The write-retire handoff below
+    //
+    //     if (!issue_busy || (write_retiring && cmd_write_capture))
+    //
+    // can launch again in exactly that cycle, and its comment used to claim
+    // the head "was popped when the retiring request was launched".  It was
+    // not.  The second launch re-read the same head -- writing that beat to
+    // DDR twice -- and then popped a SECOND entry, which was consumed without
+    // ever being launched.  Its 16 source pixels were never written, so the
+    // bank kept whatever an older frame had left at that address: invisible on
+    // a static scene, and the sparse displaced dashes of
+    // docs/HANDOFF_PANORAMA_MOTION_ARTIFACT_20260805.md on a moving one.
+    //
+    // sim/tb_EoV19CaptureLaunchPop.v drives the real writer and its real
+    // xpm_fifo_async through this launcher and counts both effects.  At the
+    // measured hardware duty (app_rdy ~52%, capture frequently preempted by
+    // scan/replay/output) it loses 3.9% of capture beats and wastes ~10% of
+    // capture write commands on duplicates; with this guard it launches every
+    // beat exactly once.
+    //
+    // Blocking only the just-popped camera keeps the handoff working for the
+    // other five, so the write bubble 4a0ae7f removed only comes back when the
+    // camera that was just served is the sole requester.
+    wire v19_cap0_selectable = !v19_cap0_empty && !v19_rejoin_busy[0] && !v19_cap0_pop;
+    wire v19_cap1_selectable = !v19_cap1_empty && !v19_rejoin_busy[1] && !v19_cap1_pop;
+    wire v19_cap2_selectable = !v19_cap2_empty && !v19_rejoin_busy[2] && !v19_cap2_pop;
+    wire v19_cap3_selectable = !v19_cap3_empty && !v19_rejoin_busy[3] && !v19_cap3_pop;
+    wire v19_cap4_selectable = !v19_cap4_empty && !v19_rejoin_busy[4] && !v19_cap4_pop;
+    wire v19_cap5_selectable = !v19_cap5_empty && !v19_rejoin_busy[5] && !v19_cap5_pop;
 
     // Consecutive capture beats served from one camera before the arbiter
     // rotates.
@@ -1214,23 +1242,79 @@ module PanoramaBase_DdrBlackFrame(
             endcase
         end
     end
+    //------------------------------------------------------------------------
+    // Capture-stream integrity monitor.
+    //
+    // A camera's payload beats walk one contiguous +BEAT_STRIDE address ramp
+    // for the whole frame (ROW_STRIDE_ADDR is exactly 120*BEAT_STRIDE_ADDR),
+    // so every launched capture command must sit one beat above that camera's
+    // previous one.  Two departures are alarms:
+    //
+    //   dup  the same address launched twice -- a wasted DDR write, and the
+    //        fingerprint of a launch that read a FIFO head whose pop was still
+    //        in flight (the fault v19_capN_selectable's guard now prevents);
+    //   gap  a small forward jump -- beats popped and never written, whose
+    //        16 source pixels keep an older frame's content.
+    //
+    // Only the low 16 address bits are kept.  Both alarms look at differences
+    // of a few beats, and a 16-bit wrap adds a multiple of 65536 to the
+    // difference, so it cannot manufacture either signature.  Bank restarts
+    // are ~1 M addresses apart and fall outside the gap window by construction.
+    //
+    // The compare is pipelined one cycle behind the launch: v19_cap_sel_addr
+    // already carries a six-way mux, and a subtractor hung off it would land
+    // in the arbiter's critical path for a diagnostic that nothing else reads.
+    //------------------------------------------------------------------------
+    reg         v19_cap_chk_valid;
+    reg  [2:0]  v19_cap_chk_sel;
+    reg  [15:0] v19_cap_chk_addr;
+    reg  [15:0] v19_cap_last_addr [0:5];
+    reg  [5:0]  v19_cap_last_valid;
+    reg         v19_cap_dup_seen, v19_cap_gap_seen;
+    wire [15:0] v19_cap_chk_delta =
+        v19_cap_chk_addr - v19_cap_last_addr[v19_cap_chk_sel];
+    integer ci;
+    always @(posedge c0_ddr4_ui_clk) begin
+        if (ui_rst) begin
+            v19_cap_last_valid <= 6'd0;
+            v19_cap_dup_seen   <= 1'b0;
+            v19_cap_gap_seen   <= 1'b0;
+            for (ci = 0; ci < 6; ci = ci + 1)
+                v19_cap_last_addr[ci] <= 16'd0;
+        end else if (v19_cap_chk_valid) begin
+            if (v19_cap_last_valid[v19_cap_chk_sel]) begin
+                if (v19_cap_chk_delta == 16'd0)
+                    v19_cap_dup_seen <= 1'b1;
+                else if ((v19_cap_chk_delta > 16'd8) &&
+                         (v19_cap_chk_delta <= 16'd2048))
+                    v19_cap_gap_seen <= 1'b1;
+            end
+            v19_cap_last_addr[v19_cap_chk_sel]  <= v19_cap_chk_addr;
+            v19_cap_last_valid[v19_cap_chk_sel] <= 1'b1;
+        end
+    end
+
     wire [63:0] v19_dbg_bus;
     wire [63:0] v19_dbg_rows_word0;
     wire [63:0] v19_dbg_rows_word1;
     wire [63:0] v19_dbg_rows_word2;
     wire [63:0] v19_replay_dbg_word;
-    // Capture-service telemetry.  Each peak is reported in eight-entry units,
-    // so all six 0..2048-entry FIFO peaks plus the individual sticky overflow
-    // causes fit in one existing 64-bit ILA probe without growing the core.
+    // Capture-service telemetry.  Each peak is reported in sixteen-entry
+    // units, so all six 0..2048-entry FIFO peaks, the individual sticky
+    // overflow causes and the capture-stream integrity alarms fit in one
+    // existing 64-bit ILA probe without growing the core.
     // [63:60] signature 4'hC, [59:54] overflow cam5..cam0,
-    // [53:45] cam5 peak/8 ... [8:0] cam0 peak/8.
+    // [53] cap_dup_seen, [52] cap_gap_seen,
+    // [51:44] cam5 peak/16 ... [11:4] cam0 peak/16, [3:0] reserved.
     wire [63:0] v19_capture_dbg =
         {4'hC,
          v19_cap5_overflow, v19_cap4_overflow, v19_cap3_overflow,
          v19_cap2_overflow, v19_cap1_overflow, v19_cap0_overflow,
-         v19_cap5_peak[11:3], v19_cap4_peak[11:3],
-         v19_cap3_peak[11:3], v19_cap2_peak[11:3],
-         v19_cap1_peak[11:3], v19_cap0_peak[11:3]};
+         v19_cap_dup_seen, v19_cap_gap_seen,
+         v19_cap5_peak[11:4], v19_cap4_peak[11:4],
+         v19_cap3_peak[11:4], v19_cap2_peak[11:4],
+         v19_cap1_peak[11:4], v19_cap0_peak[11:4],
+         4'd0};
     localparam [8:0] V19_CONTENT_FIRST_ROW = `EO_V19_YPAD;
     wire        v19_content_first_row =
         (SRC_SEL == SRC_V19) &&
@@ -2920,6 +3004,7 @@ module PanoramaBase_DdrBlackFrame(
             v19_cap_rr       <= 3'd0;
             v19_cap_batch_ctr <= 6'd0;
             v19_cap0_pop     <= 1'b0;
+            v19_cap_chk_valid<= 1'b0;
             v19_cap1_pop     <= 1'b0;
             v19_cap2_pop     <= 1'b0;
             v19_cap3_pop     <= 1'b0;
@@ -2940,6 +3025,7 @@ module PanoramaBase_DdrBlackFrame(
             v19_cap3_pop         <= 1'b0;
             v19_cap4_pop         <= 1'b0;
             v19_cap5_pop         <= 1'b0;
+            v19_cap_chk_valid    <= 1'b0;
             if (v19_cap_marker_pop_pending)
                 v19_cap_marker_pop_pending <= 1'b0;
             v19_replay_rd_data_valid <= 1'b0;
@@ -3272,10 +3358,14 @@ module PanoramaBase_DdrBlackFrame(
                 // A retired camera write can hand this held-command slot
                 // directly to the next request.  The previous implementation
                 // forced one idle ui_clk cycle after every capture beat even
-                // when both MIG write channels accepted together.  Camera
-                // FIFO traffic is safe for this handoff because its FIFO head
-                // was popped when the retiring request was launched; all
+                // when both MIG write channels accepted together.  All
                 // read/output address state remains stable when selected here.
+                //
+                // Camera FIFO traffic is NOT automatically safe for this
+                // handoff: the retiring request's pop is still in flight, so
+                // that camera's head has not moved yet.  v19_capN_selectable
+                // carries the guard -- see its declaration for the beats this
+                // cost before it was added.
                 if (!issue_busy || (write_retiring && cmd_write_capture)) begin
                     if (scan_want) begin
                         // Hard real-time consumer: maintain the HD-SDI scan
@@ -3359,6 +3449,9 @@ module PanoramaBase_DdrBlackFrame(
                             cmd_is_keepalive <= 1'b0;
                             cmd_is_src_read  <= 1'b0;
                             cmd_addr_q       <= v19_cap_sel_addr;
+                            v19_cap_chk_valid<= 1'b1;
+                            v19_cap_chk_sel  <= v19_cap_sel;
+                            v19_cap_chk_addr <= v19_cap_sel_addr[15:0];
                             wdf_pend         <= 1'b1;
                             wdf_data_q       <= v19_cap_sel_data;
                             cmd_write_capture<= 1'b1;

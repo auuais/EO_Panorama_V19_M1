@@ -14,9 +14,21 @@ then HEX sample rows.
 
   v19_dbg_bus[63:0]      bit49 start_copy  bit48 px_ready  bit47 frames_valid
                          bit46 px_valid    bit45 frame_done  bit[44:43] state
-  v19_capture_dbg[63:0]  [63:60]=0xC  [53:48]=overflow cam5..cam0
-                         then six 9-bit FIFO peaks (peak>>3), cam5..cam0
-                         packed from bit 0 upward as cam0 first
+  v19_capture_dbg[63:0]  [63:60]=0xC  [59:54]=overflow cam5..cam0
+                         [53]=cap_dup_seen  [52]=cap_gap_seen
+                         then six 8-bit FIFO peaks (peak>>4), cam5..cam0
+                         packed from bit 4 upward as cam0 first
+
+The two integrity alarms are the ones to read first.  Both are sticky and
+both must be 0:
+
+  cap_dup_seen  the same capture address was launched twice
+  cap_gap_seen  a capture beat was popped from the CDC FIFO and never
+                written, so 16 source pixels kept an older frame's content
+
+They were introduced with the v19_capN_selectable pop-in-flight guard; see
+that declaration in src/PanoramaBase_DdrBlackFrame.v and
+sim/tb_EoV19CaptureLaunchPop.v.
 
 Usage:  python scripts/v19_decode_capture.py <ila.csv> [more.csv ...]
 """
@@ -96,6 +108,8 @@ def report(path):
     counts.update({k: 0 for k in BITS})
     peaks = [0] * 6
     overflow = 0
+    cap_dup = 0
+    cap_gap = 0
 
     for row in data:
         for name, ci in cols.items():
@@ -107,9 +121,11 @@ def report(path):
                 counts[name] += (bus >> bit) & 1
         if cap_col is not None:
             cap = hexval(row[cap_col])
-            overflow |= (cap >> 48) & 0x3F
+            overflow |= (cap >> 54) & 0x3F
+            cap_dup |= (cap >> 53) & 1
+            cap_gap |= (cap >> 52) & 1
             for c in range(6):
-                peaks[c] = max(peaks[c], (cap >> (9 * c)) & 0x1FF)
+                peaks[c] = max(peaks[c], (cap >> (4 + 8 * c)) & 0xFF)
 
     print(f"=== {Path(path).name}   {n} samples ===")
     order = ["running", "write_retiring", "scan_active", "copy_active",
@@ -126,7 +142,9 @@ def report(path):
 
     print(f"  per-camera capture FIFO peak (entries), overflow=0b{overflow:06b}")
     for c in range(6):
-        print(f"    cam{c}: {peaks[c] * 8:<7} {'#' * min(40, peaks[c])}")
+        print(f"    cam{c}: {peaks[c] * 16:<7} {'#' * min(40, peaks[c])}")
+    print(f"  capture stream integrity: dup_seen={cap_dup}  gap_seen={cap_gap}"
+          + ("   <-- MUST BE 0/0" if (cap_dup or cap_gap) else "   ok"))
 
     alive = sum(1 for p in peaks if p > 0)
     fv = counts.get("frames_valid", 0)
