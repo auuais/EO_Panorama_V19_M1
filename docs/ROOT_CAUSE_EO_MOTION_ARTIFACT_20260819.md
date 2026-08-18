@@ -193,17 +193,34 @@ no bank conflict. Retired DDR writes rose from 36.7 to 94.1 per 1000 cycles
 toward the 115 the frame rate needs, and the command register spends 27% less
 time holding a stalled read.
 
-## 8. Still open
+## 8. Final verification
 
-* **The residual 24 beat-aligned runs per frame.** The guard makes the launched
-  address stream provably exact -- `cap_gap_seen` and `cap_dup_seen` both read
-  0, and those alarms fire on precisely the anomaly in question -- so the
-  residual is most likely the optical detector's own floor: the permutation
-  null reshuffles positions but keeps the width distribution, and on this scene
-  the checker feature scale is itself close to 16 px, so scene features fit the
-  grid more often than the shuffle predicts. Worth re-measuring on a scene
-  whose dominant feature size is deliberately NOT a multiple of 16 before
-  concluding a second mechanism exists.
+Re-measured on the settled scene, after the bench had stopped changing:
+
+| build | runs/frame | fit a whole beat | null | excess/frame |
+|---|---:|---:|---:|---:|
+| main pre-fix `b42774a` | 187.3 | 58.1% | 19.2% | **72.8** |
+| main fixed, unsettled scene | 100.2 | 40.2% | 16.3% | 23.9 |
+| **main fixed `6734e26`, settled** | 31.6 | 12.3% | 8.1% | **1.3** |
+| **IR_DDR fixed `94f1005`** | 19.6 | 6.9% | 7.3% | **-0.1** |
+
+**72.8 -> 1.3 per frame, a 56x reduction, essentially at the null.**
+
+This also resolves the residual flagged before that measurement existed. The
+earlier 23.9/frame was the detector's floor under worse conditions, not a
+second mechanism: that capture was taken seconds after a full-screen pattern
+window closed, while the display and the camera AGC were still settling. Same
+bitstream, same batch setting, settled scene: 1.3. Nothing in the RTL changed
+between those two rows of the table.
+
+The lesson for anyone re-running this: the beat-alignment test is sensitive to
+how busy the scene is, because its false-positive rate scales with the number
+of isolated single-row runs the scene generates at all. Compare builds only on
+captures taken under the same settled conditions, and report the permutation
+null alongside the observed rate so the floor is visible.
+
+## 9. Still open
+
 * **EO single does not lease the bank it reads.** `eo_bank_q` latches
   `cam_last_bank[eo_sel]` and the writer is free to re-acquire that bank. With
   four banks and a read that takes well under a frame there are ~3 frames of
