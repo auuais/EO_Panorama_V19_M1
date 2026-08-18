@@ -1299,21 +1299,33 @@ module PanoramaBase_DdrBlackFrame(
     wire [63:0] v19_dbg_rows_word1;
     wire [63:0] v19_dbg_rows_word2;
     wire [63:0] v19_replay_dbg_word;
-    // Capture-service telemetry.  Each peak is reported in sixteen-entry
-    // units, so all six 0..2048-entry FIFO peaks, the individual sticky
+    // Capture-service telemetry.  All six FIFO peaks, the individual sticky
     // overflow causes and the capture-stream integrity alarms fit in one
     // existing 64-bit ILA probe without growing the core.
     // [63:60] signature 4'hC, [59:54] overflow cam5..cam0,
     // [53] cap_dup_seen, [52] cap_gap_seen,
-    // [51:44] cam5 peak/16 ... [11:4] cam0 peak/16, [3:0] reserved.
+    // [51:44] cam5 peak/8 ... [11:4] cam0 peak/8, [3:0] reserved.
+    //
+    // Peaks are reported in EIGHT-entry units and saturate, not sixteen.
+    // Sixteen was tried first because it freed the two alarm bits with a
+    // trivial edit, and it destroyed the measurement: a healthy board's
+    // capture FIFOs sit at 0-8 entries, so every peak quantised to zero and
+    // v19_decode_capture.py's verdict flipped to "capture DEAD -> writers hold
+    // no bank tokens" on a board writing 100 beats per 1000 cycles.  The
+    // useful range is the bottom of the scale, so give up the top instead:
+    // prog_full is at 1024 of 2048, and anything at all near that is already
+    // reported by the overflow bits.
+    function [7:0] cap_peak8(input [11:0] peak);
+        cap_peak8 = peak[11] ? 8'hFF : peak[10:3];
+    endfunction
     wire [63:0] v19_capture_dbg =
         {4'hC,
          v19_cap5_overflow, v19_cap4_overflow, v19_cap3_overflow,
          v19_cap2_overflow, v19_cap1_overflow, v19_cap0_overflow,
          v19_cap_dup_seen, v19_cap_gap_seen,
-         v19_cap5_peak[11:4], v19_cap4_peak[11:4],
-         v19_cap3_peak[11:4], v19_cap2_peak[11:4],
-         v19_cap1_peak[11:4], v19_cap0_peak[11:4],
+         cap_peak8(v19_cap5_peak), cap_peak8(v19_cap4_peak),
+         cap_peak8(v19_cap3_peak), cap_peak8(v19_cap2_peak),
+         cap_peak8(v19_cap1_peak), cap_peak8(v19_cap0_peak),
          4'd0};
     localparam [8:0] V19_CONTENT_FIRST_ROW = `EO_V19_YPAD;
     wire        v19_content_first_row =

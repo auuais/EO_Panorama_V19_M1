@@ -16,8 +16,8 @@ then HEX sample rows.
                          bit46 px_valid    bit45 frame_done  bit[44:43] state
   v19_capture_dbg[63:0]  [63:60]=0xC  [59:54]=overflow cam5..cam0
                          [53]=cap_dup_seen  [52]=cap_gap_seen
-                         then six 8-bit FIFO peaks (peak>>4), cam5..cam0
-                         packed from bit 4 upward as cam0 first
+                         then six 8-bit saturating FIFO peaks (peak>>3),
+                         cam5..cam0, packed from bit 4 upward as cam0 first
 
 The two integrity alarms are the ones to read first.  Both are sticky and
 both must be 0:
@@ -130,7 +130,7 @@ def report(path, legacy=False):
                 cap_dup |= (cap >> 53) & 1
                 cap_gap |= (cap >> 52) & 1
                 for c in range(6):
-                    peaks[c] = max(peaks[c], ((cap >> (4 + 8 * c)) & 0xFF) * 16)
+                    peaks[c] = max(peaks[c], ((cap >> (4 + 8 * c)) & 0xFF) * 8)
 
     print(f"=== {Path(path).name}   {n} samples ===")
     order = ["running", "write_retiring", "scan_active", "copy_active",
