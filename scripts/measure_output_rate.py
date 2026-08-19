@@ -46,7 +46,9 @@ except ImportError:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--device", type=int, default=0)
+    ap.add_argument("--device", type=int, default=-1,
+                    help="capture device index; -1 (default) picks the one "
+                         "that actually delivers the requested raster")
     ap.add_argument("--width", type=int, default=1920)
     ap.add_argument("--height", type=int, default=1080)
     ap.add_argument("--seconds", type=float, default=6.0)
@@ -56,12 +58,39 @@ def main():
                     help="electrically measured rate, for a pass/fail control")
     a = ap.parse_args()
 
-    cap = cv2.VideoCapture(a.device, cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        sys.exit(f"could not open capture device {a.device}")
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"YUY2"))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, a.width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, a.height)
+    def open_dev(idx):
+        c = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        if not c.isOpened():
+            return None
+        c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"YUY2"))
+        c.set(cv2.CAP_PROP_FRAME_WIDTH, a.width)
+        c.set(cv2.CAP_PROP_FRAME_HEIGHT, a.height)
+        return c
+
+    # Device indices are not stable on this machine -- they have moved between
+    # runs, and an earlier session spent hours analysing a webcam instead of
+    # the FPGA feed. Identify by capability rather than by index: the SDI
+    # grabber is the one that actually delivers the requested raster.
+    if a.device < 0:
+        chosen = None
+        for idx in range(6):
+            c = open_dev(idx)
+            if c is None:
+                continue
+            ok, f = c.read()
+            if ok and f is not None and f.shape[1] == a.width and f.shape[0] == a.height:
+                print(f"  using capture device {idx} ({f.shape[1]}x{f.shape[0]})")
+                chosen = c
+                break
+            c.release()
+        if chosen is None:
+            sys.exit(f"no capture device delivers {a.width}x{a.height}; "
+                     f"pass --device explicitly")
+        cap = chosen
+    else:
+        cap = open_dev(a.device)
+        if cap is None:
+            sys.exit(f"could not open capture device {a.device}")
 
     t_end = time.time() + a.settle
     while time.time() < t_end:
