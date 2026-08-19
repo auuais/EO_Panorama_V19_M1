@@ -137,59 +137,59 @@ consecutive source start windows, so this costs nothing -- confirmed across
 the phase sweep. `frame_edge` is derived from the renderer's raster counters
 and free-runs regardless of content, so the arm cannot deadlock.
 
-## 4. What this does not settle: EO panorama
+## 4. EO panorama is already at its source rate
 
-The simulation makes one thing clear that was not clear before. Group B of
+The simulation raised a problem with the story. Group B of
 `tb_V19OutputBankRate` models EO panorama's trigger -- a latched lease that
 comes up when a fresh six-camera set completes and survives until a copy
 consumes it -- and there **the two-bank rule also reaches 30 fps**, at every
-phase. The first version of that model used an always-ready level and gave the
-same answer, so the conclusion does not depend on which of the two is right.
+phase. An earlier version of that model used an always-ready level and gave
+the same answer, so the conclusion does not depend on which reading is right:
+the output-bank coupling does not explain EO panorama's 15.
 
-So EO panorama's 15 fps is *not* fully explained by the output-bank coupling.
-Something on the source side is also gating it, and the measured
-`v19_cap_desc_valid[0]` rate of 15.00/s in panorama mode against 30.01/s in EO
-single -- same cameras, same writers -- says capture admission itself halves
-when the panorama is the consumer.
+It is explained on the source side, and measuring it needed no new build.
+`probe11` carries the capture writer's `drop_frame`, a level that is set or
+cleared only at a camera frame boundary and therefore holds for exactly one
+raster. The fraction of unconditional samples in which it is low is the
+fraction of rasters admitted.
 
-Rather than guess, this build instruments it. The timing probe now reports:
+Sampled with `scripts/capture_v19_untriggered.tcl` on build `67955bc`, twelve
+captures per mode:
 
-* **copy-start period** (replacing the output raster period, a known constant)
-* **copy-done -> next copy-start**, i.e. time spent waiting for a source
+| mode | rasters discarded at the writer | published |
+|---|---:|---:|
+| EO panorama | 5 of 12 | 15.03 |
+| EO single | 6 of 12 | 29.75 |
 
-which separates the two cases directly:
+**The rate is the same in both, and EO single publishes at 30.** So the drops
+are not caused by the panorama's token cycle -- that is the control, and it
+rules the hypothesis out rather than supporting it.
 
-| copy starts | commits | reading |
-|---|---|---|
-| 30 Hz | 15 Hz | output stage: renders produced and discarded |
-| 15 Hz | 15 Hz | source stage: the pipeline is waiting, nothing wasted |
+What they are is the exposure trigger doing its job. Admission requires
+`frame_epoch_available`, a token issued per camera strobe
+(`EoV19TriggerSource`, following STROBE_OUT0). The EO cameras expose at 15 Hz
+and transmit each image twice over BT.1120, so the strobe issues 15 tokens a
+second against 30 arriving rasters, and the writer discards the duplicates.
 
-`scripts/decode_timing_probe.py` prints the verdict.
+That closes the loop on every EO measurement taken:
 
-The source-side candidate, located in `EoV19DdrDesync.v` around line 399: at
-every camera frame boundary the writer publishes the completed frame and then
-needs a free bank token *in that same instant* to admit the next raster --
+* the writer admits ~15 rasters/s -- measured here, in both EO modes;
+* EO single commits 29.75 output frames/s but the picture changes 14.8-15.1
+  times/s on all six cameras -- each captured frame is scanned out twice;
+* EO panorama publishes 15.03, which is exactly its source rate.
 
-```verilog
-if (!fifo_prog_full && frame_epoch_available &&
-    !free_bank_empty && !free_bank_rd_rst_busy) begin
-    ... claim the next bank ...
-end else begin
-    drop_frame <= 1'b1;      // this whole raster is discarded
-end
-```
+**So EO panorama is not losing anything and needs no rate work.** Under the
+stated goal -- 30 fps everywhere except where the source delivers less -- it
+already meets the bar. Its remaining cost is latency, not content.
 
-and tokens are only returned by the frame-set manager's release sweep, which
-runs on `consumer_done` -- copy completion. So token arrival is tied to the
-publish rate, and whether a token is present at the boundary is a matter of
-phase between two 30 Hz processes. A release landing just after the boundary
-costs a whole raster, and the writer then waits a full camera frame.
+An honest limit on this: twelve samples put "about half" at roughly +/-14
+points, so these numbers support 15 against 30 and would not distinguish 15
+from 17. The optical distinct-frame counts are the precise measurement and
+they agree.
 
-Whether that is what is happening does not need another build to find out.
-`probe11` already carries the selected writer's `drop_frame`, `free_bank_empty`
-and `have_bank` bits, and `probe19` carries the frame-set state and
-`free_valid`. Capturing those in EO panorama says directly whether rasters are
-being discarded for want of a token.
+The earlier reading of `v19_cap_desc_valid[0]` at 30.01/s in EO single is
+withdrawn -- `per_in` reports the last interval, not a counted rate, and this
+is the second time that has misled. The counted and optical figures stand.
 
 ## 5. Verification plan
 
