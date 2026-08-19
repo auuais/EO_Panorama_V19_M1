@@ -171,3 +171,71 @@ the source and **not in the programmed bitstream**.
   half of a cycle. Use `scripts/capture_v19_untriggered.tcl` for anything
   rate-related. Under the triggered capture the same drop statistic read 8 of
   8; untriggered it read 5 of 12.
+
+---
+
+# Addendum, 02:00 — removing the probe was not enough
+
+Build `fc614ca`, three banks with `V19_TIMING_PROBE_EN = 0` gating a generate
+so the probe is not elaborated at all (confirmed: no `V19TimingProbe` instance
+in the synthesis log). Routed WNS +0.013 / WHS +0.010 / WPWS +0.018, archived
+at `builds/bit_archive/20260820_014801_3bank_noprobe_fc614ca_fc614ca/`.
+
+**IR panorama is still frozen: 600 identical grabs, 0.00 new frames/s.**
+
+And the control, run immediately afterwards on the same board: capfix
+`6734e26` reprogrammed gives **14.88 fps** again. So the board is fine and the
+comparison is sound.
+
+## The pattern is not "the probe" and not "the third bank"
+
+| build | probe | output banks | IR panorama |
+|---|---|---|---|
+| `6734e26` capfix | no | 2 | **14.85 / 14.88 fps** |
+| `67955bc` | yes | 2 | frozen |
+| `0125afb` | yes | 3 | frozen |
+| `fc614ca` | no | 3 | frozen |
+
+The two middle builds share nothing but the file they touch: `67955bc` adds
+only the probe, `fc614ca` adds only the three-bank change. Either alone breaks
+0x14. The one working bitstream is the one that has had neither.
+
+That is not the signature of a logic bug in either change. It is the signature
+of **a mode that survives one particular placement and not others.**
+
+Supporting it: the IR line caches are written in six independent
+`IRCAMn_PCLK` domains and read in the MIG `ui_clk`. Those crossings are
+declared asynchronous -- they appear in the routed report's *User Ignored Path
+Table* -- so they are correctly excluded from timing analysis, and static
+timing therefore says nothing about them. Every build here closes timing
+comfortably and that tells us nothing about whether the ingress works. The
+failure is always the same: `rows_min = 0`, the caches never fill, while IR
+single reads those same cameras at ~30 through a different path.
+
+## The next experiment, and why it is the right one
+
+**Rebuild `6734e26`'s source unchanged and test 0x14 on the result.**
+
+* If the fresh build of identical source also freezes, the working bitstream is
+  a lucky placement and mode 0x14 is not reproducibly buildable. That is a far
+  more serious problem than the frame rate, and it has to be fixed -- in the
+  ingress CDC -- before any change to this mode can be shipped or measured.
+* If it works, the fragility is specific to something both other builds
+  perturb, and a bisect between `6734e26` and `fc614ca` will find it in two or
+  three builds.
+
+Either answer redirects the work, which is what makes it worth 50 minutes
+before building anything else.
+
+## Status of the 30 fps goal
+
+| mode | measured | at its source rate? |
+|---|---:|---|
+| IR single | 30.0 | yes |
+| EO single | ~15 | yes -- EO cameras currently expose at 15 Hz |
+| EO panorama | ~15 | yes |
+| IR panorama | 14.85 on the only build that runs it | **no -- cameras give 30** |
+
+The three-bank change remains proven in simulation and unproven on hardware.
+It has never been tested in the mode it exists for, because that mode has not
+run on any build carrying it.
