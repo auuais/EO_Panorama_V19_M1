@@ -1074,6 +1074,10 @@ module PanoramaBase_DdrBlackFrame(
     // that the IR renderer, not the EO replay, is producing. That is exactly
     // the wedge fixed in 6456810 for IR single, one mode over.
     wire v19_panorama_consuming = !ir_single_ui && !eo_single_ui && !ir_stack_ui;
+    // Pulses on the cycle the finished output frame is handed to scan-out.
+    // Set in both commit paths below (normal frame edge, and the deferred
+    // commit after a flush); read only by the timing probe.
+    reg  v19_commit_ev;
     wire v19_copy_frame_done    = write_retiring && !cmd_write_capture &&
                                   (fb_burst_count == active_beats - 18'd1);
     wire v19_consumer_done = (SRC_SEL == SRC_V19) &&
@@ -3017,6 +3021,7 @@ module PanoramaBase_DdrBlackFrame(
             v19_cap_batch_ctr <= 6'd0;
             v19_cap0_pop     <= 1'b0;
             v19_cap_chk_valid<= 1'b0;
+            v19_commit_ev    <= 1'b0;
             v19_cap1_pop     <= 1'b0;
             v19_cap2_pop     <= 1'b0;
             v19_cap3_pop     <= 1'b0;
@@ -3038,6 +3043,7 @@ module PanoramaBase_DdrBlackFrame(
             v19_cap4_pop         <= 1'b0;
             v19_cap5_pop         <= 1'b0;
             v19_cap_chk_valid    <= 1'b0;
+            v19_commit_ev        <= 1'b0;
             if (v19_cap_marker_pop_pending)
                 v19_cap_marker_pop_pending <= 1'b0;
             v19_replay_rd_data_valid <= 1'b0;
@@ -3233,6 +3239,7 @@ module PanoramaBase_DdrBlackFrame(
                             rd_bank       <= pending_bank;
                             pending_valid <= 1'b0;
                             frame_valid   <= 1'b1;
+                            v19_commit_ev <= 1'b1;
                             rd_addr       <= pending_bank ? BANK1_BASE : BANK0_BASE;
                         end else begin
                             rd_addr       <= rd_bank_base;
@@ -3259,6 +3266,7 @@ module PanoramaBase_DdrBlackFrame(
                             rd_bank       <= pending_bank;
                             pending_valid <= 1'b0;
                             frame_valid   <= 1'b1;
+                            v19_commit_ev <= 1'b1;
                             rd_addr       <= pending_bank ? BANK1_BASE : BANK0_BASE;
                         end else begin
                             rd_addr       <= rd_bank_base;
@@ -3610,6 +3618,51 @@ module PanoramaBase_DdrBlackFrame(
     // non-V19 fallback-only probe slots are tied to zero rather than
     // reintroducing that IP configuration.
     //------------------------------------------------------------------------
+    //------------------------------------------------------------------------
+    // Timing probe: frame rates and latency, measured in fabric.
+    //
+    // An ILA window is 8.8 us and carries no timestamps, so 33 ms intervals
+    // cannot be recovered from a capture however it is triggered.  Measure
+    // them here and let the capture read the results.
+    //
+    // Costs the replay and row-window debug words their ILA slots (probe21,
+    // probe22).  V19_TIMING_PROBE_EN = 0 gives them back.
+    //------------------------------------------------------------------------
+    localparam integer V19_TIMING_PROBE_EN = 1;
+
+    // "A camera frame arrived" means whichever camera family is on screen.
+    wire probe_in_ev = ir_single_ui ? ir_cam_frame_pulse[ir_sel_ui]
+                     : ir_stack_ui  ? ir_cam_frame_pulse[0]
+                     : eo_single_ui ? v19_cap_desc_valid[eo_sel_ui]
+                                    : v19_cap_desc_valid[0];
+
+    wire [23:0] tp_per_in, tp_per_edge, tp_per_commit;
+    wire [23:0] tp_lat_commit, tp_lat_copy;
+    wire [23:0] tp_per_in_min, tp_per_commit_max, tp_lat_commit_max;
+    wire [15:0] tp_ev_count;
+
+    V19TimingProbe u_v19_timing (
+        .clk(c0_ddr4_ui_clk), .rst(ui_rst),
+        .in_frame_ev   (probe_in_ev),
+        .copy_start_ev (copy_start_accept),
+        .copy_done_ev  (v19_copy_frame_done),
+        .commit_ev     (v19_commit_ev),
+        .out_edge_ev   (frame_edge),
+        .per_in(tp_per_in), .per_edge(tp_per_edge), .per_commit(tp_per_commit),
+        .lat_commit(tp_lat_commit), .lat_copy(tp_lat_copy),
+        .per_in_min(tp_per_in_min), .per_commit_max(tp_per_commit_max),
+        .lat_commit_max(tp_lat_commit_max), .ev_count(tp_ev_count)
+    );
+
+    // [63:60] 4'hA  [59:36] camera frame period  [35:12] output raster period
+    // [11:0]  commit count (wraps)
+    wire [63:0] v19_timing_word_a =
+        {4'hA, tp_per_in, tp_per_edge, tp_ev_count[11:0]};
+    // [63:60] 4'hB  [59:36] output update period  [35:12] descriptor->commit
+    // [11:0]  descriptor->copy-done, coarse (top 12 bits of 24)
+    wire [63:0] v19_timing_word_b =
+        {4'hB, tp_per_commit, tp_lat_commit, tp_lat_copy[23:12]};
+
     dbg_ila_0 u_dbg_ila_0 (
         .clk     (c0_ddr4_ui_clk),
         .probe0  (copy_px_valid),
@@ -3662,8 +3715,12 @@ module PanoramaBase_DdrBlackFrame(
                    v19_no_common_epoch_seen, v19_descriptor_collision_seen,
                    v19_replay_banks_ready, (v19_free_valid != 6'd0)}),
         .probe20 (v19_dbg_bus),
-        .probe21 ((SRC_SEL == SRC_V19) ? v19_replay_dbg_word : c0_ddr4_app_rd_data[63:0]),
-        .probe22 ((SRC_SEL == SRC_V19) ? v19_dbg_rows_word0_strobe : 64'd0),
+        .probe21 ((SRC_SEL == SRC_V19)
+                  ? (V19_TIMING_PROBE_EN ? v19_timing_word_b : v19_replay_dbg_word)
+                  : c0_ddr4_app_rd_data[63:0]),
+        .probe22 ((SRC_SEL == SRC_V19)
+                  ? (V19_TIMING_PROBE_EN ? v19_timing_word_a : v19_dbg_rows_word0_strobe)
+                  : 64'd0),
         .probe23 ((SRC_SEL == SRC_V19) ? v19_capture_dbg : 64'd0),
         // probe24 carries the IR renderer debug word, kept in place for mode
         // transition and IR/EO interaction debugging.
