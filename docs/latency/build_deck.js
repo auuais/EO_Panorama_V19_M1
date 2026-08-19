@@ -302,17 +302,19 @@ modeSlide({
   stages: [
     { n: 1, label: "Ingest", sub: "Selected camera's full 1920x1080 frame is written to memory as it arrives", ms: "33.3 ms", tone: "src" },
     { n: 2, label: "Align", sub: "Not required - only one camera contributes", ms: "none", tone: "skip" },
-    { n: 3, label: "Render", sub: "Frame read back and copied to the output frame store", ms: "33.3 ms", tone: "proc" },
+    { n: 3, label: "Render", sub: "Frame read back and copied to the output frame store", ms: "10.1 ms measured", tone: "proc" },
     { n: 4, label: "Commit", sub: "Published at the next output frame edge", ms: "0 - 33.3 ms", tone: "out" },
     { n: 5, label: "Scan-out", sub: "Transmitted in the HD-SDI raster", ms: "0 - 33.3 ms", tone: "out" },
   ],
-  segs: [{ label: "Ingest 33.3", ms: 33.3, color: C.eo },
-         { label: "Render 33.3", ms: 33.3, color: C.ir }, ...TAIL],
-  scale: 150,
-  caption: "Bars are proportional. Commit and scan shown at their average of 16.7 ms each.",
-  best: "67 ms", worst: "133 ms", typ: "100 ms",
-  noteTitle: "What sets it:",
-  note: "the store-and-forward round trip. The frame is fully written before any of it is read back, so ingest and render cannot overlap.",
+  segs: [{ label: "Row age 16.7", ms: 16.7, color: C.eo },
+         { label: "16.4 measured", ms: 16.4, color: C.ir },
+         { label: "Scan 16.7", ms: 16.7, color: "6FC2AA" }],
+  scale: 120,
+  caption: "Measured centre segment. Row age and scan position each range 0 to 33.3 ms; shown at their average.",
+  best: "16 ms", worst: "83 ms", typ: "50 ms",
+  noteTone: C.goodLite, noteEdge: C.good,
+  noteTitle: "Measured, not derived:",
+  note: "16.4 ms from the frame becoming available to the output being published, and 29.75 new frames per second - full rate. The render is far quicker than the derived analysis assumed.",
   notes: "EO single reads back one camera's stored frame. It shares the capture path with the panorama, which is why it behaves like the panorama minus the alignment stage.",
 });
 
@@ -324,18 +326,18 @@ modeSlide({
   stages: [
     { n: 1, label: "Ingest", sub: "All six cameras write their frames to memory concurrently", ms: "33.3 ms", tone: "src" },
     { n: 2, label: "Align", sub: "Wait for a set of six frames that share one exposure instant", ms: "0 - 33.3 ms", tone: "src" },
-    { n: 3, label: "Render", sub: "Six frames read back, warped, seam-blended and folded", ms: "33.3 ms", tone: "proc" },
+    { n: 3, label: "Render", sub: "Six frames read back, warped, seam-blended and folded", ms: "38.2 ms measured", tone: "proc" },
     { n: 4, label: "Commit", sub: "Published at the next output frame edge", ms: "0 - 33.3 ms", tone: "out" },
     { n: 5, label: "Scan-out", sub: "Transmitted in the HD-SDI raster", ms: "0 - 33.3 ms", tone: "out" },
   ],
-  segs: [{ label: "Ingest 33.3", ms: 33.3, color: C.eo },
-         { label: "Align 16.7", ms: 16.7, color: "5C9BB5" },
-         { label: "Render 33.3", ms: 33.3, color: C.ir }, ...TAIL],
-  scale: 150,
-  caption: "Alignment shown at its average. It is zero when the cameras happen to be in phase and a full frame when they are not.",
-  best: "67 ms", worst: "167 ms", typ: "117 ms",
+  segs: [{ label: "Row age 16.7", ms: 16.7, color: C.eo },
+         { label: "41.1 measured  (align + render + publish)", ms: 41.1, color: C.ir },
+         { label: "Scan 16.7", ms: 16.7, color: "6FC2AA" }],
+  scale: 120,
+  caption: "41.1 ms is a lower bound: the panorama displays a matched set of six frames, which can be older than the frame timed from.",
+  best: "41 ms", worst: "108 ms", typ: "75 ms",
   noteTitle: "What sets it:",
-  note: "the EO cameras cannot be genlocked - the vendor confirmed their BT.1120 output is free-running - so the system must wait for six independently-timed frames to line up.",
+  note: "the EO cameras cannot be genlocked, so six independently-timed frames must line up. Measured 41.1 ms to publication and 15.03 new frames per second - half the cameras' output is discarded for want of a free buffer.",
   notes: "The alignment stage exists purely because the EO cameras are free-running. It is the single largest difference between EO panorama and IR panorama.",
 });
 
@@ -347,17 +349,18 @@ modeSlide({
   stages: [
     { n: 1, label: "Ingest", sub: "Selected camera's 640x512 frame written to on-chip memory", ms: "33.3 ms", tone: "src" },
     { n: 2, label: "Align", sub: "Not required - only one camera contributes", ms: "none", tone: "skip" },
-    { n: 3, label: "Render", sub: "Read from on-chip memory into the output frame store", ms: "33.3 ms", tone: "proc" },
+    { n: 3, label: "Render", sub: "Read from on-chip memory into the output frame store", ms: "25.8 ms measured", tone: "proc" },
     { n: 4, label: "Commit", sub: "Published at the next output frame edge", ms: "0 - 33.3 ms", tone: "out" },
     { n: 5, label: "Scan-out", sub: "Transmitted in the HD-SDI raster", ms: "0 - 33.3 ms", tone: "out" },
   ],
-  segs: [{ label: "Ingest 33.3", ms: 33.3, color: C.ir },
-         { label: "Render 33.3", ms: 33.3, color: "D18E68" }, ...TAIL],
-  scale: 150,
+  segs: [{ label: "Row age 16.7", ms: 16.7, color: C.ir },
+         { label: "50.1 measured", ms: 50.1, color: "D18E68" },
+         { label: "Scan 16.7", ms: 16.7, color: "6FC2AA" }],
+  scale: 120,
   caption: "IR frames are small enough to hold on-chip, so this path never touches external memory.",
-  best: "67 ms", worst: "133 ms", typ: "100 ms",
+  best: "50 ms", worst: "117 ms", typ: "84 ms",
   noteTitle: "What sets it:",
-  note: "the same store-and-forward structure as EO single. The frame store is on-chip rather than external, which removes a bandwidth risk but not a frame of latency.",
+  note: "the same store-and-forward structure as EO single, on-chip rather than external. Measured 50.1 ms to publication at a full 30.01 new frames per second.",
   notes: "Keeping the IR frame on-chip was a capacity decision, not a latency one - it does not shorten the pipeline.",
 });
 
@@ -369,51 +372,52 @@ modeSlide({
   stages: [
     { n: 1, label: "Ingest", sub: "Rows feed rolling line buffers; rendering starts after 35 rows", ms: "2.3 ms", tone: "src" },
     { n: 2, label: "Align", sub: "Not required - the six IR cameras are genlocked by the FPGA", ms: "none", tone: "skip" },
-    { n: 3, label: "Render", sub: "Warp, blend and fold, paced by the incoming rows", ms: "33.3 ms", tone: "proc" },
+    { n: 3, label: "Render", sub: "Warp, blend and fold, paced by the incoming rows", ms: "41.6 ms measured", tone: "proc" },
     { n: 4, label: "Commit", sub: "Published at the next output frame edge", ms: "0 - 33.3 ms", tone: "out" },
     { n: 5, label: "Scan-out", sub: "Transmitted in the HD-SDI raster", ms: "0 - 33.3 ms", tone: "out" },
   ],
-  segs: [{ label: "2.3", ms: 2.3, color: C.ir },
-         { label: "Render 33.3  -  overlapped with ingest", ms: 33.3, color: "D18E68" }, ...TAIL],
-  scale: 150,
-  caption: "Rendering runs concurrently with ingest rather than after it - this is where the saving comes from.",
-  best: "36 ms", worst: "102 ms", typ: "69 ms",
-  noteTone: C.goodLite, noteEdge: C.good,
-  noteTitle: "A full frame faster.",
-  note: "Genlocking removes the alignment wait, and starting the render 35 source rows in removes the store-and-forward frame. This is the architecture the other modes would adopt to close the gap.",
+  segs: [{ label: "Row age 16.7", ms: 16.7, color: C.ir },
+         { label: "45.0 measured", ms: 45.0, color: "D18E68" },
+         { label: "Scan 16.7", ms: 16.7, color: "6FC2AA" }],
+  scale: 120,
+  caption: "Measured immediately after programming, the only state in which this mode currently runs.",
+  best: "45 ms", worst: "112 ms", typ: "78 ms",
+  noteTone: C.irLite, noteEdge: C.ir,
+  noteTitle: "Works from boot, stops on a mode switch.",
+  note: "Measured 45.0 ms and 15.03 new frames per second immediately after programming. After any change of mode it commits nothing at all, and no camera-side recovery restores it - the part must be reprogrammed.",
   notes: "35 rows is a property of the panorama geometry: producing the first output row needs source rows up to 34. Read directly from the generated row-window table.",
 });
 
 // ---------------------------------------------------------------- comparison
 {
   const s = lightSlide("All four modes side by side", "Comparison");
-  s.addText("Figures are FPGA-internal. Camera sensor and ISP delay is additional and is the camera vendor's specification.",
+  s.addText("Measured on hardware, 2026-08-19. FPGA-internal; camera sensor and ISP delay is additional and is the vendor's specification.",
     { x: 0.6, y: 1.42, w: 12.1, h: 0.36, fontSize: 12.5, color: C.muted, fontFace: FB, margin: 0, italic: true });
 
   s.addChart(pres.ChartType.bar, [
-    { name: "Typical latency (ms)",
-      labels: ["IR panorama", "IR single", "EO single", "EO panorama"],
-      values: [69, 100, 100, 117] },
+    { name: "Typical latency (ms), measured",
+      labels: ["IR panorama", "IR single", "EO panorama", "EO single"],
+      values: [78, 84, 75, 50] },
   ], {
     x: 0.6, y: 1.95, w: 7.0, h: 3.5,
     barDir: "bar", showTitle: false, showLegend: false,
-    chartColors: [C.ir, "D18E68", C.eo, "5C9BB5"],
+    chartColors: [C.ir, "D18E68", "5C9BB5", C.eo],
     showValue: true, dataLabelPosition: "outEnd", dataLabelColor: C.ink,
     dataLabelFontSize: 12, dataLabelFontFace: FB,
     catAxisLabelColor: C.body, catAxisLabelFontSize: 12, catAxisLabelFontFace: FB,
     valAxisLabelColor: C.muted, valAxisLabelFontSize: 10, valAxisLabelFontFace: FB,
-    valAxisMaxVal: 140, valGridLine: { color: C.line, size: 1 },
+    valAxisMaxVal: 100, valGridLine: { color: C.line, size: 1 },
     catGridLine: { style: "none" },
   });
 
   const tbl = [
     [{ text: "Mode", options: { bold: true } }, { text: "Best", options: { bold: true } },
      { text: "Typical", options: { bold: true } }, { text: "Worst", options: { bold: true } },
-     { text: "Dominant cost", options: { bold: true } }],
-    ["IR panorama", "36 ms", "69 ms", "102 ms", "Output stage only"],
-    ["IR single", "67 ms", "100 ms", "133 ms", "Store and forward"],
-    ["EO single", "67 ms", "100 ms", "133 ms", "Store and forward"],
-    ["EO panorama", "67 ms", "117 ms", "167 ms", "Camera alignment"],
+     { text: "New frames/s", options: { bold: true } }],
+    ["EO single", "16 ms", "50 ms", "83 ms", "29.75"],
+    ["EO panorama", "41 ms", "75 ms", "108 ms", "15.03"],
+    ["IR panorama", "45 ms", "78 ms", "112 ms", "15.03"],
+    ["IR single", "50 ms", "84 ms", "117 ms", "30.01"],
   ];
   s.addTable(tbl, {
     x: 7.9, y: 1.95, w: 4.85, colW: [1.35, 0.72, 0.85, 0.8, 1.13],
@@ -424,8 +428,8 @@ modeSlide({
   s.addShape(pres.ShapeType.roundRect, { x: 0.6, y: 5.72, w: 12.15, h: 1.05, rectRadius: 0.06,
     fill: { color: C.panel }, line: { color: C.line, width: 1 } });
   s.addText([
-    { text: "The spread between best and worst is one output frame in each direction. ", options: { bold: true, color: C.ink } },
-    { text: "It comes from where a frame happens to land relative to the output frame boundary, which is not controlled and varies frame to frame." },
+    { text: "The spread is one output frame in each direction. ", options: { bold: true, color: C.ink } },
+    { text: "A row's age when its frame completes, and its position in the output raster, each range from zero to a full frame and are not controlled. Only the middle term is fixed by the design, and that is the part measured." },
   ], { x: 0.9, y: 5.9, w: 11.55, h: 0.7, fontSize: 12.5, color: C.body, fontFace: FB, margin: 0, valign: "middle" });
   s.addNotes("IR panorama is roughly one output frame ahead of everything else, and that gap is architectural rather than an optimisation.");
 }
@@ -433,19 +437,19 @@ modeSlide({
 // ---------------------------------------------------------------- refresh
 {
   const s = lightSlide("A second effect: how often the picture changes", "Measured");
-  s.addText("Latency is how old the picture is. Refresh is how often it is replaced. They are separate, and on the EO paths they differ.",
+  s.addText("Latency is how old the picture is. Refresh is how often it is replaced. They are separate, and in the panorama modes they differ.",
     { x: 0.6, y: 1.42, w: 12.1, h: 0.4, fontSize: 13.5, color: C.body, fontFace: FB, margin: 0 });
 
   statCard(s, 0.6, 2.0, 2.6, "30 Hz", "HD-SDI output raster", C.ink);
-  statCard(s, 3.42, 2.0, 2.6, "15.1 Hz", "measured new frames on the EO paths", C.warn);
-  statCard(s, 6.24, 2.0, 2.6, "2x", "each frame is presented twice", C.warn);
-  statCard(s, 9.06, 2.0, 3.7, "+33 ms", "average extra staleness this adds", C.warn);
+  statCard(s, 3.42, 2.0, 2.6, "15.0", "new frames/s, both panorama modes", C.warn);
+  statCard(s, 6.24, 2.0, 2.6, "30.0", "new frames/s, both single modes", C.good);
+  statCard(s, 9.06, 2.0, 3.7, "+33 ms", "extra staleness in the panorama modes", C.warn);
 
   s.addText("Why", { x: 0.6, y: 3.85, w: 6, h: 0.32, fontSize: 15, bold: true, color: C.ink, fontFace: FB, margin: 0 });
   s.addText([
-    { text: "The render pass currently occupies almost a whole output frame period. A render that begins on one frame boundary therefore finishes during the next one, and can only be published on the boundary after that - so a new picture appears every second output frame.", options: { breakLine: true } },
+    { text: "The single-camera modes keep up with the raster: 29.75 and 30.01 new frames per second, measured by counting published frames over a minute. Both panorama modes run at half that - 15.03 - because each publishes on every second output frame boundary.", options: { breakLine: true } },
     { text: "" , options: { breakLine: true } },
-    { text: "This is a throughput limit, not a correctness one: no frames are lost, each is simply shown twice.", options: { italic: true, color: C.muted } },
+    { text: "In EO panorama this also throttles the input: the six source buffers are only recycled when a frame is published, so half of each camera's output is discarded for want of a free buffer. The cameras themselves run at 30 Hz throughout.", options: { italic: true, color: C.muted } },
   ], { x: 0.6, y: 4.25, w: 7.5, h: 1.5, fontSize: 12.5, color: C.body, fontFace: FB, margin: 0 });
 
   s.addShape(pres.ShapeType.roundRect, { x: 8.4, y: 4.15, w: 4.35, h: 2.35, rectRadius: 0.06,
@@ -465,11 +469,11 @@ modeSlide({
   const s = lightSlide("Where the remaining time is, and what would remove it", "Outlook");
 
   const items = [
-    ["Adopt direct ingress on the EO paths",
-     "Overlap rendering onto arriving rows instead of storing whole frames first, exactly as the IR panorama already does.",
+    ["Overlap rendering with ingest",
+     "Render onto arriving rows instead of storing whole frames first. The largest single term left in the panorama modes is the wait for a complete, matched set of frames.",
      "removes ~33 ms", C.good],
-    ["Fit the render inside one frame period",
-     "Restores a genuine 30 Hz refresh and removes the average 33 ms of extra staleness. The memory headroom for this has largely been recovered already.",
+    ["Publish the panorama modes every frame",
+     "The single-camera modes already achieve 30 new frames per second. Bringing the panorama modes to the same rate removes their extra 33 ms of staleness, and in EO panorama stops half the camera output being discarded.",
      "removes ~33 ms", C.good],
     ["Genlock the EO cameras",
      "Would remove the alignment wait on EO panorama. Requires camera support that the current EO units do not offer.",
@@ -501,25 +505,24 @@ modeSlide({
 // ---------------------------------------------------------------- basis
 {
   const s = lightSlide("Basis of these numbers", "Assurance");
-  s.addText("So the figures can be audited rather than taken on trust.",
+  s.addText("Revised 2026-08-19: the figures below replace an earlier derived set, which overstated the EO latencies by 30 to 50 ms.",
     { x: 0.6, y: 1.42, w: 12.1, h: 0.36, fontSize: 13, color: C.muted, fontFace: FB, margin: 0, italic: true });
 
   const cols = [
+    ["Measured on hardware", C.good, [
+      "Frame rates and latency from a timing block in the FPGA, since a debug capture window is 8.8 us and cannot see a 33 ms interval",
+      "That block is itself calibrated against known intervals before being trusted",
+      "Publication rates counted over a full minute, not inferred from one interval",
+    ]],
     ["Design constants", C.eo, [
       "Output frame period 33.33 ms",
       "Camera formats and frame rates",
-      "35 source rows before the IR panorama can emit its first output row",
       "Read directly from the design and its generated geometry tables",
-    ]],
-    ["Measured on hardware", C.good, [
-      "Output refresh 15.1 Hz on the EO paths, from four independent captures",
-      "IR genlock skew under 274 ns across six cameras",
-      "Memory write throughput before and after the August fix",
     ]],
     ["Stated assumptions", C.warn, [
       "Camera sensor and ISP delay is excluded - vendor specification",
-      "Commit and scan-out quoted at their average; both range 0 to one frame",
-      "Render occupancy taken as one frame period, consistent with the measured refresh",
+      "A row's age when its frame completes, and its scan position, are quoted at their average; each ranges 0 to one frame",
+      "EO panorama is a lower bound: the matched set displayed can be older than the frame timed from",
     ]],
   ];
   cols.forEach(([title, col, lines], i) => {
@@ -535,7 +538,7 @@ modeSlide({
         fontFace: FB, margin: 0, paraSpaceAfter: 8, valign: "top" });
   });
 
-  s.addText("Latency was derived from the pipeline structure and validated against the measured refresh rate; it was not measured end to end with an external timing reference.",
+  s.addText("The middle term of every figure is measured inside the FPGA. An end-to-end sensor-to-display number would additionally need an external optical reference, which has not been run.",
     { x: 0.6, y: 5.22, w: 12.15, h: 0.5, fontSize: 11.5, color: C.muted, fontFace: FB, margin: 0, italic: true });
   s.addNotes("If the customer needs a certified end-to-end figure, that requires an external reference - an LED pulsed into the camera and a photodiode on the display - which we have not run.");
 }
