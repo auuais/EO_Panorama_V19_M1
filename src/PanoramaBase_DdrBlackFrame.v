@@ -3719,9 +3719,21 @@ module PanoramaBase_DdrBlackFrame(
     // them here and let the capture read the results.
     //
     // Costs the replay and row-window debug words their ILA slots (probe21,
-    // probe22).  V19_TIMING_PROBE_EN = 0 gives them back.
+    // probe22).  V19_TIMING_PROBE_EN = 0 gives them back AND removes the
+    // block entirely -- see the generate below.
+    //
+    // DISABLED 2026-08-20.  IR panorama runs at 14.85 fps on 6734e26, the
+    // build immediately before this probe was added, and is frozen on both
+    // builds that carry it (67955bc and 0125afb) -- measured optically, three
+    // bitstreams programmed in turn on the same board minutes apart, each
+    // showing rows_min = 0 with the direct-ingress line caches never filling.
+    // Nothing this probe does is functional: it reads existing events and
+    // displaces two debug words off the ILA.  That points at placement, which
+    // makes turning it off the way to get a testable three-bank build rather
+    // than something to debug first.  The 15-vs-30 question does not need it;
+    // the optical distinct-frame count answers that on any build.
     //------------------------------------------------------------------------
-    localparam integer V19_TIMING_PROBE_EN = 1;
+    localparam integer V19_TIMING_PROBE_EN = 0;
 
     // "A camera frame arrived" means whichever camera family is on screen.
     wire probe_in_ev = ir_single_ui ? ir_cam_frame_pulse[ir_sel_ui]
@@ -3735,20 +3747,40 @@ module PanoramaBase_DdrBlackFrame(
     wire [23:0] tp_per_in_min, tp_per_commit_max, tp_lat_commit_max;
     wire [15:0] tp_ev_count;
 
-    V19TimingProbe u_v19_timing (
-        .clk(c0_ddr4_ui_clk), .rst(ui_rst),
-        .in_frame_ev   (probe_in_ev),
-        .copy_start_ev (copy_start_accept),
-        .copy_done_ev  (v19_copy_frame_done),
-        .commit_ev     (v19_commit_ev),
-        .out_edge_ev   (frame_edge),
-        .per_in(tp_per_in), .per_edge(tp_per_edge),
-        .per_start(tp_per_start), .lat_turn(tp_lat_turn),
-        .per_commit(tp_per_commit),
-        .lat_commit(tp_lat_commit), .lat_copy(tp_lat_copy),
-        .per_in_min(tp_per_in_min), .per_commit_max(tp_per_commit_max),
-        .lat_commit_max(tp_lat_commit_max), .ev_count(tp_ev_count)
-    );
+    // Wrapped in a generate so V19_TIMING_PROBE_EN = 0 leaves NOTHING behind.
+    // Gating only the ILA mux would keep the block synthesized and its loads
+    // on ir_cam_frame_pulse and the copy/commit events in place, which is
+    // exactly what has to be absent for the comparison to mean anything.
+    generate
+    if (V19_TIMING_PROBE_EN) begin : g_timing_probe
+        V19TimingProbe u_v19_timing (
+            .clk(c0_ddr4_ui_clk), .rst(ui_rst),
+            .in_frame_ev   (probe_in_ev),
+            .copy_start_ev (copy_start_accept),
+            .copy_done_ev  (v19_copy_frame_done),
+            .commit_ev     (v19_commit_ev),
+            .out_edge_ev   (frame_edge),
+            .per_in(tp_per_in), .per_edge(tp_per_edge),
+            .per_start(tp_per_start), .lat_turn(tp_lat_turn),
+            .per_commit(tp_per_commit),
+            .lat_commit(tp_lat_commit), .lat_copy(tp_lat_copy),
+            .per_in_min(tp_per_in_min), .per_commit_max(tp_per_commit_max),
+            .lat_commit_max(tp_lat_commit_max), .ev_count(tp_ev_count)
+        );
+    end else begin : g_no_timing_probe
+        assign tp_per_in         = 24'd0;
+        assign tp_per_edge       = 24'd0;
+        assign tp_per_start      = 24'd0;
+        assign tp_lat_turn       = 24'd0;
+        assign tp_per_commit     = 24'd0;
+        assign tp_lat_commit     = 24'd0;
+        assign tp_lat_copy       = 24'd0;
+        assign tp_per_in_min     = 24'd0;
+        assign tp_per_commit_max = 24'd0;
+        assign tp_lat_commit_max = 24'd0;
+        assign tp_ev_count       = 16'd0;
+    end
+    endgenerate
 
     // [63:60] 4'hA  [59:36] camera frame period  [35:12] copy-start period
     // [11:0]  commit count (wraps)
