@@ -239,3 +239,55 @@ before building anything else.
 The three-bank change remains proven in simulation and unproven on hardware.
 It has never been tested in the mode it exists for, because that mode has not
 run on any build carrying it.
+
+---
+
+# Addendum 2, 02:30 — the fix is confirmed on hardware, on EO panorama
+
+The EO shutter was changed to 15, and the effect was the opposite of what the
+name suggests: **the EO cameras now deliver 30 distinct images per second.**
+
+| mode | before the shutter change | after |
+|---|---|---|
+| EO single | ~15, repeat runs of 4 | **29.52**, 435 of 444 runs exactly 2 |
+| EO panorama | ~15 | **17.79**, mixed runs of 2 and 6 |
+
+EO single carrying all 30 through the same output stage is what makes this
+useful: EO panorama became a mode that is genuinely below its source rate AND
+runs on every build -- which IR panorama is not. It is therefore the case the
+three-bank change can actually be tested against.
+
+## A/B, three runs each side, same board
+
+| build | EO panorama, distinct fps | run lengths |
+|---|---|---|
+| `6734e26` capfix, 2 banks | 17.79 / 18.34 / 17.04 | many 6s and 8s (81+11, 86+19) |
+| `fc614ca`, **3 banks** | **22.74 / 21.84** | 2s dominate (354, 328), no 8s |
+| EO single, control | 29.52 -> 29.58 | unchanged |
+
+**+26%, well outside the spread, with the control unmoved.** This is the first
+hardware evidence that the third bank does what the simulation said it does.
+
+The run-length distribution is the mechanism made visible rather than
+inferred: the two-bank build stalls for 100 ms (runs of 6) and 133 ms (runs of
+8) many times per second, and with three banks those largely disappear and
+most publishes move to the full 33 ms cadence.
+
+## It is 22, not 30 — what is left
+
+Average period 1/22.3 = 44.8 ms against a 33.3 ms target. Most publishes now
+make the full cadence; a minority still slip one or two frame periods.
+
+The remaining limiter is on the source side, and the shape of it is known: an
+EO panorama copy needs a complete six-camera lease, and the frame-set manager
+holds that lease from `ST_ACQUIRE` until `consumer_done` -- copy completion --
+then runs a multi-state release sweep over four bank indices with a CDC
+handshake per camera before it can even begin looking for the next common
+epoch. Nothing overlaps the copy. With the render already taking ~24.9 ms of a
+33.3 ms period, that serialised turnaround is enough to push a minority of
+frames past the edge.
+
+The targeted fix is to overlap it: acquire the next lease while the current
+copy is still running, so the copy start is never waiting on release-then-find.
+That is a change to `EoV19FrameSetManager`, and unlike everything attempted
+tonight it is measurable immediately -- EO panorama runs on every build.
