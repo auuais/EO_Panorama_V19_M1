@@ -1463,7 +1463,17 @@ module PanoramaBase_DdrBlackFrame(
     // free-runs regardless of content, so it cannot deadlock the arm.
     //
     // No new copy may start into a bank whose geometry is about to change.
-    wire copy_start_accept = copy_start_trig && !copy_active && copy_armed &&
+    // `|| frame_edge` is not redundant.  copy_armed is a register, so on the
+    // cycle of the edge it still holds the OLD value -- and two of the start
+    // qualifiers are pulses coincident with that edge (`ir_stale && frame_edge`
+    // and `v19_eo_stale && frame_edge`, the fallbacks that keep the display
+    // alive by repeating a frame when a camera stops).  Without this those
+    // pulses could never be accepted in any frame where an earlier copy had
+    // already consumed the arm, so a stopped camera would freeze the output
+    // instead of repeating.  The register still clears on accept below, so a
+    // start landing on the edge consumes that frame's permission as intended.
+    wire copy_arm_ok = copy_armed || frame_edge;
+    wire copy_start_accept = copy_start_trig && !copy_active && copy_arm_ok &&
                              copy_bank_available && !backend_transition_block;
 
     always @(posedge c0_ddr4_ui_clk) begin
