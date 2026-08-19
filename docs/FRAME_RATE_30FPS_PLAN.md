@@ -140,9 +140,11 @@ and free-runs regardless of content, so the arm cannot deadlock.
 ## 4. What this does not settle: EO panorama
 
 The simulation makes one thing clear that was not clear before. Group B of
-`tb_V19OutputBankRate` models a level start qualifier that is always ready,
-and there **even the two-bank rule reaches 30 fps** -- the copy restarts
-immediately after each commit and 24.9 ms fits inside a frame period.
+`tb_V19OutputBankRate` models EO panorama's trigger -- a latched lease that
+comes up when a fresh six-camera set completes and survives until a copy
+consumes it -- and there **the two-bank rule also reaches 30 fps**, at every
+phase. The first version of that model used an always-ready level and gave the
+same answer, so the conclusion does not depend on which of the two is right.
 
 So EO panorama's 15 fps is *not* fully explained by the output-bank coupling.
 Something on the source side is also gating it, and the measured
@@ -164,12 +166,30 @@ which separates the two cases directly:
 
 `scripts/decode_timing_probe.py` prints the verdict.
 
-The likely source-side candidate, if it is one: the frame-set manager holds
-its lease from `ST_ACQUIRE` until `consumer_done`, which for the panorama is
-copy completion, and returns bank tokens only during the release sweep that
-follows. `probe11` already carries the selected writer's `drop_frame` and
-`free_bank_empty` bits, so whether the EO writers are dropping rasters for
-want of a bank is directly observable, not inferable.
+The source-side candidate, located in `EoV19DdrDesync.v` around line 399: at
+every camera frame boundary the writer publishes the completed frame and then
+needs a free bank token *in that same instant* to admit the next raster --
+
+```verilog
+if (!fifo_prog_full && frame_epoch_available &&
+    !free_bank_empty && !free_bank_rd_rst_busy) begin
+    ... claim the next bank ...
+end else begin
+    drop_frame <= 1'b1;      // this whole raster is discarded
+end
+```
+
+and tokens are only returned by the frame-set manager's release sweep, which
+runs on `consumer_done` -- copy completion. So token arrival is tied to the
+publish rate, and whether a token is present at the boundary is a matter of
+phase between two 30 Hz processes. A release landing just after the boundary
+costs a whole raster, and the writer then waits a full camera frame.
+
+Whether that is what is happening does not need another build to find out.
+`probe11` already carries the selected writer's `drop_frame`, `free_bank_empty`
+and `have_bank` bits, and `probe19` carries the frame-set state and
+`free_valid`. Capturing those in EO panorama says directly whether rasters are
+being discarded for want of a token.
 
 ## 5. Verification plan
 

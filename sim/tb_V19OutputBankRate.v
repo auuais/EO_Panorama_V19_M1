@@ -17,10 +17,20 @@
 //                   row gate satisfied: rows_min >= 34 and rows_max <= 64 of a
 //                   512-row camera frame, about 1.95 ms once per camera frame.
 //                   Render 26.6 ms (measured).
-//   EO panorama  -- a level.  v19_replay_banks_ready stays high for as long as
-//                   a lease is available, so the start is not phase-limited at
-//                   all and the throttle is the only thing bounding the copy
-//                   rate.  Render 24.9 ms (measured).
+//   EO panorama  -- a latched request.  v19_replay_banks_ready is the frame-set
+//                   manager's lease_valid: it comes up when a fresh six-camera
+//                   set completes and stays up until a copy consumes it, so a
+//                   late start is late but not lost.  Render 24.9 ms.
+//
+// Group B does NOT reproduce EO panorama's measured 15.03 fps -- it gives 30
+// under both bank rules.  That is a result, not a modelling failure to paper
+// over: whatever holds EO panorama at half rate is not the output-bank rule
+// under any trigger model that can be justified from the RTL.  The remaining
+// candidate is on the source side, in how quickly the frame-set manager can
+// re-lease after it releases at copy completion, and this build instruments
+// exactly that (copy-start period and copy-done -> next-copy-start) rather
+// than guessing again.  Group A, IR panorama, is the one this fix is proven
+// against.
 //
 // LEGACY=1 is the rule as it stood before this change --
 //   copy_bank_available = !pending_valid && (!frame_valid || wr_bank != rd_bank)
@@ -43,6 +53,13 @@
 module V19OutputBankModel #(
     parameter integer LEGACY     = 0,
     parameter integer ARM        = 1,       // one copy per output frame edge
+    // 0: the start opportunity genuinely closes (IR panorama -- the renderer
+    //    cannot begin outside its row window, so a missed window is a lost
+    //    source frame).
+    // 1: the start opportunity LATCHES (EO panorama -- lease_valid comes up
+    //    when a fresh six-camera set completes and stays up until a copy
+    //    consumes it, so a late start is late but not lost).
+    parameter integer LATCHED    = 0,
     parameter integer OUT_BANKS  = 3,
     parameter integer PHASE      = 0,       // display edge offset from source
     parameter integer COPY_TICKS = 26600,   // render duration, us
@@ -67,10 +84,10 @@ module V19OutputBankModel #(
     wire [31:0] cam_phase  = t % CAM_T;
     wire        frame_edge = (t != 0) && (((t + PHASE) % FRAME_T) == 0);
 
-    // ir_pano_start_ready / v19_replay_banks_ready: a LEVEL, high inside the
-    // source's start window and only while the renderer is idle.
-    wire start_trig = !copy_active &&
-                      (cam_phase >= WIN_OFF) && (cam_phase < WIN_OFF + WIN_LEN);
+    // ir_pano_start_ready / v19_replay_banks_ready.
+    wire in_window = (cam_phase >= WIN_OFF) && (cam_phase < WIN_OFF + WIN_LEN);
+    reg  req_pending;                       // LATCHED sources only
+    wire start_trig = !copy_active && (LATCHED ? req_pending : in_window);
 
     wire [OUT_BANKS-1:0] out_bank_busy =
         ({{(OUT_BANKS-1){1'b0}}, 1'b1} << rd_bank) |
@@ -91,6 +108,7 @@ module V19OutputBankModel #(
             wr_bank <= 2'd0; rd_bank <= 2'd0; pending_bank <= 2'd0;
             pending_valid <= 1'b0; frame_valid <= 1'b0; copy_active <= 1'b0;
             copy_armed <= 1'b1; copy_left <= 32'd0; t <= 32'd0;
+            req_pending <= 1'b0;
             commits <= 32'd0; starts <= 32'd0;
             missed_windows <= 32'd0; drops <= 32'd0; violated <= 1'b0;
         end else begin
@@ -98,6 +116,14 @@ module V19OutputBankModel #(
 
             if (frame_edge)        copy_armed <= 1'b1;
             if (copy_start_accept) copy_armed <= 1'b0;
+
+            // A fresh source set completes once per source frame.  For a
+            // latched source the request survives until a copy consumes it --
+            // which is why EO panorama drifts to half rate rather than
+            // dropping frames outright: each late start pushes the next one
+            // later still.
+            if (cam_phase == WIN_OFF)  req_pending <= 1'b1;
+            if (copy_start_accept)     req_pending <= 1'b0;
 
             if (copy_start_accept) begin
                 copy_active <= 1'b1;
@@ -189,12 +215,12 @@ module tb_V19OutputBankRate;
                 u_a_new (.clk(clk), .rst(rst), .commits(ca_new[g]), .starts(sa_new[g]),
                          .missed_windows(ma_new[g]), .drops(da_new[g]), .violated(va_new[g]));
 
-            V19OutputBankModel #(.LEGACY(1), .ARM(0), .PHASE(g*(FRAME_T/N_PHASE)),
-                                 .COPY_TICKS(24900), .WIN_OFF(0), .WIN_LEN(FRAME_T))
+            V19OutputBankModel #(.LEGACY(1), .ARM(0), .LATCHED(1),
+                                 .PHASE(g*(FRAME_T/N_PHASE)), .COPY_TICKS(24900))
                 u_b_leg (.clk(clk), .rst(rst), .commits(cb_leg[g]), .starts(sb_leg[g]),
                          .missed_windows(mb_leg[g]), .drops(db_leg[g]), .violated(vb_leg[g]));
-            V19OutputBankModel #(.LEGACY(0), .ARM(1), .PHASE(g*(FRAME_T/N_PHASE)),
-                                 .COPY_TICKS(24900), .WIN_OFF(0), .WIN_LEN(FRAME_T))
+            V19OutputBankModel #(.LEGACY(0), .ARM(1), .LATCHED(1),
+                                 .PHASE(g*(FRAME_T/N_PHASE)), .COPY_TICKS(24900))
                 u_b_new (.clk(clk), .rst(rst), .commits(cb_new[g]), .starts(sb_new[g]),
                          .missed_windows(mb_new[g]), .drops(db_new[g]), .violated(vb_new[g]));
         end
@@ -225,7 +251,9 @@ module tb_V19OutputBankRate;
         end
 
         $display("");
-        $display("B. EO panorama: 24.9 ms render, start qualifier is a level (always ready)");
+        $display("B. EO panorama: 24.9 ms render, lease latches until a copy consumes it");
+        $display("   NOTE: hardware measures 15.03 fps here and this model gives 30 under");
+        $display("   BOTH rules, so EO panorama's limit is elsewhere -- see the header.");
         $display("   phase(us)   two-bank fps  starts  |  three-bank fps  starts  drops");
         for (i = 0; i < N_PHASE; i = i + 1) begin
             $display("     %6d       %6.2f  %5d   |       %6.2f  %5d  %5d",
