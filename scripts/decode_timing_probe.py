@@ -6,11 +6,23 @@ timestamps, so 33 ms intervals cannot be recovered from a capture however it
 is triggered. These two words carry the results:
 
   probe22  [63:60] 0xA  [59:36] camera frame period
-                        [35:12] output raster period
+                        [35:12] interval between copy starts
                         [11:0]  commit count (wraps)
   probe21  [63:60] 0xB  [59:36] interval between output commits
                         [35:12] descriptor -> commit latency
-                        [11:0]  descriptor -> copy done, top 12 of 24 bits
+                        [11:0]  copy done -> next copy start, top 12 of 24
+
+The copy-start period replaced the output raster period, which is a known
+constant (33.33 ms, measured in all four modes). What it buys is the ability
+to tell WHERE a half-rate publish comes from:
+
+  starts at 30 Hz, commits at 15  -> the output stage is the limit: renders
+                                     are being produced and thrown away
+  starts at 15 Hz, commits at 15  -> the source stage is the limit: nothing
+                                     is wasted, the pipeline is waiting
+
+and the copy-done -> next-copy-start figure says how much of each period is
+spent waiting rather than rendering.
 
 All intervals are in ui_clk/64 ticks. Pass --ui-clk if the MIG user clock is
 not the default 233.4 MHz.
@@ -55,6 +67,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("csv", nargs="+")
     ap.add_argument("--ui-clk", type=float, default=233.4e6)
+    ap.add_argument("--raster-ms", type=float, default=33.333,
+                    help="output raster period; a constant of the video "
+                         "standard, no longer carried in the probe word")
     a = ap.parse_args()
 
     tick_ns = 1e9 / a.ui_clk * PRESCALE
@@ -88,19 +103,32 @@ def main():
         def hz(t):
             return 1e9 / (t * tick_ns) if t else 0.0
 
-        per_in, per_edge = A["hi"], A["lo"]
+        per_in, per_start = A["hi"], A["lo"]
         per_commit, lat = B["hi"], B["lo"]
-        lat_copy = B["tail"] << 12
+        lat_turn = B["tail"] << 12
+        per_edge = a.raster_ms * 1e6 / tick_ns   # known constant, not measured
 
         print(f"  camera frame period      {ms(per_in):8.3f} ms   -> input   {hz(per_in):6.2f} fps")
-        print(f"  output raster period     {ms(per_edge):8.3f} ms   -> raster  {hz(per_edge):6.2f} fps")
+        print(f"  copy start interval      {ms(per_start):8.3f} ms   -> renders {hz(per_start):6.2f} /s")
         print(f"  output commit interval   {ms(per_commit):8.3f} ms   -> NEW frames {hz(per_commit):6.2f} fps")
-        print(f"  ratio raster : new       {per_commit / per_edge if per_edge else 0:8.2f}")
+        print(f"  copy done -> next start  {ms(lat_turn):8.3f} ms   (coarse, 12-bit): time spent waiting for a source")
         print()
-        print(f"  descriptor -> copy done  {ms(lat_copy):8.3f} ms   (coarse, 12-bit)")
+
+        # Where the limit is.  A render that starts and never reaches the
+        # screen is work paid for and discarded; a render that never starts is
+        # a pipeline waiting on its source.  These are different bugs.
+        if per_start and per_commit:
+            if per_commit > 1.5 * per_start:
+                print("  LIMIT: OUTPUT stage -- renders are started and discarded")
+            elif per_start > 1.5 * per_edge:
+                print("  LIMIT: SOURCE stage -- renders are not being started")
+            else:
+                print("  starts and commits agree; publishing at the render rate")
+            print()
+
         print(f"  descriptor -> commit     {ms(lat):8.3f} ms   <- measured pipeline latency")
-        print(f"  + scan-out position                0 - {ms(per_edge):.1f} ms  (raster position, not measured)")
-        print(f"  => on screen             {ms(lat):8.3f} - {ms(lat) + ms(per_edge):.3f} ms after the frame was captured")
+        print(f"  + scan-out position                0 - {a.raster_ms:.1f} ms  (raster position, not measured)")
+        print(f"  => on screen             {ms(lat):8.3f} - {ms(lat) + a.raster_ms:.3f} ms after the frame was captured")
         print(f"  commits seen since reset {A['tail']} (12-bit, wraps)")
         print()
     return 0

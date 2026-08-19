@@ -53,6 +53,8 @@ module V19TimingProbe #(
 
     output reg  [CW-1:0] per_in,        // camera frame period
     output reg  [CW-1:0] per_edge,      // output raster period
+    output reg  [CW-1:0] per_start,     // interval between copy starts
+    output reg  [CW-1:0] lat_turn,      // copy done -> next copy start
     output reg  [CW-1:0] per_commit,    // interval between output updates
     output reg  [CW-1:0] lat_commit,    // descriptor -> commit
     output reg  [CW-1:0] lat_copy,      // descriptor -> copy complete
@@ -92,19 +94,23 @@ module V19TimingProbe #(
 
     reg [CW-1:0] t_in, t_edge, t_commit;
     reg [CW-1:0] t_in_used;              // the descriptor this copy consumed
+    reg [CW-1:0] t_start, t_done;
     reg          have_in, have_edge, have_commit, have_used;
+    reg          have_start, have_done;
 
     always @(posedge clk) begin
         if (rst) begin
             per_in <= {CW{1'b0}};   per_edge <= {CW{1'b0}};
+            per_start <= {CW{1'b0}}; lat_turn <= {CW{1'b0}};
             per_commit <= {CW{1'b0}};
             lat_commit <= {CW{1'b0}};  lat_copy <= {CW{1'b0}};
             per_in_min <= MAXV; per_commit_max <= {CW{1'b0}};
             lat_commit_max <= {CW{1'b0}};
             t_in <= {CW{1'b0}}; t_edge <= {CW{1'b0}}; t_commit <= {CW{1'b0}};
             t_in_used <= {CW{1'b0}};
+            t_start <= {CW{1'b0}}; t_done <= {CW{1'b0}};
             have_in <= 1'b0; have_edge <= 1'b0; have_commit <= 1'b0;
-            have_used <= 1'b0;
+            have_used <= 1'b0; have_start <= 1'b0; have_done <= 1'b0;
             ev_count <= 16'd0;
         end else begin
             if (in_frame_ev) begin
@@ -129,8 +135,23 @@ module V19TimingProbe #(
                 have_used <= 1'b1;
             end
 
-            if (copy_done_ev && have_used)
-                lat_copy <= delta(now, t_in_used);
+            // How often a render actually begins, and how much of that period
+            // is spent waiting for the next source frame rather than
+            // rendering.  Together these separate an OUTPUT-side limit (starts
+            // at the full rate, commits at half) from a SOURCE-side one
+            // (starts already at half rate, with the wait accounting for it).
+            if (copy_start_ev) begin
+                if (have_start) per_start <= delta(now, t_start);
+                if (have_done)  lat_turn  <= delta(now, t_done);
+                t_start    <= now;
+                have_start <= 1'b1;
+            end
+
+            if (copy_done_ev) begin
+                if (have_used) lat_copy <= delta(now, t_in_used);
+                t_done    <= now;
+                have_done <= 1'b1;
+            end
 
             if (commit_ev) begin
                 if (have_commit) begin

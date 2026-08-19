@@ -9,7 +9,8 @@
 //        |                          | frame_pulse (in ui_clk domain)
 //        v                          v
 //   ui_clk COPY: BRAM -> DDR write-bank, then guarded 16-pixel DDR app beats.
-//        on completion: pending_bank = write-bank; flip write-bank.
+//        on completion: pending_bank = write-bank (the bank is picked at
+//        start from the free set -- see OUT_BANKS in the address map).
 //        v
 //   ui_clk SCAN: at each HD frame boundary adopt the pending bank as the
 //        read-bank and sweep it out of DDR -> beat_fifo -> unpack -> pix_fifo.
@@ -203,11 +204,29 @@ module PanoramaBase_DdrBlackFrame(
     localparam [17:0]  BEATS_TOTAL_MAX = (SRC_W * OUT_ROWS_MAX) / PIXELS_PER_BEAT;
     localparam [17:0]  BEATS_TOTAL_TALL = (SRC_W * OUT_ROWS_TALL) / PIXELS_PER_BEAT; // 129,600
     localparam [28:0]  ADDR_STRIDE   = 29'd8;              // app_addr units per BL8 beat
+    // THREE output banks, not two.  With two, a completed copy sits in a bank
+    // as `pending` until the next output frame edge commits it, and no new
+    // copy may start until then -- so a copy-start opportunity that falls in
+    // that wait is lost, and every mode whose start is phase-locked to its
+    // source (IR panorama's row window is ~2 ms wide in a 33.3 ms camera
+    // frame) drops to exactly half rate.  A third bank means the busy set at
+    // copy-start time is at most {rd_bank, pending_bank}, so a free bank
+    // always exists and the start is limited only by the source phase.
+    // See docs/FRAME_RATE_30FPS_PLAN.md.
+    localparam integer OUT_BANKS     = 3;
+    // 1,036,800 for V19; three banks span 0..3,110,400, clear of
+    // V19_SRC_BASE_ADDR below.  Unchanged for every other source.
+    localparam [28:0]  BANK_STRIDE   = BEATS_TOTAL_MAX * ADDR_STRIDE;
     localparam [28:0]  BANK0_BASE    = 29'd0;
-    // 1,036,800 for V19 (two banks span 0..2,073,600, clear of
-    // V19_SRC_BASE_ADDR at 2,100,000); unchanged for every other source.
-    localparam [28:0]  BANK1_BASE    = BEATS_TOTAL_MAX * ADDR_STRIDE;
-    localparam [28:0]  V19_SRC_BASE_ADDR    = 29'd2100000;
+    localparam [28:0]  BANK1_BASE    = BANK_STRIDE;
+    localparam [28:0]  BANK2_BASE    = BANK_STRIDE + BANK_STRIDE;
+    // Moved up by exactly one bank stride (1,036,800) to clear the third
+    // bank.  1,036,800 is 8100*128, so every camera region keeps its old
+    // address mod 128 -- and therefore its old DRAM bank/bank-group field
+    // (app_addr[6:3] under ROW_COLUMN_BANK).  That is what the +8 per-camera
+    // stagger below buys, and moving the base by a non-multiple of 128 would
+    // have silently undone the bank-thrash fix.
+    localparam [28:0]  V19_SRC_BASE_ADDR    = 29'd3136800;
     localparam [28:0]  V19_SRC_FRAME_STRIDE = 29'd1036800;  // 1920*1080*2 bytes, low-256 payload: 129600 beats * 8
     // Four leased frame banks per camera (4 * 1,036,800 = 4,147,200), plus a
     // deliberate 8-address stagger so the six cameras do not share a DRAM bank.
@@ -769,12 +788,22 @@ module PanoramaBase_DdrBlackFrame(
     reg [9:0] fb_fold_row;   // 10 bits: counts to 540 in the tall geometry
 
 
-    // ping-pong bank bookkeeping
-    reg        wr_bank;            // bank currently being written
-    reg        rd_bank;            // bank currently being scanned out
-    reg        pending_bank;       // freshly-completed bank awaiting commit
+    // output-bank bookkeeping (OUT_BANKS banks, see the address map above)
+    reg  [1:0] wr_bank;            // bank currently being written
+    reg  [1:0] rd_bank;            // bank currently being scanned out
+    reg  [1:0] pending_bank;       // freshly-completed bank awaiting commit
     reg        pending_valid;
     reg        frame_valid;        // at least one bank committed & displayable
+    // One copy per output frame period.  See copy_armed below.
+    reg        copy_armed;
+
+    function [28:0] out_bank_base;
+        input [1:0] b;
+        begin
+            out_bank_base = (b == 2'd0) ? BANK0_BASE :
+                            (b == 2'd1) ? BANK1_BASE : BANK2_BASE;
+        end
+    endfunction
 
     // DDR -> beat_fifo (scan)
     reg        scan_active;
@@ -829,8 +858,8 @@ module PanoramaBase_DdrBlackFrame(
     // renderer frame-boundary pulse, synchronized into ui_clk
     reg        ftog_meta, ftog_sync, ftog_sync_d;
 
-    wire [28:0] wr_bank_base = wr_bank ? BANK1_BASE : BANK0_BASE;
-    wire [28:0] rd_bank_base = rd_bank ? BANK1_BASE : BANK0_BASE;
+    wire [28:0] wr_bank_base = out_bank_base(wr_bank);
+    wire [28:0] rd_bank_base = out_bank_base(rd_bank);
 
     wire frame_edge = (ftog_sync != ftog_sync_d);
 
@@ -1395,17 +1424,58 @@ module PanoramaBase_DdrBlackFrame(
         ? (frame_edge && (eo_frames_valid || eo_frames_ready_seen))
         : ((PATTERN_TEST && frame_edge) || (!PATTERN_TEST && sel_pulse && ir_single_ui));
 
-    // A two-bank output framebuffer can hold one displayed frame and one
-    // frame under construction.  Never start a second copy while a completed
-    // bank is still pending commit, and never write the bank currently being
-    // scanned.  The old level-triggered V19 start immediately launched again
-    // because banks_ready remains high; after two fast copies it wrapped onto
-    // rd_bank and produced the motion-dependent horizontal frame split.
-    wire copy_bank_available = !pending_valid &&
-                               (!frame_valid || (wr_bank != rd_bank));
+    // Free-bank allocation.  A bank is busy if it is being scanned out or is
+    // holding a completed frame awaiting commit; everything else is free for
+    // the next copy.  wr_bank is deliberately NOT in the busy set: this is
+    // only evaluated when !copy_active, and a just-finished copy's bank is
+    // already covered by pending_bank.
+    //
+    // This replaces the old two-bank rule, which additionally required
+    // !pending_valid -- and that requirement is exactly the half-rate defect
+    // (no copy could start until the previous frame had been committed at an
+    // output frame edge).  What the old rule was RIGHT about is that a copy
+    // must never wrap onto rd_bank; that produced the motion-dependent
+    // horizontal frame split, and the busy mask still forbids it.
+    wire [OUT_BANKS-1:0] out_bank_busy =
+        ({{(OUT_BANKS-1){1'b0}}, 1'b1} << rd_bank) |
+        (pending_valid ? ({{(OUT_BANKS-1){1'b0}}, 1'b1} << pending_bank)
+                       : {OUT_BANKS{1'b0}});
+    wire [1:0] free_bank_sel = !out_bank_busy[0] ? 2'd0 :
+                               !out_bank_busy[1] ? 2'd1 : 2'd2;
+    wire [28:0] free_bank_base = out_bank_base(free_bank_sel);
+    // With three banks and at most two busy this is always true; kept as an
+    // expression so the rule stays correct if OUT_BANKS ever changes.
+    wire copy_bank_available = (out_bank_busy != {OUT_BANKS{1'b1}});
+    // Rate limiter, and the other half of removing the !pending_valid rule.
+    // That rule was doing two jobs: it stopped a copy starting before the
+    // previous frame was committed (the half-rate defect, now gone), and it
+    // throttled the LEVEL start qualifiers.  EO panorama's banks_ready stays
+    // high while a lease is available, so with a bank now almost always free
+    // a copy would relaunch the instant the previous one finished -- at the
+    // render rate rather than the display rate, spending DDR bandwidth on
+    // frames that can never be shown and lengthening the render that has to
+    // fit inside a frame period.
+    //
+    // One copy per output frame period is the most that can ever be
+    // published.  When source and display run at the same rate exactly one
+    // frame edge falls between consecutive source start windows, so this
+    // costs nothing; frame_edge comes from the renderer's raster counters and
+    // free-runs regardless of content, so it cannot deadlock the arm.
+    //
     // No new copy may start into a bank whose geometry is about to change.
-    wire copy_start_accept = copy_start_trig && !copy_active &&
+    wire copy_start_accept = copy_start_trig && !copy_active && copy_armed &&
                              copy_bank_available && !backend_transition_block;
+
+    always @(posedge c0_ddr4_ui_clk) begin
+        if (ui_rst) copy_armed <= 1'b1;
+        else begin
+            if (frame_edge)        copy_armed <= 1'b1;
+            // Deliberately after the arm: a start consumes this frame's
+            // permission even when it lands on the edge itself.
+            if (copy_start_accept) copy_armed <= 1'b0;
+        end
+    end
+
     wire v19_output_bank_conflict = (SRC_SEL == SRC_V19) && copy_active &&
                                     frame_valid && (wr_bank == rd_bank);
 
@@ -1455,7 +1525,7 @@ module PanoramaBase_DdrBlackFrame(
     // gates beat_fifo_wr_en below), so which specific address within that
     // bank is read does not matter -- only that it is a valid,
     // already-initialized DDR address.
-    wire [28:0] keepalive_addr = wr_bank ? BANK0_BASE : BANK1_BASE;
+    wire [28:0] keepalive_addr = (wr_bank == 2'd0) ? BANK1_BASE : BANK0_BASE;
 
     // keepalive_want: desire to issue a dummy read to keep the DQS gate's
     // VT tracking active during write-heavy stretches where scan_want
@@ -2987,9 +3057,9 @@ module PanoramaBase_DdrBlackFrame(
             wr_addr          <= BANK0_BASE;
             copy_active      <= 1'b0;
             ir_sel_latched   <= 3'd0;
-            wr_bank          <= 1'b0;
-            rd_bank          <= 1'b0;
-            pending_bank     <= 1'b0;
+            wr_bank          <= 2'd0;
+            rd_bank          <= 2'd0;
+            pending_bank     <= 2'd0;
             pending_valid    <= 1'b0;
             frame_valid      <= 1'b0;
             dbg_pulse_seen   <= 1'b0;
@@ -3172,8 +3242,9 @@ module PanoramaBase_DdrBlackFrame(
                 dbg_output_fifo_overflow_seen <= 1'b0;
                 dbg_cmd_retry_seen <= 1'b0;
                 v19_cap_marker_pop_pending <= 1'b0;
-                wr_bank       <= 1'b0;
-                rd_bank       <= 1'b0;
+                wr_bank       <= 2'd0;
+                rd_bank       <= 2'd0;
+                pending_bank  <= 2'd0;
                 ir_sel_latched<= ir_sel_ui;
                 if (c0_init_calib_complete)
                     running <= 1'b1;
@@ -3198,7 +3269,11 @@ module PanoramaBase_DdrBlackFrame(
                 //------------------------------------------------------------
                 if (copy_start_accept) begin
                     copy_active      <= 1'b1;
-                    wr_addr          <= wr_bank_base;
+                    // Pick the bank at START, from the free set.  The old
+                    // design flipped wr_bank at completion, which only works
+                    // when there are exactly two banks.
+                    wr_bank          <= free_bank_sel;
+                    wr_addr          <= free_bank_base;
                     fb_pack_count    <= 6'd0;
                     fb_burst_count   <= 18'd0;
                     fb_fold_beat_x   <= 8'd0;
@@ -3240,7 +3315,7 @@ module PanoramaBase_DdrBlackFrame(
                             pending_valid <= 1'b0;
                             frame_valid   <= 1'b1;
                             v19_commit_ev <= 1'b1;
-                            rd_addr       <= pending_bank ? BANK1_BASE : BANK0_BASE;
+                            rd_addr       <= out_bank_base(pending_bank);
                         end else begin
                             rd_addr       <= rd_bank_base;
                         end
@@ -3267,7 +3342,7 @@ module PanoramaBase_DdrBlackFrame(
                             pending_valid <= 1'b0;
                             frame_valid   <= 1'b1;
                             v19_commit_ev <= 1'b1;
-                            rd_addr       <= pending_bank ? BANK1_BASE : BANK0_BASE;
+                            rd_addr       <= out_bank_base(pending_bank);
                         end else begin
                             rd_addr       <= rd_bank_base;
                         end
@@ -3330,10 +3405,17 @@ module PanoramaBase_DdrBlackFrame(
                         if (fb_burst_count == active_beats - 18'd1) begin
                             // copy complete: publish this bank, flip write bank
                             copy_active   <= 1'b0;
+                            // Newest wins.  If a previous frame is still
+                            // awaiting its commit, its bank is dropped here
+                            // and becomes free -- it cannot be rd_bank,
+                            // because a commit is the only thing that moves
+                            // rd_bank and it would have cleared pending_valid.
+                            // At 30 copies/s against 30 frame edges/s exactly
+                            // one edge falls between consecutive completions,
+                            // so this is a safety valve, not a steady state.
                             pending_bank  <= wr_bank;
                             pending_valid <= 1'b1;
                             dbg_copydone_seen <= 1'b1;
-                            wr_bank       <= ~wr_bank;
                         end else begin
                             fb_burst_count <= fb_burst_count + 18'd1;
                             if (SRC_SEL == SRC_V19) begin
@@ -3562,8 +3644,9 @@ module PanoramaBase_DdrBlackFrame(
                         geom_quiesce   <= 1'b0;
                         // Restart both banks from a known state: their
                         // contents are meaningless in the new mode/geometry.
-                        wr_bank        <= 1'b0;
-                        rd_bank        <= 1'b0;
+                        wr_bank        <= 2'd0;
+                        rd_bank        <= 2'd0;
+                        pending_bank   <= 2'd0;
                         wr_addr        <= BANK0_BASE;
                         rd_addr        <= BANK0_BASE;
                         rd_issue_count <= 18'd0;
@@ -3637,6 +3720,7 @@ module PanoramaBase_DdrBlackFrame(
                                     : v19_cap_desc_valid[0];
 
     wire [23:0] tp_per_in, tp_per_edge, tp_per_commit;
+    wire [23:0] tp_per_start, tp_lat_turn;
     wire [23:0] tp_lat_commit, tp_lat_copy;
     wire [23:0] tp_per_in_min, tp_per_commit_max, tp_lat_commit_max;
     wire [15:0] tp_ev_count;
@@ -3648,20 +3732,31 @@ module PanoramaBase_DdrBlackFrame(
         .copy_done_ev  (v19_copy_frame_done),
         .commit_ev     (v19_commit_ev),
         .out_edge_ev   (frame_edge),
-        .per_in(tp_per_in), .per_edge(tp_per_edge), .per_commit(tp_per_commit),
+        .per_in(tp_per_in), .per_edge(tp_per_edge),
+        .per_start(tp_per_start), .lat_turn(tp_lat_turn),
+        .per_commit(tp_per_commit),
         .lat_commit(tp_lat_commit), .lat_copy(tp_lat_copy),
         .per_in_min(tp_per_in_min), .per_commit_max(tp_per_commit_max),
         .lat_commit_max(tp_lat_commit_max), .ev_count(tp_ev_count)
     );
 
-    // [63:60] 4'hA  [59:36] camera frame period  [35:12] output raster period
+    // [63:60] 4'hA  [59:36] camera frame period  [35:12] copy-start period
     // [11:0]  commit count (wraps)
+    //
+    // The copy-start period replaced the output raster period here.  The
+    // raster period is a known constant -- it measured 33.33 ms in all four
+    // modes and cannot be anything else -- whereas the copy-start period is
+    // what separates a limit on the OUTPUT side (copies start at 30 Hz and
+    // only half of them reach the screen) from one on the SOURCE side (copies
+    // already start at 15 Hz).  per_in still serves as the in-situ check that
+    // the probe's tick is calibrated.
     wire [63:0] v19_timing_word_a =
-        {4'hA, tp_per_in, tp_per_edge, tp_ev_count[11:0]};
+        {4'hA, tp_per_in, tp_per_start, tp_ev_count[11:0]};
     // [63:60] 4'hB  [59:36] output update period  [35:12] descriptor->commit
-    // [11:0]  descriptor->copy-done, coarse (top 12 bits of 24)
+    // [11:0]  copy-done -> next copy-start, coarse (top 12 bits of 24): how
+    //         much of each period the pipeline spends waiting for a source
     wire [63:0] v19_timing_word_b =
-        {4'hB, tp_per_commit, tp_lat_commit, tp_lat_copy[23:12]};
+        {4'hB, tp_per_commit, tp_lat_commit, tp_lat_turn[23:12]};
 
     dbg_ila_0 u_dbg_ila_0 (
         .clk     (c0_ddr4_ui_clk),

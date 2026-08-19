@@ -17,6 +17,7 @@ module tb_V19TimingProbe;
 
     reg in_ev = 0, cs_ev = 0, cd_ev = 0, cm_ev = 0, oe_ev = 0;
     wire [CW-1:0] per_in, per_edge, per_commit, lat_commit, lat_copy;
+    wire [CW-1:0] per_start, lat_turn;
     wire [CW-1:0] per_in_min, per_commit_max, lat_commit_max;
     wire [15:0]   ev_count;
 
@@ -24,7 +25,9 @@ module tb_V19TimingProbe;
         .clk(clk), .rst(rst),
         .in_frame_ev(in_ev), .copy_start_ev(cs_ev), .copy_done_ev(cd_ev),
         .commit_ev(cm_ev), .out_edge_ev(oe_ev),
-        .per_in(per_in), .per_edge(per_edge), .per_commit(per_commit),
+        .per_in(per_in), .per_edge(per_edge),
+        .per_start(per_start), .lat_turn(lat_turn),
+        .per_commit(per_commit),
         .lat_commit(lat_commit), .lat_copy(lat_copy),
         .per_in_min(per_in_min), .per_commit_max(per_commit_max),
         .lat_commit_max(lat_commit_max), .ev_count(ev_count)
@@ -118,6 +121,19 @@ module tb_V19TimingProbe;
         p_cm;
         check("lat_commit (newer frame ignored)", lat_commit,
               ticks(FRAME/4 + FRAME));
+
+        // --- copy cadence and source wait ---------------------------------
+        // These two are what tell an output-side limit from a source-side one
+        // on hardware, so they need the same calibration as the rest.  A copy
+        // starts, runs for half a frame, then the next start comes a further
+        // frame and a half later: cadence 2 frames, wait 1.5 frames.
+        p_cs;
+        wait_cycles(FRAME/2);
+        p_cd;
+        wait_cycles(3*FRAME/2);
+        p_cs;
+        check("per_start", per_start, ticks(2*FRAME));
+        check("lat_turn",  lat_turn,  ticks(3*FRAME/2));
 
         // --- saturation rather than wrap ----------------------------------
         if (per_in_min == 0) begin
