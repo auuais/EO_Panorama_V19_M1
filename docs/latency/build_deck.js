@@ -441,27 +441,27 @@ modeSlide({
     { x: 0.6, y: 1.42, w: 12.1, h: 0.4, fontSize: 13.5, color: C.body, fontFace: FB, margin: 0 });
 
   statCard(s, 0.6, 2.0, 2.6, "30 Hz", "HD-SDI output raster", C.ink);
-  statCard(s, 3.42, 2.0, 2.6, "15.0", "new frames/s, both panorama modes", C.warn);
-  statCard(s, 6.24, 2.0, 2.6, "30.0", "new frames/s, both single modes", C.good);
-  statCard(s, 9.06, 2.0, 3.7, "+33 ms", "extra staleness in the panorama modes", C.warn);
+  statCard(s, 3.42, 2.0, 2.6, "30.0", "IR single: new frames/s", C.good);
+  statCard(s, 6.24, 2.0, 2.6, "15.0", "IR panorama: new frames/s", C.warn);
+  statCard(s, 9.06, 2.0, 3.7, "15.0", "both EO modes - and the EO cameras' own rate", C.ink);
 
   s.addText("Why", { x: 0.6, y: 3.85, w: 6, h: 0.32, fontSize: 15, bold: true, color: C.ink, fontFace: FB, margin: 0 });
   s.addText([
-    { text: "The single-camera modes keep up with the raster: 29.75 and 30.01 new frames per second, measured by counting published frames over a minute. Both panorama modes run at half that - 15.03 - because each publishes on every second output frame boundary.", options: { breakLine: true } },
+    { text: "Every rate here was measured twice: by counting published frames in the FPGA over a minute, and independently by grabbing the output at 60 fps and counting distinct frames by exact hash. The two agree in every mode.", options: { breakLine: true } },
     { text: "" , options: { breakLine: true } },
-    { text: "In EO panorama this also throttles the input: the six source buffers are only recycled when a frame is published, so half of each camera's output is discarded for want of a free buffer. The cameras themselves run at 30 Hz throughout.", options: { italic: true, color: C.muted } },
-  ], { x: 0.6, y: 4.25, w: 7.5, h: 1.5, fontSize: 12.5, color: C.body, fontFace: FB, margin: 0 });
+    { text: "The EO modes deliver 15 new images per second because that is what the EO cameras produce: each image is transmitted twice over the camera link. No content is lost. IR panorama is different - its cameras produce 30 distinct images per second, IR single displays all 30 of them, and the panorama shows half.", options: { breakLine: true } },
+  ], { x: 0.6, y: 4.25, w: 7.5, h: 1.75, fontSize: 12.5, color: C.body, fontFace: FB, margin: 0 });
 
   s.addShape(pres.ShapeType.roundRect, { x: 8.4, y: 4.15, w: 4.35, h: 2.35, rectRadius: 0.06,
     fill: { color: C.goodLite }, line: { color: C.good, width: 1 } });
-  s.addText("Headroom already recovered", { x: 8.68, y: 4.35, w: 3.8, h: 0.32,
+  s.addText("Cause identified", { x: 8.68, y: 4.35, w: 3.8, h: 0.32,
     fontSize: 13, bold: true, color: C.ink, fontFace: FB, margin: 0 });
   s.addText([
-    { text: "A defect fixed in August was issuing a large fraction of memory write commands twice. ", options: { breakLine: true } },
+    { text: "The output holds two frame buffers, so a finished frame blocks the next one from starting until it has been shown. ", options: { breakLine: true } },
     { text: "" , options: { breakLine: true } },
-    { text: "Removing them raised measured memory write throughput from 36.7 to 94.1 commands per 1000 cycles - most of the way to what a 30 Hz refresh needs.", options: {} },
+    { text: "The panorama render takes 26 of the 33 ms available, leaving too little margin to restart in time. A third buffer removes the constraint.", options: {} },
   ], { x: 8.68, y: 4.72, w: 3.8, h: 1.65, fontSize: 11.5, color: C.body, fontFace: FB, margin: 0 });
-  s.addNotes("Measured by grabbing the output at 60 fps and counting distinct frames by exact hash. Four independent captures gave 14.8-15.1 Hz.");
+  s.addNotes("Optical measurement: grab at 60 fps, count distinct frames by exact hash. IR single returns repeat runs of exactly 2 at a 59.9 fps grab rate, 240 times in a row, so the capture card resolves 30 distinct frames per second perfectly - the 15 fps readings are the pipeline and the EO cameras, not the instrument.");
 }
 
 // ---------------------------------------------------------------- levers
@@ -473,7 +473,7 @@ modeSlide({
      "Render onto arriving rows instead of storing whole frames first. The largest single term left in the panorama modes is the wait for a complete, matched set of frames.",
      "removes ~33 ms", C.good],
     ["Publish the panorama modes every frame",
-     "The single-camera modes already achieve 30 new frames per second. Bringing the panorama modes to the same rate removes their extra 33 ms of staleness, and in EO panorama stops half the camera output being discarded.",
+     "IR single already achieves 30 new frames per second on the same output stage. Bringing IR panorama to the same rate removes its extra 33 ms of staleness and recovers the half of the IR content it currently drops.",
      "removes ~33 ms", C.good],
     ["Genlock the EO cameras",
      "Would remove the alignment wait on EO panorama. Requires camera support that the current EO units do not offer.",
