@@ -72,6 +72,40 @@ This matches the known mode-switch defect that the `codex/ir-ddr-buffer` fork
 works around with DDR input buffering and rejoin guards, except that on
 2026-08-19 reprogramming recovered it and today nothing does.
 
+## 2b. It is the timing-probe build that broke IR panorama, not the third bank
+
+After the IR camera power cycle the ingress recovered, which made a proper
+control possible: three bitstreams programmed in turn, minutes apart, each
+followed by a switch to mode 0x14 and an optical distinct-frame count.
+
+| build | IR panorama, optically |
+|---|---|
+| `6734e26` capfix (no timing probe) | **14.85 fps**, repeat runs of 4 |
+| `67955bc` timing probe | **0.00** -- frozen, 480 identical grabs |
+| `0125afb` three banks (timing probe) | **0.00** -- frozen, 480 identical grabs |
+
+So IR panorama is healthy on the build *before* the timing probe and dead on
+both builds that carry it. The three-bank change is downstream of a regression
+it did not cause and inherits it.
+
+The failure signature is the one recorded above: `rows_min = 0` on all six, the
+direct-ingress line caches never fill, while IR single reads those same
+cameras at ~30 and camera 0's frame pulse reads 30.01 Hz inside 0x14 itself.
+
+What the timing probe touched that could plausibly matter: it displaced
+`v19_dbg_rows_word0_strobe` and `v19_replay_dbg_word` from probe22/probe21,
+and it added loads on `ir_cam_frame_pulse`. Neither is functional, which
+points at placement -- `67955bc` routed at WNS +0.018, and the IR line caches
+cross six camera clock domains. That is a hypothesis, not a finding.
+
+**Consequence for the 30 fps work:** rebuild the three-bank change on the
+`6734e26` baseline, without the timing probe, and measure optically. The probe
+is not needed to answer the question -- the optical distinct-frame count is
+the instrument that matters, and it works on any build.
+
+Note this also retires the "IR panorama mode-switch defect" as the explanation
+for today: on `6734e26` the switch into 0x14 worked first time, repeatedly.
+
 ## 3. What is and is not established
 
 **Established:**
