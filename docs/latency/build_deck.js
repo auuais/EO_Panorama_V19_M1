@@ -272,12 +272,12 @@ function modeSlide(cfg) {
     color: C.ink, fontFace: FB, margin: 0 });
   timebar(s, cfg.segs, 0.6, 4.5, 8.5, cfg.scale, cfg.caption);
 
-  statCard(s, 9.4, 4.12, 1.62, cfg.best, "best case", C.good);
+  statCard(s, 9.4, 4.12, 1.62, cfg.best, "best case (= the measured term alone)", C.good);
   statCard(s, 11.16, 4.12, 1.62, cfg.worst, "worst case", C.ir);
   s.addShape(pres.ShapeType.roundRect, { x: 9.4, y: 5.78, w: 3.38, h: 0.86, rectRadius: 0.06,
     fill: { color: C.ink }, line: { color: C.ink, width: 0 } });
   s.addText([{ text: cfg.typ + "  ", options: { fontSize: 22, bold: true, color: C.white, fontFace: FH } },
-             { text: "typical", options: { fontSize: 12, color: "9FB4D4" } }],
+             { text: "typical = measured + 33 ms avg", options: { fontSize: 10, color: "9FB4D4" } }],
     { x: 9.4, y: 5.78, w: 3.38, h: 0.86, align: "center", valign: "middle", fontFace: FB, margin: 0 });
 
   s.addShape(pres.ShapeType.roundRect, { x: 0.6, y: 5.42, w: 8.5, h: 1.22, rectRadius: 0.06,
@@ -391,7 +391,7 @@ modeSlide({
 // ---------------------------------------------------------------- comparison
 {
   const s = lightSlide("All four modes side by side", "Comparison");
-  s.addText("Measured on hardware, 2026-08-19. FPGA-internal; camera sensor and ISP delay is additional and is the vendor's specification.",
+  s.addText("Only the middle term of each figure is measured; best case IS that measurement. Typical adds a 33 ms modelled average, worst adds 67 ms. Camera sensor and ISP delay is extra.",
     { x: 0.6, y: 1.42, w: 12.1, h: 0.36, fontSize: 12.5, color: C.muted, fontFace: FB, margin: 0, italic: true });
 
   s.addChart(pres.ChartType.bar, [
@@ -521,7 +521,7 @@ modeSlide({
     ]],
     ["Stated assumptions", C.warn, [
       "Camera sensor and ISP delay is excluded - vendor specification",
-      "A row's age when its frame completes, and its scan position, are quoted at their average; each ranges 0 to one frame",
+      "Typical and worst are NOT measured: they add a modelled average of a row's age when its frame completes and of its scan position, each 0 to one frame",
       "EO panorama is a lower bound: the matched set displayed can be older than the frame timed from",
     ]],
   ];
