@@ -380,36 +380,49 @@ function table(s, x, y, w, headers, rows, colW, opts) {
 // ============================================================ 4. latency
 {
   const s = lightSlide("Latency: best case and worst case", "Measured");
-  s.addText("A finished frame may only be published on a display frame edge. The camera and the display free-run against each other, so the wait for that edge is anywhere from nothing to a full frame period. That is the entire difference between the two columns.",
-    { x: 0.6, y: 1.24, w: 12.15, h: 0.5, fontSize: 13, color: C.body, fontFace: FB, margin: 0 });
+  s.addText("A finished frame may only be published on a display frame edge, and the camera does not track the display. The wait for that edge is anywhere from nothing to a full frame period, and that is the entire difference between the two columns.",
+    { x: 0.6, y: 1.24, w: 12.15, h: 0.5, fontSize: 12.5, color: C.body, fontFace: FB, margin: 0 });
 
   const rows = [
-    ["EO single",   "10.1 ms", { t: "43.4 ms", b: true, c: C.good }, { t: "76.8 ms", b: true, c: C.warn }, "49.7 ms"],
-    ["EO panorama", "38.2 ms", { t: "71.5 ms", b: true, c: C.good }, { t: "104.9 ms", b: true, c: C.warn }, "74.4 ms"],
-    ["IR single",   "25.8 ms", { t: "59.1 ms", b: true, c: C.good }, { t: "92.5 ms", b: true, c: C.warn }, "83.4 ms"],
-    ["IR panorama", "41.6 ms", { t: "74.9 ms", b: true, c: C.good }, { t: "108.3 ms", b: true, c: C.warn }, "78.3 ms"],
+    ["EO single",   "~8.4 ms",  "10.1 ms", { t: "43.4 ms", b: true, c: C.good }, { t: "76.8 ms", b: true, c: C.warn }, "29.75 fps"],
+    ["EO panorama", "~24.9 ms", "38.2 ms", { t: "71.5 ms", b: true, c: C.good }, { t: "104.9 ms", b: true, c: C.warn }, { t: "15.03 fps", c: C.bad }],
+    ["IR single",   "not measured", "25.8 ms", { t: "59.1 ms", b: true, c: C.good }, { t: "92.5 ms", b: true, c: C.warn }, "30.01 fps"],
+    ["IR panorama", "~26.6 ms", "41.6 ms", { t: "74.9 ms", b: true, c: C.good }, { t: "108.3 ms", b: true, c: C.warn }, { t: "15.03 fps", c: C.bad }],
   ];
   table(s, 0.6, 1.86, 12.15,
-    ["Mode", "Frame complete → render done\n(ILA, measured)",
-     "BEST CASE\ncapture → display", "WORST CASE\ncapture → display", "One measured sample\n(sits between, as it must)"],
-    rows, [2.7, 2.85, 2.2, 2.2, 2.2], { rowH: 0.46 });
-
-  s.addText("Best case = 33.3 ms of fixed capture-and-scan-out geometry + the measured render.   Worst case = that + one 33.3 ms frame period.",
-    { x: 0.6, y: 4.22, w: 12.15, h: 0.3, fontSize: 11.5, color: C.muted, fontFace: FB, margin: 0, italic: true });
+    ["Mode", "Render occupancy\n(ILA, untriggered)", "Frame → render done\n= fixed wait + render",
+     "BEST CASE\ncapture → display", "WORST CASE\ncapture → display", "Publishing when\nthis was measured"],
+    rows, [2.25, 2.15, 2.35, 1.85, 1.85, 1.7], { rowH: 0.44 });
 
   s.addShape(pres.ShapeType.roundRect, {
-    x: 0.6, y: 4.62, w: 12.15, h: 1.48, rectRadius: 0.06,
+    x: 0.6, y: 3.95, w: 6.05, h: 1.62, rectRadius: 0.06,
+    fill: { color: C.goodLite }, line: { color: C.good, width: 1.25 } });
+  s.addText("Why 41.6 ms does not cap throughput at 24 fps", {
+    x: 0.85, y: 4.06, w: 5.55, h: 0.3, fontSize: 12.5, bold: true, color: C.ink, fontFace: FB, margin: 0 });
+  s.addText([
+    { text: "The middle column is a latency, not an occupancy. It is a fixed phase wait plus the render — for IR panorama, about 15 ms of waiting for the row window to open, then a 26.6 ms render.", options: { breakLine: true } },
+    { text: "Only the render occupies the engine, and 26.6 ms fits inside 33.3 ms. The wait is a constant offset: it delays every frame equally and costs nothing per frame. Renders never overlap, so throughput is set by the occupancy alone.", options: {} },
+  ], { x: 0.85, y: 4.4, w: 5.55, h: 1.1, fontSize: 11, color: C.body, fontFace: FB, margin: 0 });
+
+  s.addShape(pres.ShapeType.roundRect, {
+    x: 6.85, y: 3.95, w: 5.9, h: 1.62, rectRadius: 0.06,
     fill: { color: C.warnLite }, line: { color: C.warn, width: 1.25 } });
   s.addText("Why the worst case occurs", {
-    x: 0.88, y: 4.72, w: 11.6, h: 0.3, fontSize: 14, bold: true, color: C.ink,
-    fontFace: FB, margin: 0 });
+    x: 7.1, y: 4.06, w: 5.4, h: 0.3, fontSize: 12.5, bold: true, color: C.ink, fontFace: FB, margin: 0 });
   s.addText([
-    { text: "The render finishes at some moment inside the display's 33.3 ms cycle, and it cannot choose that moment: its start is locked to the camera, and the camera is not locked to the display. Finish a hair before an edge and the frame goes out immediately — best case. Finish a hair after one and it is held for a whole further period — worst case.", options: { breakLine: true } },
-    { text: "This is a continuous drift, not an occasional fault. Over minutes the phase walks through the whole range, so latency wanders between the two columns rather than sitting at either. There is no single \"typical\" value to quote, which is why none is given.", options: { breakLine: true, italic: true, color: C.body } },
-    { text: "Shortening the render moves BOTH columns down. Locking the camera exposure to the display raster would collapse the range to one value.", options: { bold: true, color: C.ink } },
-  ], { x: 0.88, y: 5.04, w: 11.6, h: 1.0, fontSize: 11, color: C.body, fontFace: FB, margin: 0 });
+    { text: "The render finishes at some moment inside the display's 33.3 ms cycle and cannot choose that moment. Finish just before an edge and the frame goes out at once; finish just after one and it is held a whole further period.", options: { breakLine: true } },
+    { text: "This is a continuous drift, not an occasional fault — which is why no single \"typical\" value is quoted. Shortening the render moves both columns down; locking the camera to the display raster would collapse them to one.", options: {} },
+  ], { x: 7.1, y: 4.4, w: 5.4, h: 1.1, fontSize: 11, color: C.body, fontFace: FB, margin: 0 });
 
-  note(s, "Camera sensor and ISP delay excluded - vendor specification. The sample column is a single interval read from the probe; every one lands inside its predicted best-to-worst window, which is a check on the model rather than a separate result.", 6.24);
+  s.addShape(pres.ShapeType.roundRect, {
+    x: 0.6, y: 5.72, w: 12.15, h: 0.82, rectRadius: 0.06,
+    fill: { color: C.badLite }, line: { color: C.bad, width: 1.25 } });
+  s.addText([
+    { text: "Scope of the two flagged rows. ", options: { bold: true, color: C.ink } },
+    { text: "Both panorama latencies were measured on the main branch while those modes published 15 fps. The 30 fps and 22.9 fps figures elsewhere in this deck come from the IR-DDR branch, which feeds IR panorama through DDR input buffers instead of live line caches. The render occupancies still fit 33.3 ms, so these bounds remain the best available, but they have not been re-measured on the branch that achieves 30 fps." },
+  ], { x: 0.85, y: 5.82, w: 11.65, h: 0.66, fontSize: 10.5, color: C.body, fontFace: FB, margin: 0, valign: "middle" });
+
+  s.addNotes("The IR panorama reference event read 15 Hz in that capture where the genlock says 30 - already recorded as untrustworthy in MEASURED_20260819. Re-measuring latency on the IR-DDR branch needs the timing probe ported to it; that branch has never carried it.");
 }
 
 // ============================================================ 5. worst case
@@ -593,7 +606,7 @@ function table(s, x, y, w, headers, rows, colW, opts) {
   s.addText("Measured intervals", { x: 7.0, y: 1.92, w: 5.75, h: 0.3, fontSize: 13,
     bold: true, color: C.ink, fontFace: FB, margin: 0 });
   table(s, 7.0, 2.24, 5.75,
-    ["Mode", "frame → render done", "frame → on screen"],
+    ["Mode", "frame → render done\n(wait + render)", "frame → on screen"],
     [
       ["EO single",   "10.1 ms", { t: "16.4 ms", b: true }],
       ["EO panorama", "38.2 ms", { t: "41.1 ms", b: true }],
