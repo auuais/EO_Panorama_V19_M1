@@ -159,6 +159,51 @@ function edgeLane(s, x0, y, w, spanMs, phase, periodMs, name) {
   });
 }
 
+// A conceptual datapath chain: one box per hardware block, each carrying what
+// it contributes to latency.  Blocks that run CONCURRENTLY are bracketed
+// rather than drawn as separate serial costs.
+function blockChain(s, x0, y0, blocks, bw, gap, bh) {
+  blocks.forEach((b, i) => {
+    const x = x0 + i * (bw + gap);
+    const edge = b.tone;
+    const fill = b.fill;
+    s.addShape(pres.ShapeType.roundRect, {
+      x, y: y0, w: bw, h: bh, rectRadius: 0.07,
+      fill: { color: fill }, line: { color: edge, width: 1.4 },
+    });
+    s.addShape(pres.ShapeType.ellipse, {
+      x: x + 0.08, y: y0 + 0.08, w: 0.26, h: 0.26,
+      fill: { color: edge }, line: { width: 0 },
+    });
+    s.addText(String(i + 1), {
+      x: x + 0.08, y: y0 + 0.08, w: 0.26, h: 0.26, fontSize: 10, bold: true,
+      color: C.white, align: "center", valign: "middle", fontFace: FB, margin: 0,
+    });
+    s.addText(b.name, {
+      x: x + 0.40, y: y0 + 0.06, w: bw - 0.48, h: 0.46,
+      fontSize: 9.5, bold: true, color: C.ink, fontFace: FB, margin: 0, valign: "middle",
+    });
+    s.addText(b.sub, {
+      x: x + 0.11, y: y0 + 0.56, w: bw - 0.22, h: bh - 1.05,
+      fontSize: 8.5, color: C.body, fontFace: FB, margin: 0, valign: "top",
+    });
+    s.addShape(pres.ShapeType.roundRect, {
+      x: x + 0.11, y: y0 + bh - 0.45, w: bw - 0.22, h: 0.34, rectRadius: 0.04,
+      fill: { color: edge }, line: { width: 0 },
+    });
+    s.addText(b.ms, {
+      x: x + 0.11, y: y0 + bh - 0.45, w: bw - 0.22, h: 0.34, fontSize: 8.5, bold: true,
+      color: C.white, align: "center", valign: "middle", fontFace: FB, margin: 0,
+    });
+    if (i < blocks.length - 1) {
+      s.addShape(pres.ShapeType.rightArrow, {
+        x: x + bw + 0.015, y: y0 + bh / 2 - 0.075, w: gap - 0.03, h: 0.15,
+        fill: { color: C.line }, line: { width: 0 },
+      });
+    }
+  });
+}
+
 function lane(s, x0, y, w, spanMs, name, segs, nameW) {
   s.addText(name, {
     x: x0 - (nameW || 2.35) - 0.12, y: y - 0.02, w: nameW || 2.35, h: 0.34,
@@ -328,6 +373,65 @@ function table(s, x, y, w, headers, rows, colW, opts) {
   ], { x: 0.6, y: 4.72, w: 12.15, h: 0.8, fontSize: 12.5, color: C.body, fontFace: FB, margin: 0 });
 
   note(s, "Frame rates: optical measurement, 2026-08-20, three-bank build 00e0c57. Latency: in-fabric timing probe, 2026-08-19, build 67955bc. Both are identified on the basis slide.", 5.72);
+}
+
+// ============================================================ 2b. blocks
+{
+  const s = lightSlide("Where the time goes, block by block", "Conceptual datapath");
+  s.addText("The panorama datapath, from the camera interface to the HD-SDI output. Each block carries what it contributes to the latency of one row.",
+    { x: 0.6, y: 1.24, w: 12.15, h: 0.34, fontSize: 13, color: C.body, fontFace: FB, margin: 0 });
+
+  const BW = 1.58, GAP = 0.15, BH = 2.35, X0 = 0.7, Y0 = 2.15;
+
+  blockChain(s, X0, Y0, [
+    { name: "Camera → DDR\ninput buffer",
+      sub: "BT.1120 capture, clock-domain FIFO, burst-written into a per-camera frame ring. A matched six-camera set is leased only once every camera has a complete frame.",
+      ms: "0 – 33.3 ms", tone: C.eo, fill: C.eoLite },
+    { name: "Line caches",
+      sub: "Rolling row store feeding the renderer — 64 lines EO, 32 lines IR. The renderer may not start until its row window is inside the cached span.",
+      ms: "2.2 ms  (IR)", tone: C.eo, fill: C.eoLite },
+    { name: "RowRun renderer",
+      sub: "Walks the output canvas row by row. A ROM gives the source-row window for each output row, bounding the working set to ~13 source rows.",
+      ms: "24.9 – 26.6 ms", tone: C.ir, fill: C.irLite },
+    { name: "HD-SDI fold\nlogic",
+      sub: "Remaps the 3840 × N logical canvas onto the 1920 × 2N physical raster. Address arithmetic only — no buffering, no stored rows.",
+      ms: "< 0.01 ms", tone: C.ir, fill: C.irLite },
+    { name: "Ping-pong buffer\nwrite",
+      sub: "4096-pixel staging FIFO, then DDR burst writes into a free output bank. Three banks, so a finished frame never blocks the next render.",
+      ms: "concurrent", tone: C.ir, fill: C.irLite },
+    { name: "Commit at the\nframe edge",
+      sub: "A finished bank becomes the displayed bank only on an output frame boundary. The camera does not track the display, so this wait is uncontrolled.",
+      ms: "0 – 33.3 ms", tone: C.bad, fill: C.badLite },
+    { name: "DDR burst\nscan-out",
+      sub: "Bursts read back, unpacked, and streamed to HD-SDI. Reads start 26 blank lines early to prefill; each row is fetched just before it is shown.",
+      ms: "0.77 ms + row pos", tone: C.good, fill: C.goodLite },
+  ], BW, GAP, BH);
+
+  // bracket over the one pass that blocks 3-5 really are
+  const bx0 = X0 + 2 * (BW + GAP), bx1 = X0 + 5 * (BW + GAP) - GAP;
+  s.addShape(pres.ShapeType.line, { x: bx0, y: Y0 + BH + 0.14, w: bx1 - bx0, h: 0,
+    line: { color: C.ir, width: 1.25 } });
+  s.addShape(pres.ShapeType.line, { x: bx0, y: Y0 + BH + 0.06, w: 0, h: 0.08,
+    line: { color: C.ir, width: 1.25 } });
+  s.addShape(pres.ShapeType.line, { x: bx1, y: Y0 + BH + 0.06, w: 0, h: 0.08,
+    line: { color: C.ir, width: 1.25 } });
+  s.addText("one pass — render, fold and framebuffer write happen together, not one after another",
+    { x: bx0, y: Y0 + BH + 0.18, w: bx1 - bx0, h: 0.26, fontSize: 9.5, bold: true,
+      color: C.ir, align: "center", fontFace: FB, margin: 0 });
+
+  // the two row-dependent terms that cancel
+  s.addShape(pres.ShapeType.roundRect, {
+    x: X0, y: Y0 + BH + 0.56, w: 12.05, h: 0.86, rectRadius: 0.06,
+    fill: { color: C.eoLite }, line: { color: C.eo, width: 1.25 } });
+  s.addText([
+    { text: "Blocks 1 and 7 cancel. ", options: { bold: true, color: C.ink } },
+    { text: "Both are row-dependent and they run in opposite directions: the row captured first waits a whole frame in block 1 and is scanned out immediately in block 7; the row captured last waits for nothing and is scanned out last. Their sum is one frame period for every row, so the chain totals 33.3 ms + blocks 2 to 6 — the same number for the top of the picture as for the bottom." },
+  ], { x: X0 + 0.25, y: Y0 + BH + 0.66, w: 11.55, h: 0.7, fontSize: 11.5,
+       color: C.body, fontFace: FB, margin: 0, valign: "middle" });
+
+  note(s, "Block 2 is quoted for IR panorama on the direct-ingress path, where the renderer waits for source rows 34 to 64 of 512. On the IR-DDR branch and for EO panorama the frame is already in DDR when the set is leased, so that wait is part of block 1 instead. Blocks 3 to 5 are one measured pass; blocks 4 and 5 are not separately measurable and are bounded by design.", 6.15);
+
+  s.addNotes("Block 6 is the only uncontrolled term and the only one that differs between best and worst case. Block 3 is the one worth shortening: it dominates, and reducing it moves both the best and the worst case down together.");
 }
 
 // ============================================================ 3. concurrency
