@@ -62,3 +62,68 @@ targeted fix.
 
 EO single 29.12 -> 29.78 and IR single 29.92 -> 29.91: unchanged within
 measurement spread. IR panorama unchanged at 30. Nothing regressed.
+
+---
+
+# Addendum — EO cameras switched from Trig-in to Free-run
+
+Same build (`00e0c57`, three banks), reprogrammed from its archive. All
+figures optical, 60 fps grab, distinct frames by exact hash.
+
+## All six EO cameras, EO single
+
+| UI camera | new frames/s | run lengths |
+|---|---:|---|
+| 1 | 29.89 | 2x357 |
+| 2 | 29.06 | 2x337, 4x11 |
+| 3 | 29.23 | 2x344, 4x5 |
+| 4 | 29.56 | 2x349, 4x5 |
+| 5 | 29.73 | 2x356, 4x2 |
+| 6 | 29.56 | 2x351, 4x4 |
+
+**Every EO camera delivers 30 distinct images per second, and the pipeline
+publishes all of them.** Runs of 2 dominate everywhere; the scattered 4s are a
+handful of slips per 12 s, not a pattern.
+
+Worth noting: UI camera 4 measures 29.56 here. It was described as dead in
+this setup earlier in the session and is plainly producing distinct frames now.
+
+## Free-run did not change the panorama
+
+| mode | Trig-in | Free-run |
+|---|---:|---:|
+| EO panorama | 22.39 | 23.32 / 22.72 / 22.79 |
+| IR panorama | 29.72 / 29.92 / 29.92 | 29.97 |
+| IR single | 29.91 | 29.81 |
+
+EO panorama is 22.9 against 22.4 -- the same number within spread.
+
+**That is a useful negative result.** The EO panorama shortfall is not caused
+by how the cameras are triggered. Free-run removes the shared exposure trigger
+entirely, and the rate does not move, so the limiter is internal.
+
+Its shape is visible in the run lengths: 274 runs of 2, 55 of 4, 22 of 6. So
+78% of published frames come at the full 33 ms cadence and 22% slip by one or
+two frame periods. Not a mode stuck at half rate -- a mode that mostly keeps
+up and intermittently misses.
+
+That is consistent with the frame-set manager turnaround being the remaining
+cost: an EO panorama copy needs a complete six-camera lease, and the manager
+holds that lease from `ST_ACQUIRE` until copy completion, then sweeps four bank
+indices with a per-camera CDC handshake before it can look for the next common
+epoch -- none of it overlapping a render that already takes ~24.9 ms of a
+33.3 ms period. Whenever that turnaround lands past the frame edge, one publish
+slips. Acquiring the next lease while the current copy still runs remains the
+targeted fix.
+
+## Status against the goal
+
+| mode | published | source | at rate? |
+|---|---:|---:|---|
+| IR single | 29.81 | 30 | yes |
+| IR panorama | 29.97 | 30 | yes |
+| EO single, all six | 29.06 - 29.89 | 30 | yes |
+| EO panorama | 22.9 | 30 | **no** |
+
+Seven of eight measured configurations are at source rate on this fork.
+EO panorama is the one outstanding case.
