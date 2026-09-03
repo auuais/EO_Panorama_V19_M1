@@ -288,3 +288,86 @@ that passed, and it was right about the replay.  The failure is in the
 lease and the capture ring.  A unit test of the replay cannot see that.  The
 next attempt needs the renderer and the line caches in the same simulation,
 driven by the same flow control, before it goes near the board.
+
+---
+
+# The ILA trigger does not work on this design
+
+Programmed the pipelined bitstream back to answer "what is `pano_y` when
+`v19_frame_done` fires".  The measurement could not be taken, because
+**triggered ILA capture on this device fires on arm regardless of the trigger
+condition.**
+
+Proof, in increasing strength:
+
+1. Triggered on `v19_frame_done == 1`, 40 captures, all reported FIRED.
+   **Zero** of the 40 windows contain a sample with `v19_frame_done` high.
+2. Triggered on `copy_active == 0`, 3 captures.  One window had `copy_active`
+   high on all 2048 samples.  (This one is not decisive on its own -- with a
+   ~27% duty and a copy lasting ~13 ms against an 8.8 us window, a random
+   window is all-0 about 72% of the time.)
+3. Triggered on `frame_edge == 1` -- a **one-cycle pulse at 30 Hz** -- 8
+   captures, all reported FIRED.  **Zero** windows contain it.  A working
+   trigger hits every time; a broken one essentially never, because 2048
+   cycles is 8.8 us out of a 33 ms period.  This is decisive.
+
+The `TRIGGER` column in the CSV also sits at sample 0 no matter what
+`CONTROL.TRIGGER_POSITION` is set to, and the property reads back correctly
+(`compare=eq1'b1 pos=512 mode=BASIC_ONLY`), so the settings are accepted and
+then not honoured.
+
+Separately, and this one was mine: `scripts/capture_on_probe.tcl` originally
+swept every other probe to `eq1'bX` before setting the real compare, on the
+theory that a stale compare value would AND into the condition.  That sweep
+makes things worse, not better.  It has been removed, with a comment.
+
+## What this invalidates
+
+* **`scripts/capture_at_frame_edge.tcl` and the result taken from it earlier
+  today** -- "at 100% of display edges a copy could not start".  That data is
+  worthless.  The conclusion drawn from it was already withdrawn on other
+  grounds, but it should be recorded as invalid rather than merely superseded.
+* **`scripts/capture_v19_named.tcl`**, which triggers on `copy_active`.  Its
+  own header notes it "reported copy occupancy as 84% against 25-40%
+  unconditional" and attributes that to sampling bias.  A trigger that fires on
+  arm explains it at least as well.
+* **`scripts/probe_trigger_alive.tcl`**, which reports PULSING / NOT PULSING
+  purely from whether a trigger fires.  It will report PULSING unconditionally.
+
+Only untriggered capture (`run_hw_ila -trigger_now`,
+`scripts/capture_v19_untriggered.tcl`, `scripts/capture_v19_loop.tcl`) can be
+trusted on this design.  That is very likely why the repository accumulated so
+many `-trigger_now` scripts in the first place.
+
+## Also corrected
+
+`v19_px_valid` in the renderer is a **held** valid with a `px_ready`
+handshake -- `px_valid<=px_valid;` is its default assignment -- not a
+per-cycle strobe.  Its occupancy is therefore not a pixel rate, and neither
+figures derived from it nor from `copy_px_valid` on the same assumption can be
+converted to Mpx/s.  That retracts the "each source pixel is fetched 6.3 times"
+and "output pixels 49 Mpx/s" lines earlier in this document as arithmetic;
+the *occupancy* comparisons between builds (31% vs 70% of copy_active) stand,
+because those are like-for-like.
+
+## What is still solid
+
+Untriggered occupancy, measured identically on both builds, 80 windows each:
+replay `run_enable` 67.5% -> 5.0%, `cam_present == 000000` 0% -> 41%, writer
+`drop_frame` 16.2% -> 42.5%, `issue_busy` 44.1% -> 21.0%.  The pipelined build
+is a regression and the capture ring collapses on it.  Board is back on
+`20260901_190911_maps31_eto_adbedee` at 22.49 fps, 0/448 black.
+
+## How to get the answer that was wanted
+
+A broken trigger cannot be worked around by more untriggered sampling: with
+`start_copy` high only 5% of the time, the 80-window `pano_y` histogram for the
+pipelined build is four windows, which is not a distribution.  It would take on
+the order of 1500 windows (~25 min of JTAG) to match the serial build's
+statistics.
+
+The reliable route is to make the answer readable *without* a trigger: latch
+`pano_y` into a sticky register at `frame_done`, and count `frame_done` events
+in a free-running counter, both on the debug bus.  An untriggered read then
+answers "does the renderer reach the end of the raster, and how often" directly.
+That belongs in whatever build carries the next attempt at the replay change.
