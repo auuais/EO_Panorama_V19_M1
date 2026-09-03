@@ -8,6 +8,12 @@ and reverted; several explanations have been tested and killed. What follows is
 what is *measured*, what is *inferred*, and what is *disproved*, kept apart on
 purpose so a fresh reader does not have to re-derive the difference.
 
+> **2026-09-04 update:** the completion counters and the saved untriggered ILA
+> captures close the open contradiction in section 9 and expose a real
+> frame-set lease reuse race.  The current maps also prove that 32 of the 120
+> source beats fetched per EO row can be omitted without changing one rendered
+> pixel.  See sections 13-17 before attempting another replay optimization.
+
 ---
 
 ## 1. The ask
@@ -441,3 +447,335 @@ simulated with its consumer attached** -- for the EO replay that means
 `EoV19StreamingRendererII1` + `EoV19LineCache` + the same flow control, before
 it goes near the board. That harness does not exist yet and building it is
 probably a prerequisite for attempt 2.
+
+---
+
+## 13. 2026-09-04: the renderer completes every pass
+
+The diagnostic build named in section 8 was programmed and captured.  The
+matching archive/LTX is:
+
+```
+builds/bit_archive/20260903_235918_eodiag_explore_6f09f05_6f09f05/
+captures/usb0_v19/loop_eodiag_20260904_024715/
+```
+
+Decoding all 12 untriggered windows with that LTX gives, over 18.25 s:
+
+```
+frame_done count       1676 -> 2067     391 events, 21.43/s
+start_copy-fell count  1678 -> 2069     391 events, 21.43/s
+highest pano_y reached              479
+last cut location               y=479, x=0
+```
+
+The `x=0` value is expected after the terminal token resets `pano_x`; the
+important facts are `pano_y=479` and equal counter deltas.  The renderer is not
+being cut short, does not stop on an internal row, and does not fabricate an
+early `frame_done`.  Every admitted pass reaches the last EO panorama row.
+
+This closes section 9.  `v19_render_active` being shorter than `copy_active` is
+normal: the renderer can finish filling the 4096-pixel push FIFO before the
+output writer drains the final beats to DDR.  Occupancy of the renderer's held
+`px_valid` signal was never a frame count.
+
+The same-day optical run reported 16.97 distinct pictures/s, but the scene was
+mostly static and exact image hashes can under-count publication in that case.
+The hardware `frame_done` counter is the authoritative pass rate here.
+
+## 14. Proven control root cause: one lease can start two copies
+
+An EO panorama copy is only valid while the frame-set manager owns the six
+source banks selected for that copy.  Therefore this invariant must hold:
+
+```
+EO panorama copy_active  ->  the copy's frame-set lease is still owned
+```
+
+The saved ILA data violates it directly.  In `w001.csv`, `w003.csv`, and
+`w007.csv`, all 2048 samples have `copy_active=1` while all 2048 samples have
+`v19_replay_banks_ready`/`lease_valid=0`.  The manager is walking FIND/frontier
+states in those windows, and `pending_valid=1`.  This is not sampling ambiguity:
+each window is wholly inside an active copy that has no lease.
+
+The race follows mechanically from the RTL:
+
+1. EO `copy_start_trig` is the **level** `v19_replay_banks_ready`, which is
+   simply `lease_valid` (`PanoramaBase_DdrBlackFrame.v:1457-1461` and
+   `EoV19DdrDesync.v:724-725`).
+2. The final output-bank write asserts `v19_consumer_done` and clears
+   `copy_active` (`PanoramaBase_DdrBlackFrame.v:1162-1165` and `:3762-3766`).
+3. In `ST_WAIT`, the manager responds to `consumer_done` by entering the
+   release sweep but **does not clear `lease_valid`**
+   (`EoV19FrameSetManager.v:662-666`).  It stays high until the fourth bank
+   index is released at lines 732-735.
+4. If a display edge occurred during the just-finished pass, `copy_armed` is
+   already high.  On the next cycle `copy_active` is low, a third output bank
+   is free, and the old level `lease_valid` satisfies `copy_start_accept`
+   (`PanoramaBase_DdrBlackFrame.v:1501-1511`).  A second copy starts from the
+   lease that is already being retired.
+5. The replay latches those old bank numbers at its start and then continues
+   after `lease_valid` falls.  Meanwhile the manager returns those bank tokens
+   to the writers.  The new copy can consequently read banks that are free or
+   being overwritten.
+
+This explains the otherwise impossible `copy_active=1, lease_valid=0` captures,
+allows repeated/stale frame work to consume display permissions, and creates
+the conditions for vertical bands when a released camera bank is rewritten
+during replay.  It also contaminates frame-set cadence: the manager may acquire
+a new lease while the active copy is still reading the previous, already
+released one, then release that unused lease on the next `consumer_done`.
+
+The sticky `rings_full_no_common_seen` bit is set in the same capture set, and
+the no-lease windows show the manager repeatedly searching/reclaiming rather
+than spending a single 51-cycle FIND sweep.  The earlier statement that frame
+set turnaround is always about 220 ns therefore does not describe the failing
+state.
+
+## 15. Throughput root cause: EO replays pixels the maps never address
+
+Closing the lease race is required for correctness, but the serial pass still
+has too little 30 Hz margin.  The current generated RowRun ROM and maps were
+analysed, including reconstruction with the RTL's Q11 delta expansion and
+`qx_phase()` parity rule.  Every EO source access falls in this range:
+
+```
+reconstructed source x used by RTL       270 .. 1608
+safe 16-pixel DDR beat envelope           256 .. 1615
+source beat indices                         16 .. 100   (85 of 120)
+```
+
+For an implementation that retains the current 8-beat camera-major batch,
+round the right edge up to a complete batch:
+
+```
+recommended fetched beat indices           16 .. 103
+real beats fetched per source row                  88
+current beats fetched per source row              120
+read reduction                                  26.7%
+```
+
+There is ample geometric safety margin: the fetched pixel envelope is
+`256..1663`, 14 pixels left and 55 pixels right of the reconstructed extrema.
+This calculation is from `assets/maps/eo_base_{x,y}_q16.bin` and
+`assets/rowruns/eo_v19_render_runs.mem`, not from the stale 378-row startup
+manifest.
+
+Vertical skipping already exists.  The current reconstructed source-y window
+is `46..1052`; `source_start_row` begins replay at 46 and the lower row gate
+pulls through the required interpolation row.  The remaining large waste is
+horizontal: `EoV19DdrReplay` still reads all 120 beats of every demanded row.
+
+At the current y window, source reads fall from approximately
+`1008 * 6 * 120 = 725,760` beats/pass to
+`1008 * 6 * 88 = 532,224` beats/pass.  At 30 fps that is 15.97 Mbeat/s, less
+than the approximately 16.5 Mbeat/s the current build already sustains at
+22.7 passes/s.  This is the most conservative path to 30 fps because it lowers
+both total traffic and replay service time instead of increasing request
+burstiness.
+
+## 16. Correction to the pipelined-replay diagnosis
+
+Section 6 says arbiter starvation was disproved because average `issue_busy`
+fell and average `app_rdy` rose.  That conclusion is too strong and should be
+treated as retracted.  Average bandwidth cannot prove a bounded-latency
+property.
+
+Capture is last in the fixed priority order:
+
+```
+scan > source replay > output write > capture write
+```
+
+Each camera's 2048-beat FIFO holds only about 0.50 ms at 31.5 fps, and its
+1024-beat soft threshold represents about 0.25 ms.  A pipelined replay that
+holds its request continuously can deny capture for longer than that while the
+DDR is lightly used over a much larger measurement window.  The measured
+`drop_frame` increase from 16.2% to 42.5%, followed by loss of `cam_present`,
+is consistent with a **service-latency/burst** failure even though total DDR
+traffic fell.  The existing occupancy data neither proves nor disproves that
+mechanism; maximum consecutive cycles without a capture grant and per-camera
+FIFO peak are the measurements that settle it.
+
+Do not restore commit `8cc1869` unchanged.  Its replay datapath may be
+byte-correct in isolation, but it lacks a system-level fairness bound and was
+tested while the lease-reuse race above was still present.
+
+## 17. Recommended fix and verification order
+
+### Fix 1: make a lease consumable exactly once
+
+The minimum manager fix is to deassert `lease_valid` immediately when
+`consumer_done` is accepted in `ST_WAIT`, while retaining `lease_epoch` and the
+six bank registers internally for the release sweep:
+
+```verilog
+ST_WAIT: begin
+    if (consumer_done) begin
+        lease_valid <= 1'b0;
+        bank_index  <= 2'd0;
+        state       <= ST_RELEASE_PREP;
+    end
+end
+```
+
+Also add a consumer-side one-shot (`lease_started`) or an explicit
+`lease_accept` handshake.  Set it on an EO panorama `copy_start_accept`, clear
+it only after `lease_valid` falls, and qualify the start trigger with
+`!lease_started`.  The manager change fixes today's race; the one-shot makes
+the interface robust against future release-state latency changes.
+
+Add assertions/testbench checks for:
+
+- no more than one `copy_start_accept` per lease assertion/generation;
+- no EO panorama `copy_active && !lease_owned_for_this_copy`;
+- no source bank FREE return while replay has that bank leased or has reads in
+  flight;
+- a display `frame_edge` occurring during a copy does not relaunch the retiring
+  lease when that copy completes.
+
+The reproducer must include three output banks and make a copy span a display
+edge; existing replay-only and manager-only benches cannot expose this race.
+
+### Fix 2: skip the unused EO horizontal margins
+
+Keep the serial replay first, fetch only complete 8-beat batches 2 through 12
+(beat indices `16..103`), and synthesize neutral-black pixels for the omitted
+left/right positions while still presenting exactly 1920 accepted pixels to
+`EoV19LineCache`.  This preserves the cache's existing `wr_x=0..1919` row
+completion/tag contract and requires no BRAM or renderer change.  The omitted
+cache locations are unreachable by the current RowRun ROM.
+
+A later optimization may add `wr_start_x`/`wr_end_x` to the line cache and
+avoid shifting the black margins too, but that is a larger contract change and
+is not needed to obtain the DDR-read reduction.
+
+### Fix 3 only if margin remains insufficient
+
+Then reintroduce overlap/pipelining with bounded arbitration: admit an urgent
+capture write above replay when a camera FIFO crosses a threshold, or enforce a
+maximum run of consecutive source-read grants.  Preserve scan as the hard
+real-time first priority.  Verify maximum capture service gap, not only average
+DDR occupancy.
+
+### Hardware success criteria
+
+After programming a clean build and resetting sticky state:
+
+```
+EO frame_done rate                    >= 29.5/s over >= 30 s
+copy_active && !lease_valid           never during EO panorama
+new no-common-epoch events            0 in a steady six-camera run
+descriptor collision / FIFO overflow  0
+all six descriptor rates              approximately 31.5/s
+optical output                         >= 29.5 distinct/s with motion,
+                                       zero black frames or vertical bands
+```
+
+Capture the ILA with `-trigger_now` only.  Compare the `done_count` delta over
+wall time and use a deliberately moving scene for the optical hash count.
+
+---
+
+## 18. Review of sections 13-17, and what was implemented
+
+Each claim was re-derived from the saved captures and the RTL before acting.
+
+### Section 14 (lease reuse): confirmed, and it corrects me
+
+Verified independently. `copy_active && !lease_valid` is 25.0% of samples in
+`loop_eodiag_20260904_024715` and 20.0% in `loop_eopano_sh15_20260903_133328`;
+w001/w003/w007 are wholly unowned, as stated.
+
+My first reading was that this is a benign post-render tail -- consumer_done
+firing before `copy_active` ends, with the replay already idle, so releasing
+the banks harms nothing. **That was wrong**, and two measurements kill it:
+
+```
+during copy WITHOUT lease : replay run_enable high 100.0%
+                            ST_REQ 62.5%  ST_SHIFT 27.7%  ST_WAIT 8.1%
+replay dbg_row while copy && NO lease : min=47 p25=47 med=280
+```
+
+`run_enable` is high throughout and the FSM distribution is identical to the
+owned case, so the replay is actively issuing reads. And `dbg_row` reaches 47 --
+the replay starts a pass at `source_start_row` = 46 -- so this is a pass
+*beginning* unowned, not a tail. Every source read after the lease drops is
+against banks the manager has returned to the writers.
+
+One caveat on the mechanism as written. Section 14 step 4 implies the second
+copy re-renders the same source and so wastes a display permission. That part
+is not supported: `done_count` (22.47/s) equals the daylight optical distinct
+rate (22.5/s), so passes are not producing duplicates. The damage is unowned
+*reads within* a pass, i.e. a corruption hazard, not a duplicated-frame rate
+loss. That distinction matters for what to expect from the fix: it should
+remove vertical bands and frame-set churn, and it may or may not move the rate.
+
+### Section 15 (unused horizontal margins): confirmed independently
+
+Derived separately from `assets/maps/eo_base_{x,y}_q16.bin` before reading
+section 15, and the numbers agree: source rows 46..1053, columns 271..1610,
+beats 16..100. Section 15's rounding to whole 8-beat batches (16..103, 88 of
+120) is the better engineering choice and is what was implemented. A per-row
+beat window was also computed and rejected: 84652 beats/pass against 85680 for
+a fixed window, a 1.2% gain for a great deal more complexity.
+
+Section 15's throughput argument is the strongest reason to expect 30 fps:
+532,224 beats/pass at 30 fps is 15.97 Mbeat/s, under the ~16.8 Mbeat/s the
+current build already sustains.
+
+### Section 16 (retracting the starvation disproof): accepted
+
+The retraction is right and I accept it. Average `issue_busy` and `app_rdy`
+cannot disprove a bounded-latency property, and I over-claimed. Note this does
+not resurrect attempt 1 -- it only means the failure mechanism there is still
+open, and the measurements that would settle it (maximum consecutive cycles
+without a capture grant, per-camera FIFO peak) have not been taken.
+
+### What was implemented
+
+**Fix 1**, both halves. The manager drops `lease_valid` at `consumer_done`
+(`EoV19FrameSetManager.v` ST_WAIT), keeping `lease_epoch` and the bank
+registers for the sweep; and a consumer-side one-shot `v19_lease_consumed`
+qualifies the panorama start trigger so a held lease cannot launch twice
+whatever the manager's release latency becomes.
+
+Worth recording: `lease_valid` is *only ever assigned* inside the manager,
+never read, so the manager's internal behaviour is bit-identical. Everything
+that changed is downstream of the output.
+
+**Fix 2** as specified: `FETCH_BEAT_LO/HI` = 16/96 (batches 2..12), with
+out-of-window batches shifted out as `NEUTRAL_PIXEL` (16'h0080, Y=0 C=128)
+without any DDR read. The line cache still receives exactly 1920 accepted
+pixels per row.
+
+**Fix 3 not implemented** -- correctly gated behind measuring whether margin
+remains insufficient.
+
+### Testbench fallout worth knowing about
+
+Three existing tests used `while (lease_valid) @(posedge clk);` as their
+"wait for the release sweep" idiom -- precisely the behaviour Fix 1 changes.
+They now wait on the manager's release states, and carry a new assertion that
+`lease_valid` falls within 8 cycles of `consumer_done`. A quiet-for-N-cycles
+window was tried first and is wrong in the other direction: it runs on into the
+next FIND/ACQUIRE, which consumes descriptors before the check can look.
+
+`tb_EoV19DdrReplayArbiterAck` now expects `16'h0080` outside the fetch window
+and counts pixels per source row: 20 complete rows, all exactly 1920.
+`tb_EoV19DdrReplayBeatTiming` expects the first request at `beat_x = 16` and
+exactly 256 black margin pixels before it.
+
+### Simulation result
+
+1.17x on the replay pass (4107 cy/row against 4822) in a model whose arbiter is
+more available than the hardware's, so the hardware gain should be larger --
+the pass there is 62% ST_REQ. Expect roughly 29.8 ms -> 25 ms, i.e. margin
+3.5 ms -> ~8 ms.
+
+### Verification
+
+`scripts/verify_eo_30fps.sh <bit_archive_dir>` programs a build and reports the
+frame_done rate, the ownership invariant, and the optical rate together. The
+frame_done rate is the verdict; see the dark-room trap in section 7 for why the
+optical number cannot be.
