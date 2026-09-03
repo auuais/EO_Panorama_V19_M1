@@ -34,7 +34,15 @@ module EoV19StreamingRendererII1 #(
     output wire [10:0] source_start_row,
     output wire [63:0] dbg_rows_word0,
     output wire [63:0] dbg_rows_word1,
-    output wire [63:0] dbg_rows_word2
+    output wire [63:0] dbg_rows_word2,
+    // Frame-completion diagnostics, readable from an UNTRIGGERED capture.
+    // See the block that drives them for why they exist and why nothing here
+    // may be cleared when start_copy drops.
+    output wire [31:0] dbg_done_count,
+    output wire [8:0]  dbg_done_max_y,
+    output wire [8:0]  dbg_cut_pano_y,
+    output wire [11:0] dbg_cut_pano_x,
+    output wire [31:0] dbg_cut_count
 );
     localparam integer CONTENT_Y0 = `EO_V19_YPAD;
     localparam integer CONTENT_Y1 = `EO_V19_YPAD + `EO_V19_PER_CAM_H - 1;
@@ -531,4 +539,59 @@ module EoV19StreamingRendererII1 #(
     // The read addresses are registers driven by the cache-read stage.
     assign rd_x0=rd_x0_r;assign rd_x1=rd_x1_r;assign rd_x2=rd_x2_r;assign rd_x3=rd_x3_r;assign rd_x4=rd_x4_r;assign rd_x5=rd_x5_r;
     assign rd_y00=rd_y00_r;assign rd_y01=rd_y01_r;assign rd_y10=rd_y10_r;assign rd_y11=rd_y11_r;assign rd_y20=rd_y20_r;assign rd_y21=rd_y21_r;assign rd_y30=rd_y30_r;assign rd_y31=rd_y31_r;assign rd_y40=rd_y40_r;assign rd_y41=rd_y41_r;assign rd_y50=rd_y50_r;assign rd_y51=rd_y51_r;
+    //------------------------------------------------------------------------
+    // Frame-completion diagnostics.
+    //
+    // Triggered ILA capture does not work on this design: the core fires on
+    // arm regardless of the condition.  Verified 2026-09-03 by triggering on
+    // frame_edge -- a one-cycle pulse at 30 Hz -- and catching it in 0 of 8
+    // windows, where a working trigger hits every time.  So "does the renderer
+    // ever reach the end of the raster, and where is it when the pass ends"
+    // cannot be answered by arming on frame_done.  It has to be answerable
+    // from a random -trigger_now sample instead, which means a free-running
+    // count plus sticky latches:
+    //
+    //   done_count   frame_done events since reset.  Two reads a known time
+    //                apart give the completion rate; a count stuck at zero
+    //                says the renderer never finishes a frame at all.
+    //   done_max_y   highest pano_y reached since reset.  Answers "does it
+    //                get to PANO_H-1" with no edge subtleties whatsoever.
+    //   cut_pano_y   pano_y at the last falling edge of start_copy -- where
+    //                the renderer was when it was stopped.  Sampled in this
+    //                block, which reads pano_y in the same cycle the main FSM
+    //                resets it, so non-blocking semantics give the value from
+    //                before the reset.
+    //   cut_count    how many times that has happened.
+    //
+    // NOTHING here may be cleared on !start_copy.  That per-pass clear is
+    // exactly what makes dbg_seen_done useless: it is reset in the !start_copy
+    // branch, so reading 0 proves nothing about whether frame_done ever fired.
+    // Only a real reset clears these.
+    //------------------------------------------------------------------------
+    reg [31:0] done_count, cut_count;
+    reg [8:0]  done_max_y, cut_pano_y;
+    reg [11:0] cut_pano_x;
+    reg        start_copy_d;
+    always @(posedge clk) begin
+        if(!rst_n) begin
+            done_count <= 32'd0; cut_count <= 32'd0;
+            done_max_y <= 9'd0;  cut_pano_y <= 9'd0; cut_pano_x <= 12'd0;
+            start_copy_d <= 1'b0;
+        end else begin
+            start_copy_d <= start_copy;
+            if(frame_done) done_count <= done_count + 32'd1;
+            if(start_copy && (pano_y > done_max_y)) done_max_y <= pano_y;
+            if(start_copy_d && !start_copy) begin
+                cut_pano_y <= pano_y;
+                cut_pano_x <= pano_x;
+                cut_count  <= cut_count + 32'd1;
+            end
+        end
+    end
+    assign dbg_done_count = done_count;
+    assign dbg_done_max_y = done_max_y;
+    assign dbg_cut_pano_y = cut_pano_y;
+    assign dbg_cut_pano_x = cut_pano_x;
+    assign dbg_cut_count  = cut_count;
+
 endmodule

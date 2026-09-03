@@ -1380,6 +1380,10 @@ module PanoramaBase_DdrBlackFrame(
         end
     end
     wire [63:0] v19_dbg_bus;
+    // EO renderer frame-completion diagnostics, muxed onto probe24 whenever
+    // the IR renderer is not the one under test.  Driven in g_src_v19 only,
+    // exactly as v19_dbg_bus is.
+    wire [63:0] v19_eo_done_dbg;
     wire [63:0] v19_dbg_rows_word0;
     wire [63:0] v19_dbg_rows_word1;
     wire [63:0] v19_dbg_rows_word2;
@@ -1679,6 +1683,12 @@ module PanoramaBase_DdrBlackFrame(
         wire        v19_replay_clk;
         wire        irv19_replay_clk;
         reg         v19_render_active;
+        // EO renderer frame-completion diagnostics; see v19_eo_done_dbg below.
+        wire [31:0] v19_eo_done_count;
+        wire [8:0]  v19_eo_done_max_y;
+        wire [8:0]  v19_eo_cut_pano_y;
+        wire [11:0] v19_eo_cut_pano_x;
+        wire [31:0] v19_eo_cut_count;
         wire        v19_cam0_hsync, v19_cam0_vsync;
         wire        v19_cam1_hsync, v19_cam1_vsync;
         wire        v19_cam2_hsync, v19_cam2_vsync;
@@ -2510,7 +2520,12 @@ module PanoramaBase_DdrBlackFrame(
             .source_start_row(v19_source_start_row),
             .dbg_rows_word0(v19_dbg_rows_word0),
             .dbg_rows_word1(v19_dbg_rows_word1),
-            .dbg_rows_word2(v19_dbg_rows_word2)
+            .dbg_rows_word2(v19_dbg_rows_word2),
+            .dbg_done_count(v19_eo_done_count),
+            .dbg_done_max_y(v19_eo_done_max_y),
+            .dbg_cut_pano_y(v19_eo_cut_pano_y),
+            .dbg_cut_pano_x(v19_eo_cut_pano_x),
+            .dbg_cut_count (v19_eo_cut_count)
         );
 
         //--------------------------------------------------------------------
@@ -2550,6 +2565,23 @@ module PanoramaBase_DdrBlackFrame(
         assign v19_frames_valid = ir_stack_ui ? ir_rnd_frames_valid : eo_rnd_frames_valid;
 
         assign eo_frames_valid = v19_frames_valid;
+        // Readable from an UNTRIGGERED capture, which is the only kind that
+        // works on this design -- the ILA trigger fires on arm regardless of
+        // condition (verified by triggering on frame_edge, a one-cycle 30 Hz
+        // pulse, and catching it in 0 of 8 windows).
+        //   [63:56] 8'hED signature
+        //   [55:42] frame_done count      [41:30] start_copy-fell count
+        //   [29:21] highest pano_y reached since reset
+        //   [20:12] pano_y when start_copy last fell
+        //   [11:0]  pano_x when start_copy last fell
+        // done_count stuck at 0 means the renderer never finishes a frame;
+        // done_max_y short of EO_V19_PANO_H-1 says how far it gets.
+        assign v19_eo_done_dbg = {8'hED,
+                                  v19_eo_done_count[13:0],
+                                  v19_eo_cut_count[11:0],
+                                  v19_eo_done_max_y,
+                                  v19_eo_cut_pano_y,
+                                  v19_eo_cut_pano_x};
         assign v19_dbg_bus = {v19_dbg_seen_done, v19_dbg_seen_out,
                               v19_dbg_rows_peak,
                               v19_dbg_start_copy, v19_dbg_px_ready,
@@ -4083,7 +4115,11 @@ module PanoramaBase_DdrBlackFrame(
         .probe23 ((SRC_SEL == SRC_V19) ? v19_capture_dbg : 64'd0),
         // probe24 carries the IR renderer debug word, kept in place for mode
         // transition and IR/EO interaction debugging.
-        .probe24 (ir_render_dbg),
+        // probe24 carries the IR renderer debug word while the IR renderer is
+        // the one running; in every other mode that word is idle, so the EO
+        // renderer's completion diagnostics take the slot.  There is no spare
+        // probe on this core and adding one means regenerating the ILA IP.
+        .probe24 (ir_stack_ui ? ir_render_dbg : v19_eo_done_dbg),
         // V19 DDR replay bring-up visibility: distinguish source-read request,
         // return classification, and frame publication state.
         .probe25 ({v19_content_first_row, v19_frame_done, pending_valid,
