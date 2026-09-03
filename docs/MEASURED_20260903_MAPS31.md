@@ -195,3 +195,96 @@ The plan carried into today was to overlap the next six-camera lease
 acquisition with the running render.  The ILA kills it: a full FIND sweep is
 ~51 ui_clk cycles (~220 ns).  The 75% FIND occupancy that suggested it is the
 idle loop, not a stall.
+
+---
+
+# The pipelined replay is a hardware regression.  Reverted.
+
+Built as `8cc1869`, archived at
+`builds/bit_archive/20260903_174459_replay_pipelined_8cc1869_8cc1869/`, timing
+clean (WNS +0.043, WHS +0.010, WPWS +0.099, zero failing endpoints).
+
+Measured:
+
+| mode        | serial replay | pipelined replay |
+|-------------|--------------:|-----------------:|
+| EO panorama | 22.68         | **10.12**        |
+| IR panorama | 29.36         | 29.82            |
+| IR single   | 29.85         | 29.93            |
+| EO single   | 29.37         | 29.25            |
+
+Only EO panorama moved, and it halved.  The picture also showed vertical
+banding.  Reverted on hardware to `20260901_190911_maps31_eto_adbedee`, which
+re-measured at 21.36 fps clean, and `src/EoV19DdrDesync.v` is back to the
+serial engine so the tree matches the board.
+
+## What the hardware says
+
+80 ILA windows in EO panorama, against the same measurement on the serial
+build:
+
+|                                   | serial | pipelined |
+|-----------------------------------|-------:|----------:|
+| replay `run_enable`               |  67.5% |  **5.0%** |
+| `copy_active`                     |  67.5% |     27.5% |
+| replay FSM idle                   |  32.5% |     95.0% |
+| renderer row-gate wait (state 1)  |  48.6% |      1.7% |
+| `hold_for_demand`                 |  51.4% |     98.3% |
+| writer `drop_frame`               |  16.2% | **42.5%** |
+| `cam_present == 000000`           |     0% | **41%**   |
+| `issue_busy` (DDR command path)   |  44.1% |     21.0% |
+| `c0_ddr4_app_rdy`                 |  69.2% |     86.4% |
+| DDR writes                        | 22.0 Mbeat/s | 16.7 Mbeat/s |
+
+The change did what it was meant to: the renderer stopped waiting on the
+replay (row-gate wait 48.6% -> 1.7%) and `copy_px_valid` inside a copy rose
+from 31% to 70%.  The DDR got *less* busy, so nothing is bandwidth-starved.
+
+The visible artifact follows from `cam_present`: an absent camera has its tile
+rendered black by design (`black[0] <= ... || !cam_present[map_cam_a]`), and in
+a six-tile horizontal panorama intermittent per-camera blackouts are vertical
+bands.  Capture writers dropping 42.5% of frames is what drives cameras absent.
+
+## Three hypotheses, all disproved
+
+1. **Arbiter starvation** -- that a continuously-asking replay outranks
+   `output_write_want` and `capture_write_want` and starves them.  Refuted by
+   the data: `issue_busy` *fell* to 21% and `app_rdy` rose to 86%.  The command
+   path is idle, not contended.
+2. **Off-by-one demux from a late acknowledgement.**  The hardware arbiter
+   latches a replay address on one cycle and acknowledges when the command
+   fires several cycles later; if `run_enable` drops in that window the read
+   still returns but was never counted by `inflight`, so the discard guard
+   would be one short.  `sim/tb_EoV19DdrReplayArbiterAck.v` models exactly that
+   and the engine is CLEAN through eight pass boundaries.  (Written for this,
+   and worth keeping -- every previous replay testbench ties `rd_req_ready`
+   high, so none of them modelled the arbiter at all.)
+3. **Shorter inter-batch hsync gaps confusing the line caches.**  Refuted by
+   reading `EoV19LineCache`: it retires a row after WIDTH accepted pixels and
+   explicitly does not treat read gaps as line ends.
+
+## Not yet explained
+
+`v19_render_active` is 5% while `copy_active` is 27.5%.  It is set by
+`copy_start_accept` and cleared by `v19_frame_done || !copy_active`, and
+neither should be able to cut a render short: `frame_done` only fires on
+`last[10]`, which is `pano_y == PANO_H-1 && pano_x == PANO_W-1`, and
+`copy_active` cannot end before the renderer that feeds it.  Yet renderer
+`px_valid` (6.9% of all cycles) is *higher* than `start_copy` (5.0%), which
+says the renderer is emitting pixels while `render_active` is low.  One of
+those three things is not what it appears to be.
+
+**Next measurement:** capture triggered on `v19_frame_done` rising and on
+`copy_active` falling, reading `v19_dbg_pano_y` at that instant.  If pano_y is
+not 479 when `frame_done` fires, the renderer is being ended early and by what
+is then answerable.  That needs the pipelined bitstream back on the board for
+a few minutes.
+
+## Lesson for the next attempt
+
+The replay was verified in isolation -- a golden-reference pixel comparison
+that passed, and it was right about the replay.  The failure is in the
+*interaction* between a faster replay, the renderer's row gates, the frame-set
+lease and the capture ring.  A unit test of the replay cannot see that.  The
+next attempt needs the renderer and the line caches in the same simulation,
+driven by the same flow control, before it goes near the board.
