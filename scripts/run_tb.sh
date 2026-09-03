@@ -28,7 +28,17 @@ rm -rf "$WORK"; mkdir -p "$WORK"
       echo "XELAB FAILED"; grep -E "ERROR" xelab.log | head -20; exit 1; }
   # Keep the whole run; tailing it here has truncated a testbench's case list
   # before and made four of six cases look like they had not run.
-  "$VIV/xsim.bat" "${TB}_sim" -R > run.log 2>&1
+  #
+  # WALL-CLOCK timeout, not just the testbench's own $finish.  A $finish at a
+  # simulated time bounds simulated time and nothing else: two IR testbenches
+  # were found spinning for 4.5 hours at ~25,000 CPU-seconds each, stealing CPU
+  # from every synthesis run on the machine, and both of them do have a
+  # $finish.  TB_TIMEOUT overrides.
+  timeout -k 10 "${TB_TIMEOUT:-300}" "$VIV/xsim.bat" "${TB}_sim" -R > run.log 2>&1
+  rc=$?
+  if [ $rc -eq 124 ] || [ $rc -eq 137 ]; then
+      echo "TIMEOUT after ${TB_TIMEOUT:-300}s of wall clock -- killed"
+  fi
   grep -vE "^(\*\*\*|INFO|WARNING|Vivado|Time res|xsim|source |# |$)" run.log | tail -${TAIL:-40}
   echo "FULL LOG: $WORK/run.log"
 )

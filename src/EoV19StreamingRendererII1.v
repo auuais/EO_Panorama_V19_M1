@@ -38,11 +38,11 @@ module EoV19StreamingRendererII1 #(
     // Frame-completion diagnostics, readable from an UNTRIGGERED capture.
     // See the block that drives them for why they exist and why nothing here
     // may be cleared when start_copy drops.
-    output wire [31:0] dbg_done_count,
+    output wire [13:0] dbg_done_count,
     output wire [8:0]  dbg_done_max_y,
     output wire [8:0]  dbg_cut_pano_y,
     output wire [11:0] dbg_cut_pano_x,
-    output wire [31:0] dbg_cut_count
+    output wire [11:0] dbg_cut_count
 );
     localparam integer CONTENT_Y0 = `EO_V19_YPAD;
     localparam integer CONTENT_Y1 = `EO_V19_YPAD + `EO_V19_PER_CAM_H - 1;
@@ -568,23 +568,27 @@ module EoV19StreamingRendererII1 #(
     // branch, so reading 0 proves nothing about whether frame_done ever fired.
     // Only a real reset clears these.
     //------------------------------------------------------------------------
-    reg [31:0] done_count, cut_count;
+    // Sized to what the debug word actually carries.  Wider counters would be
+    // flops and carry chain that nothing can read, on a design that closes at
+    // +0.011 ns.  Wrapping is fine: only the delta between two reads is used.
+    reg [13:0] done_count;
+    reg [11:0] cut_count;
     reg [8:0]  done_max_y, cut_pano_y;
     reg [11:0] cut_pano_x;
     reg        start_copy_d;
     always @(posedge clk) begin
         if(!rst_n) begin
-            done_count <= 32'd0; cut_count <= 32'd0;
+            done_count <= 14'd0; cut_count <= 12'd0;
             done_max_y <= 9'd0;  cut_pano_y <= 9'd0; cut_pano_x <= 12'd0;
             start_copy_d <= 1'b0;
         end else begin
             start_copy_d <= start_copy;
-            if(frame_done) done_count <= done_count + 32'd1;
+            if(frame_done) done_count <= done_count + 14'd1;
             if(start_copy && (pano_y > done_max_y)) done_max_y <= pano_y;
             if(start_copy_d && !start_copy) begin
                 cut_pano_y <= pano_y;
                 cut_pano_x <= pano_x;
-                cut_count  <= cut_count + 32'd1;
+                cut_count  <= cut_count + 12'd1;
             end
         end
     end

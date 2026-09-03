@@ -1684,11 +1684,11 @@ module PanoramaBase_DdrBlackFrame(
         wire        irv19_replay_clk;
         reg         v19_render_active;
         // EO renderer frame-completion diagnostics; see v19_eo_done_dbg below.
-        wire [31:0] v19_eo_done_count;
+        wire [13:0] v19_eo_done_count;
         wire [8:0]  v19_eo_done_max_y;
         wire [8:0]  v19_eo_cut_pano_y;
         wire [11:0] v19_eo_cut_pano_x;
-        wire [31:0] v19_eo_cut_count;
+        wire [11:0] v19_eo_cut_count;
         wire        v19_cam0_hsync, v19_cam0_vsync;
         wire        v19_cam1_hsync, v19_cam1_vsync;
         wire        v19_cam2_hsync, v19_cam2_vsync;
@@ -2577,8 +2577,8 @@ module PanoramaBase_DdrBlackFrame(
         // done_count stuck at 0 means the renderer never finishes a frame;
         // done_max_y short of EO_V19_PANO_H-1 says how far it gets.
         assign v19_eo_done_dbg = {8'hED,
-                                  v19_eo_done_count[13:0],
-                                  v19_eo_cut_count[11:0],
+                                  v19_eo_done_count,
+                                  v19_eo_cut_count,
                                   v19_eo_done_max_y,
                                   v19_eo_cut_pano_y,
                                   v19_eo_cut_pano_x};
