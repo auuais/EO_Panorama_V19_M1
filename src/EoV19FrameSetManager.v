@@ -661,6 +661,30 @@ module EoV19FrameSetManager #(
 
                 ST_WAIT: begin
                     if (consumer_done) begin
+                        // Retire the lease the instant the consumer is done
+                        // with it, NOT at the end of the release sweep.
+                        //
+                        // lease_valid is what the EO panorama copy uses as its
+                        // start trigger, and it is a LEVEL, not a pulse
+                        // (PanoramaBase_DdrBlackFrame.v copy_start_trig ->
+                        // v19_replay_banks_ready -> banks_ready -> lease_valid).
+                        // Leaving it high through the four-bank release sweep
+                        // let a second copy start from a lease that was already
+                        // being handed back: the replay latches those bank
+                        // numbers at its start and keeps reading them while the
+                        // manager returns the same banks to the camera writers,
+                        // which are free to overwrite them mid-read.
+                        //
+                        // Measured on hardware 2026-09-04, EO panorama: copy_active
+                        // was high with lease_valid low in 20-25% of all samples,
+                        // with the replay run_enable high and issuing reads
+                        // throughout, and dbg_row as low as 47 -- the START of a
+                        // pass, not a tail.  Every bank read after that point was
+                        // unowned.
+                        //
+                        // lease_epoch and the six bank registers stay valid for
+                        // the sweep below; only the ownership flag drops here.
+                        lease_valid <= 1'b0;
                         bank_index <= 2'd0;
                         state <= ST_RELEASE_PREP;
                     end

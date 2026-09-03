@@ -752,12 +752,38 @@ module EoV19DdrReplay #(
     localparam [2:0]   RBATCH_LAST = RBATCH - 1;
     localparam [6:0]   RBATCH_STEP = RBATCH;
 
+    // Horizontal fetch window: the source columns the EO maps actually address.
+    //
+    // The engine used to read all 120 beats of every source row -- the full
+    // stored 1920-pixel width.  Decoding assets/maps/eo_base_{x,y}_q16.bin
+    // (655x480 int32 Q16, counting x..x+1 and y..y+1 because the renderer
+    // interpolates) shows the maps only ever reference source columns
+    // 271..1610, i.e. beats 16..100.  Rounding the right edge up to a whole
+    // 8-beat batch gives beats 16..103, a fetched envelope of pixels 256..1663:
+    // 15 pixels of margin on the left and 53 on the right of anything the
+    // RowRun ROM can address.
+    //
+    // 4 of the 15 batches per row are therefore never needed.  Skipping them
+    // removes 26.7% of the replay's DDR reads, and the pass was measured at
+    // ~62% ST_REQ, so it is the cheapest available reduction in pass time.
+    //
+    // The skipped positions are still SHIFTED, as neutral black, so the line
+    // cache still receives exactly WIDTH=1920 accepted pixels per row and its
+    // row-completion and tag contract is untouched.  Narrowing the cache
+    // instead would save the shift time too and free ~93 BRAM tiles, but it
+    // changes the renderer's x indexing and is a much larger change.
+    localparam [6:0]   FETCH_BEAT_LO = 7'd16;   // first fetched batch's beat_x
+    localparam [6:0]   FETCH_BEAT_HI = 7'd96;   // last fetched batch's beat_x
+    localparam [15:0]  NEUTRAL_PIXEL = 16'h0080;  // Y=0, C=128
+
     reg [2:0] state;
     reg [6:0] req_idx;        // 0..RTOTAL-1 while issuing: {cam, beat within batch}
     reg [6:0] ret_idx;        // same encoding for returns, which arrive in order
     reg [2:0] shift_k;        // which beat of the batch is being shifted out
     reg [6:0] beat_x;         // first beat of the current batch
     reg [3:0] shift_count;
+    // This batch is outside the fetch window: shift neutral black, read nothing.
+    reg       batch_black;
     reg [15:0] gap_count;
     reg [12:0] line_timer;
     reg [28:0] row_base_addr;
@@ -922,6 +948,7 @@ module EoV19DdrReplay #(
             shift_k <= 3'd0;
             beat_x <= 7'd0;
             shift_count <= 4'd0;
+            batch_black <= 1'b0;
             gap_count <= 16'd0;
             line_timer <= 13'd0;
             row_base_addr <= 29'd0;
@@ -951,6 +978,7 @@ module EoV19DdrReplay #(
             shift_k <= 3'd0;
             beat_x <= 7'd0;
             shift_count <= 4'd0;
+            batch_black <= 1'b0;
             gap_count <= 16'd0;
             line_timer <= 13'd0;
             row_base_addr <= 29'd0;
@@ -1018,6 +1046,16 @@ module EoV19DdrReplay #(
                 ST_REQ: begin
                     replay_vsync0 <= 1'b0; replay_vsync1 <= 1'b0; replay_vsync2 <= 1'b0;
                     replay_vsync3 <= 1'b0; replay_vsync4 <= 1'b0; replay_vsync5 <= 1'b0;
+                    if ((beat_x < FETCH_BEAT_LO) || (beat_x > FETCH_BEAT_HI)) begin
+                        // Outside the fetch window: issue nothing and go
+                        // straight to shifting this batch out as black.  The
+                        // line cache still gets its 16 pixels per beat.
+                        batch_black  <= 1'b1;
+                        rd_req_valid <= 1'b0;
+                        shift_k      <= 3'd0;
+                        state        <= ST_LOAD;
+                    end else begin
+                    batch_black <= 1'b0;
                     rd_req_valid <= 1'b1;
                     // Walk camera-major: all RBATCH beats of one camera before
                     // the next.  Within a camera the addresses step by
@@ -1040,6 +1078,7 @@ module EoV19DdrReplay #(
                             req_idx <= req_idx + 7'd1;
                         end
                     end
+                    end
                 end
 
                 ST_WAIT: begin
@@ -1057,9 +1096,12 @@ module EoV19DdrReplay #(
                 ST_LOAD: begin
                     replay_vsync0 <= 1'b0; replay_vsync1 <= 1'b0; replay_vsync2 <= 1'b0;
                     replay_vsync3 <= 1'b0; replay_vsync4 <= 1'b0; replay_vsync5 <= 1'b0;
-                    shift0 <= cbuf0[shift_k]; shift1 <= cbuf1[shift_k];
-                    shift2 <= cbuf2[shift_k]; shift3 <= cbuf3[shift_k];
-                    shift4 <= cbuf4[shift_k]; shift5 <= cbuf5[shift_k];
+                    shift0 <= batch_black ? {16{NEUTRAL_PIXEL}} : cbuf0[shift_k];
+                    shift1 <= batch_black ? {16{NEUTRAL_PIXEL}} : cbuf1[shift_k];
+                    shift2 <= batch_black ? {16{NEUTRAL_PIXEL}} : cbuf2[shift_k];
+                    shift3 <= batch_black ? {16{NEUTRAL_PIXEL}} : cbuf3[shift_k];
+                    shift4 <= batch_black ? {16{NEUTRAL_PIXEL}} : cbuf4[shift_k];
+                    shift5 <= batch_black ? {16{NEUTRAL_PIXEL}} : cbuf5[shift_k];
                     // Present pixel zero with hsync already asserted.
                     // Asserting hsync for the first time in ST_SHIFT made
                     // the line caches miss pixel 0, then accept the

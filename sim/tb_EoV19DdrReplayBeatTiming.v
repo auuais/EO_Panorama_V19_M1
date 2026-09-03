@@ -87,7 +87,10 @@ module tb_EoV19DdrReplayBeatTiming;
                 4: bank_off = 29'd1036800;
                 default: bank_off = 29'd2073600;
             endcase
-            expected_addr = bank_off + 29'd119040 + beat_of * 29'd8;
+            // The first fetched batch is beat_x = FETCH_BEAT_LO = 16, not 0:
+            // beats 0..15 are outside the window the EO maps address and are
+            // shifted out as neutral black without any DDR read.
+            expected_addr = bank_off + 29'd119040 + (29'd16 + beat_of) * 29'd8;
             if (rd_req_addr !== expected_addr) begin
                 $display("FAIL: request %0d (cam %0d beat %0d) expected address %0d got %0d",
                          request_count, cam_of, beat_of, expected_addr, rd_req_addr);
@@ -111,6 +114,8 @@ module tb_EoV19DdrReplayBeatTiming;
     end
 
     integer sample_count = 0;
+    integer black_lead = 0;
+    reg started = 1'b0;
     reg check_trailing_low = 1'b0;
     reg [15:0] sampled_packed;
     always @(posedge clk) begin
@@ -125,10 +130,20 @@ module tb_EoV19DdrReplayBeatTiming;
                          request_count);
                 $finish;
             end
-            $display("PASS: replay issued a camera-major 6x8 batch from the leased banks at row 124 and emitted pixels 0..15 exactly once");
+            if (black_lead != 256) begin
+                $display("FAIL: expected 256 black margin pixels before the first fetched beat, got %0d", black_lead);
+                $finish;
+            end
+            $display("PASS: replay issued a camera-major 6x8 batch from the leased banks at row 124, beginning at the first in-window beat, and emitted pixels 0..15 exactly once");
             $finish;
         end
-        if (replay_hsync0) begin
+        // The row now opens with two batches of neutral-black margin (beats
+        // 0..15), which are shifted out without a DDR read.  Skip them and
+        // check the first fetched beat.
+        if (replay_hsync0 && !started && (sampled_packed == 16'h0080)) begin
+            black_lead <= black_lead + 1;
+        end else if (replay_hsync0) begin
+            started <= 1'b1;
             if (sampled_packed !== (16'hA000 + sample_count)) begin
                 $display("FAIL: sample %0d expected %04x got %04x",
                          sample_count, 16'hA000 + sample_count, sampled_packed);

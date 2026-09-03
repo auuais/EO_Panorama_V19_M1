@@ -147,7 +147,15 @@ module tb_EoV19DdrReplayArbiterAck;
                 beat = (p % PXROW) / 16;
                 j    = p % 16;
                 a    = bank_off(c) + row * 29'd960 + beat * 29'd8;
-                want = a[15:0] + j[15:0];
+                // Beats outside the fetch window are never read from DDR; the
+                // replay shifts neutral black into those cache positions so the
+                // line cache still sees WIDTH pixels per row.  The RowRun ROM
+                // cannot address them (source columns 271..1610 -> beats
+                // 16..100), so their content only has to be defined, not right.
+                if ((beat < 16) || (beat > 103))
+                    want = 16'h0080;
+                else
+                    want = a[15:0] + j[15:0];
                 got  = {px[19:12], px[9:2]};
                 checked = checked + 1;
                 if (got !== want) begin
@@ -164,6 +172,37 @@ module tb_EoV19DdrReplayArbiterAck;
     always @(posedge clk) if (!ui_rst && run_enable) begin
         chk(hs0,px0,0); chk(hs1,px1,1); chk(hs2,px2,2);
         chk(hs3,px3,3); chk(hs4,px4,4); chk(hs5,px5,5);
+    end
+
+    // EoV19LineCache retires a source row after exactly WIDTH accepted pixels
+    // and ignores hsync gaps, so skipping DDR reads must NOT change how many
+    // pixels reach it.  Count them per row transition on camera 0.
+    integer px_this_row = 0;
+    integer rows_seen = 0;
+    integer row_len_bad = 0;
+    reg [10:0] dbg_row_d = 11'd0;
+    // A pass that ends mid-row leaves a partial row behind; that is expected
+    // and happens identically on the reference engine, so drop the count
+    // rather than scoring it as a short row.
+    always @(posedge clk) if (!run_enable) begin
+        px_this_row = 0;
+        dbg_row_d   = dbg_row;
+    end
+    always @(posedge clk) if (!ui_rst && run_enable) begin
+        dbg_row_d <= dbg_row;
+        if (hs0) px_this_row = px_this_row + 1;
+        if (dbg_row != dbg_row_d) begin
+            if (px_this_row != 0) begin
+                rows_seen = rows_seen + 1;
+                if (px_this_row != PXROW) begin
+                    row_len_bad = row_len_bad + 1;
+                    if (row_len_bad < 4)
+                        $display("  ROW LENGTH cam0 row %0d: %0d pixels, expected %0d",
+                                 dbg_row_d, px_this_row, PXROW);
+                end
+            end
+            px_this_row = 0;
+        end
     end
 
     task run_pass;
@@ -205,6 +244,12 @@ module tb_EoV19DdrReplayArbiterAck;
         run_pass(20000,  60, "end +20000 cy");
         run_pass(20000, 400, "end +20000 cy, long gap");
         $display("");
+        $display("  line-cache contract: %0d complete rows seen, %0d with the wrong pixel count",
+                 rows_seen, row_len_bad);
+        if (rows_seen > 0 && row_len_bad == 0)
+            $display("  PASS: every source row still delivers exactly %0d pixels", PXROW);
+        else
+            $display("  FAIL: row pixel count changed");
         $finish;
     end
 

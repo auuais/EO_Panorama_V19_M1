@@ -78,6 +78,27 @@ module tb_EoV19FrameSetManager;
         end
     endtask
 
+
+    // Wait for the release sweep to finish.
+    //
+    // This used to be written "while (lease_valid) @(posedge clk);" throughout,
+    // which stopped working the moment lease_valid began dropping at
+    // consumer_done instead of at the end of the sweep -- and that change is
+    // the point: a lease held through its own release is what let a second EO
+    // panorama copy start on banks already being handed back.
+    task wait_release_done;
+        integer guard;
+        begin
+            guard = 0;
+            while ((dut.state >= 6'd11) && (dut.state <= 6'd18) && (guard < 4000)) begin
+                @(posedge clk);
+                guard = guard + 1;
+            end
+            if (guard >= 4000) $fatal(1, "release sweep did not finish");
+            repeat (3) @(posedge clk);
+        end
+    endtask
+
     task wait_lease;
         input [15:0] expected_epoch;
         integer timeout;
@@ -116,6 +137,8 @@ module tb_EoV19FrameSetManager;
 
     integer init_seen;
     integer release_pulses;
+    integer lease_drop_cy;
+    integer idle_cy;
     initial begin
         desc_bank0=0; desc_bank1=0; desc_bank2=0;
         desc_bank3=0; desc_bank4=0; desc_bank5=0;
@@ -149,11 +172,39 @@ module tb_EoV19FrameSetManager;
 
         @(negedge clk); consumer_done=1'b1;
         @(negedge clk); consumer_done=1'b0;
-        release_pulses=0;
-        while (lease_valid) begin
+
+        // lease_valid must drop as soon as the consumer is done, BEFORE the
+        // release sweep runs.  It is the EO panorama copy's level start
+        // trigger, so a lease left asserted through the sweep lets a second
+        // copy launch from banks that are being handed back to the writers --
+        // observed on hardware 2026-09-04 as copy_active high with lease_valid
+        // low, replay issuing reads, dbg_row at the start of a pass.
+        lease_drop_cy = 0;
+        while (lease_valid && lease_drop_cy < 8) begin
             @(posedge clk);
+            lease_drop_cy = lease_drop_cy + 1;
+        end
+        if (lease_valid)
+            $fatal(1, "lease_valid still high %0d cycles after consumer_done",
+                   lease_drop_cy);
+
+        // The sweep itself is now observed over a bounded window rather than
+        // "while lease_valid", which is exactly the thing that changed.
+        // Watch the sweep itself, ending the moment the manager leaves the
+        // release states.  This used to be "while (lease_valid)", which is
+        // exactly the behaviour under test now; and a fixed-length or
+        // quiet-for-N window is wrong in the other direction -- it runs on into
+        // the next FIND/ACQUIRE, which consumes descriptors before the check
+        // below can look at them.
+        release_pulses=0;
+        idle_cy=0;
+        while ((dut.state >= 6'd11) && (dut.state <= 6'd18) && (idle_cy < 4000)) begin
+            @(posedge clk);
+            idle_cy=idle_cy+1;
             if (free_valid != 0) release_pulses=release_pulses+1;
         end
+        if (idle_cy >= 4000)
+            $fatal(1, "release sweep did not finish");
         if (release_pulses != 1)
             $fatal(1, "expected one release bank index, got %0d", release_pulses);
 
@@ -170,8 +221,7 @@ module tb_EoV19FrameSetManager;
 
         @(negedge clk); consumer_done=1'b1;
         @(negedge clk); consumer_done=1'b0;
-        while (lease_valid) @(posedge clk);
-        repeat (3) @(posedge clk);
+        wait_release_done;
         if (valid_map != 24'd0)
             $fatal(1, "selected/older descriptors were not retired: %h", valid_map);
         if (collision_seen)
@@ -214,7 +264,7 @@ module tb_EoV19FrameSetManager;
         //------------------------------------------------------------------
         @(negedge clk); consumer_done=1'b1;
         @(negedge clk); consumer_done=1'b0;
-        while (lease_valid) @(posedge clk);
+        wait_release_done;
         repeat (5) @(posedge clk);
 
         cam_present = 6'b110111;      // camera 3 has gone away
@@ -229,7 +279,7 @@ module tb_EoV19FrameSetManager;
         // ...and it must rejoin by itself once it comes back.
         @(negedge clk); consumer_done=1'b1;
         @(negedge clk); consumer_done=1'b0;
-        while (lease_valid) @(posedge clk);
+        wait_release_done;
         repeat (5) @(posedge clk);
 
         cam_present = 6'h3f;

@@ -1379,6 +1379,17 @@ module PanoramaBase_DdrBlackFrame(
             end
         end
     end
+    // One EO panorama copy per lease assertion.
+    //
+    // copy_start_trig for the panorama is the LEVEL v19_replay_banks_ready
+    // (= the frame-set manager's lease_valid).  A level start trigger will
+    // relaunch for as long as it is held, so a lease must be consumable
+    // exactly once.  The manager now drops lease_valid at consumer_done, which
+    // closes the observed race on its own; this one-shot makes the interface
+    // robust against any future change to how long the manager takes to get
+    // there, which is exactly the kind of latency assumption that produced the
+    // bug in the first place.
+    reg         v19_lease_consumed;
     wire [63:0] v19_dbg_bus;
     // EO renderer frame-completion diagnostics, muxed onto probe24 whenever
     // the IR renderer is not the one under test.  Driven in g_src_v19 only,
@@ -1458,7 +1469,7 @@ module PanoramaBase_DdrBlackFrame(
         ? (ir_single_ui ? (ir_start_pending || (ir_stale && frame_edge))
          : eo_single_ui ? (v19_eo_start_pending || (v19_eo_stale && frame_edge))
          : ir_stack_ui  ? irv19_replay_banks_ready
-                        : v19_replay_banks_ready)
+                        : (v19_replay_banks_ready && !v19_lease_consumed))
         : (SRC_SEL == SRC_EOSTK || SRC_SEL == SRC_EO0)
         ? (frame_edge && (eo_frames_valid || eo_frames_ready_seen))
         : ((PATTERN_TEST && frame_edge) || (!PATTERN_TEST && sel_pulse && ir_single_ui));
@@ -1501,6 +1512,16 @@ module PanoramaBase_DdrBlackFrame(
     wire copy_arm_ok = copy_armed || frame_edge;
     wire copy_start_accept = copy_start_trig && !copy_active && copy_arm_ok &&
                              copy_bank_available && !backend_transition_block;
+
+    // Set when this lease has launched its copy; cleared only once the lease
+    // has actually gone away, so a held lease can never launch twice.
+    wire v19_panorama_start = copy_start_accept && (SRC_SEL == SRC_V19) &&
+                              !ir_single_ui && !eo_single_ui && !ir_stack_ui;
+    always @(posedge c0_ddr4_ui_clk) begin
+        if (ui_rst)                        v19_lease_consumed <= 1'b0;
+        else if (!v19_replay_banks_ready)  v19_lease_consumed <= 1'b0;
+        else if (v19_panorama_start)       v19_lease_consumed <= 1'b1;
+    end
 
     always @(posedge c0_ddr4_ui_clk) begin
         if (ui_rst) copy_armed <= 1'b1;
