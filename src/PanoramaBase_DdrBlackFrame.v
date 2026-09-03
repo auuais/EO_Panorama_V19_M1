@@ -1509,7 +1509,29 @@ module PanoramaBase_DdrBlackFrame(
     // pulses coincident with that edge (the stale-camera fallbacks that repeat
     // a frame when a camera stops).  Without it a stopped camera would freeze
     // the output instead of repeating.
-    wire copy_arm_ok = copy_armed || frame_edge;
+    // The once-per-display-frame arm is a rate limiter, and for EO panorama it
+    // is now redundant AND costly.
+    //
+    // Redundant: v19_lease_consumed above already permits exactly one copy per
+    // frame-set lease, and leases arrive at the camera epoch rate (measured
+    // 30.01/s, the display rate), so the panorama copy rate is already bounded
+    // by its source.
+    //
+    // Costly: the lease becomes available when the six cameras have published a
+    // common epoch, which is asynchronous to the display edge and drifts
+    // against it.  With the arm in place a lease that lands just after an edge
+    // waits a whole display frame, so the loop alternates 33.3 ms and 66.7 ms.
+    // Measured 2026-09-04 after the lease and fetch-window fixes: 19.91
+    // frames/s, i.e. 50.2 ms average, which is exactly 1.5 display frames,
+    // while the copy itself takes only 17.9 ms.
+    //
+    // Removing it does not publish faster than the display: pending_valid still
+    // commits on frame_edge, and copy_bank_available keeps the scanned and
+    // pending banks out of reach, so a third copy cannot start until a commit
+    // frees a bank.
+    wire v19_panorama_copy = (SRC_SEL == SRC_V19) &&
+                             !ir_single_ui && !eo_single_ui && !ir_stack_ui;
+    wire copy_arm_ok = v19_panorama_copy ? 1'b1 : (copy_armed || frame_edge);
     wire copy_start_accept = copy_start_trig && !copy_active && copy_arm_ok &&
                              copy_bank_available && !backend_transition_block;
 
