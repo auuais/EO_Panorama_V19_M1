@@ -665,6 +665,40 @@ endmodule
 // DDR frame replay engine. It reads one 16-pixel beat from each camera bank,
 // waits until all six beats for that x-position are present, then writes all
 // six renderer-facing line caches in parallel for 16 ui_clk cycles.
+//
+// Fetch and shift-out run concurrently against a ping-pong batch buffer.
+//
+// The engine used to be strictly serial: issue 48 reads, block until all 48
+// returned, then spend 136 cycles shifting them into the line caches with the
+// DDR completely idle, then repeat.  Measured on hardware 2026-09-03 (EO
+// panorama, build adbedee): 667 ui_clk cycles per 48-beat batch, of which the
+// replay FSM spent 61.8% in ST_REQ, 27.7% in ST_SHIFT, 8.8% in ST_WAIT and
+// 0.0% in ST_LINE_END.  The renderer never gated it; the pass was spent
+// issuing requests.
+//
+// Why issuing was so slow: the top-level DDR command path holds one command at
+// a time (`issue_busy = cmd_pend || wdf_pend`), and it was busy on 55.3% of
+// copy cycles.  The replay was asking on only 51.1% of cycles -- it is silent
+// through WAIT/LOAD/SHIFT, and it also dropped rd_req_valid for one clock
+// after every accept -- so it kept missing the free slots.  The arbiter itself
+// was blameless: free-slot-while-asking measured 7.3% against a 7.2% grant
+// rate, so the replay won essentially every slot it was awake for.
+//
+// Both losses are fixed here:
+//
+//   * a batch fills one half of the buffer while the other half shifts out, so
+//     requests continue through the shift;
+//   * rd_req_valid stays high across an accept, with the next address
+//     presented on the same edge, so the ask is continuous within a batch.
+//
+// Fetch stays inside the current row.  Prefetching across the row boundary
+// would need dbg_row to run ahead of the pixels actually being delivered, and
+// dbg_row is what hold_for_demand compares against -- the renderer's flow
+// control.  The cost of not doing it is one batch of overlap per 15, ~6%.
+//
+// Returns are still consumed strictly in issue order, and a half is only
+// declared full when all RTOTAL of its returns have landed, so the demux stays
+// exact and the orphaned-read guard below is unchanged.
 module EoV19DdrReplay #(
     parameter [28:0] CAM0_BASE_ADDR = 29'd0,
     parameter [28:0] CAM1_BASE_ADDR = 29'd0,
@@ -724,13 +758,14 @@ module EoV19DdrReplay #(
     assign replay_clk = clk;
     assign banks_ready = lease_valid;
 
-    localparam [2:0] ST_IDLE = 3'd0;
-    localparam [2:0] ST_REQ  = 3'd1;
-    localparam [2:0] ST_WAIT = 3'd2;
-    localparam [2:0] ST_SHIFT = 3'd3;
+    // Pass-level control.  The old per-batch states (REQ/WAIT/LOAD/SHIFT) are
+    // gone from this register: fetch and shift now have their own, and both
+    // run inside ST_RUN.  dbg_state keeps reporting values in the old encoding
+    // so existing captures and decode scripts still read.
+    localparam [2:0] ST_IDLE     = 3'd0;
+    localparam [2:0] ST_RUN      = 3'd1;
     localparam [2:0] ST_LINE_END = 3'd4;
-    localparam [2:0] ST_GAP = 3'd5;
-    localparam [2:0] ST_LOAD = 3'd6;
+    localparam [2:0] ST_GAP      = 3'd5;
 
     // Beats fetched from ONE camera before moving to the next.
     //
@@ -751,13 +786,39 @@ module EoV19DdrReplay #(
     localparam integer RTOTAL = 6 * RBATCH;   // reads issued per batch
     localparam [2:0]   RBATCH_LAST = RBATCH - 1;
     localparam [6:0]   RBATCH_STEP = RBATCH;
+    localparam [3:0]   BATCH_LAST  = 4'd14;   // 120 beats / RBATCH - 1
 
     reg [2:0] state;
-    reg [6:0] req_idx;        // 0..RTOTAL-1 while issuing: {cam, beat within batch}
-    reg [6:0] ret_idx;        // same encoding for returns, which arrive in order
-    reg [2:0] shift_k;        // which beat of the batch is being shifted out
-    reg [6:0] beat_x;         // first beat of the current batch
+
+    // ---- fetch engine ------------------------------------------------------
+    reg       f_busy;       // a batch is being issued
+    reg       f_half;       // buffer half it is issuing into
+    reg [6:0] req_idx;      // 0..RTOTAL-1: {cam, beat within batch}
+    reg [6:0] beat_x;       // first beat of the batch being issued
+    reg [3:0] f_batch;      // which batch of the row, 0..BATCH_LAST
+
+    // ---- return demux ------------------------------------------------------
+    reg       r_half;       // half the in-flight returns belong to
+    reg [6:0] ret_idx;      // same encoding as req_idx; returns are in order
+
+    // ---- shift engine ------------------------------------------------------
+    localparam [1:0] SS_WAIT  = 2'd0;
+    localparam [1:0] SS_LOAD  = 2'd1;
+    localparam [1:0] SS_SHIFT = 2'd2;
+    reg [1:0] s_state;
+    reg       s_half;
+    reg [2:0] shift_k;
     reg [3:0] shift_count;
+    reg [3:0] s_batch;
+
+    // ---- buffer ownership --------------------------------------------------
+    // claimed: the fetch engine has taken the half and it is not drained yet.
+    // full:    every return for that half has landed, so it may be shifted.
+    // They are distinct because the window between "started filling" and
+    // "safe to shift" is exactly what makes the overlap legal.
+    reg [1:0] half_claimed;
+    reg [1:0] half_full;
+
     reg [15:0] gap_count;
     reg [12:0] line_timer;
     reg [28:0] row_base_addr;
@@ -765,13 +826,19 @@ module EoV19DdrReplay #(
     // One small buffer per camera, written as returns arrive and read back a
     // beat at a time during the shift.  Six separate arrays rather than one
     // indexed by camera: the shift needs all six simultaneously, which a
-    // single array would turn into a six-read-port memory.
-    reg [255:0] cbuf0 [0:RBATCH-1];
-    reg [255:0] cbuf1 [0:RBATCH-1];
-    reg [255:0] cbuf2 [0:RBATCH-1];
-    reg [255:0] cbuf3 [0:RBATCH-1];
-    reg [255:0] cbuf4 [0:RBATCH-1];
-    reg [255:0] cbuf5 [0:RBATCH-1];
+    // single array would turn into a six-read-port memory.  Now 2*RBATCH deep,
+    // addressed {half, beat}.
+    // Forced to LUTRAM.  These are 16x256 = 4 kbit each and would fit a BRAM
+    // comfortably, but this design is BRAM-bound (808/984, 82.1%, against 8.4%
+    // LUTs) and BRAM pressure is what has made rebuilds place badly here.
+    // Six of them in fabric costs a few hundred LUTs of a budget that is
+    // almost entirely unused.
+    (* ram_style = "distributed" *) reg [255:0] cbuf0 [0:2*RBATCH-1];
+    (* ram_style = "distributed" *) reg [255:0] cbuf1 [0:2*RBATCH-1];
+    (* ram_style = "distributed" *) reg [255:0] cbuf2 [0:2*RBATCH-1];
+    (* ram_style = "distributed" *) reg [255:0] cbuf3 [0:2*RBATCH-1];
+    (* ram_style = "distributed" *) reg [255:0] cbuf4 [0:2*RBATCH-1];
+    (* ram_style = "distributed" *) reg [255:0] cbuf5 [0:2*RBATCH-1];
     reg [255:0] shift0, shift1, shift2, shift3, shift4, shift5;
     wire hold_for_demand = !source_need_valid || (dbg_row >= source_need_row);
 
@@ -792,7 +859,7 @@ module EoV19DdrReplay #(
     // rewritten every batch, so a stray return could only rotate cameras.
     //
     // Count reads in flight (the counter is exact: the same condition
-    // advances ST_REQ), and at the instant a new pass starts, drop exactly
+    // advances req_idx), and at the instant a new pass starts, drop exactly
     // that many returns before trusting the demux again.
     //------------------------------------------------------------------------
     wire req_accept = rd_req_valid && rd_req_ready;
@@ -831,7 +898,7 @@ module EoV19DdrReplay #(
     assign dbg_word = {8'hE1,
                        run_enable, banks_ready,
                        source_need_valid, hold_for_demand,
-                       state, req_idx[5:3], ret_idx[5:3], shift_k,
+                       dbg_state, req_idx[5:3], ret_idx[5:3], shift_k,
                        beat_x, shift_count,
                        dbg_row, source_need_row,
                        rd_req_valid, rd_req_ready,
@@ -914,29 +981,43 @@ module EoV19DdrReplay #(
     assign replay_pixel4 = expand_pixel(shift4[15:0]);
     assign replay_pixel5 = expand_pixel(shift5[15:0]);
 
+    // Next request index within the batch, and the address it needs.  Held as
+    // wires so the accept cycle can present the following address on the same
+    // edge -- that is what lets rd_req_valid stay high across an accept.
+    wire [6:0] req_idx_next = req_idx + 7'd1;
+    wire [3:0] shift_wr_a = {r_half, ret_idx[2:0]};
+    wire [3:0] shift_rd_a = {s_half, shift_k};
+
     always @(posedge clk) begin
         if (ui_rst || !rst_n) begin
             state <= ST_IDLE;
-            req_idx <= 7'd0;
-            ret_idx <= 7'd0;
-            shift_k <= 3'd0;
-            beat_x <= 7'd0;
-            shift_count <= 4'd0;
+            f_busy       <= 1'b0;
+            f_half       <= 1'b0;
+            req_idx      <= 7'd0;
+            beat_x       <= 7'd0;
+            f_batch      <= 4'd0;
+            r_half       <= 1'b0;
+            ret_idx      <= 7'd0;
+            s_state      <= SS_WAIT;
+            s_half       <= 1'b0;
+            shift_k      <= 3'd0;
+            shift_count  <= 4'd0;
+            s_batch      <= 4'd0;
+            half_claimed <= 2'b00;
+            half_full    <= 2'b00;
+            rd_req_valid <= 1'b0;
             gap_count <= 16'd0;
             line_timer <= 13'd0;
             row_base_addr <= 29'd0;
             latched_bank <= 12'd0;
+            rd_req_addr <= 29'd0;
             replay_hsync0 <= 1'b0; replay_hsync1 <= 1'b0; replay_hsync2 <= 1'b0;
             replay_hsync3 <= 1'b0; replay_hsync4 <= 1'b0; replay_hsync5 <= 1'b0;
             replay_vsync0 <= 1'b1; replay_vsync1 <= 1'b1; replay_vsync2 <= 1'b1;
             replay_vsync3 <= 1'b1; replay_vsync4 <= 1'b1; replay_vsync5 <= 1'b1;
-            rd_req_valid <= 1'b0;
-            rd_req_addr <= 29'd0;
             frame_edge <= 1'b0;
             dbg_row <= 11'd0;
             dbg_state <= ST_IDLE;
-            shift0 <= 256'd0; shift1 <= 256'd0; shift2 <= 256'd0;
-            shift3 <= 256'd0; shift4 <= 256'd0; shift5 <= 256'd0;
         end else if (!run_enable) begin
             // The DDR-backed source replay is consumed by tiny line caches in
             // the RowRun renderer.  It must therefore be phase-locked to the
@@ -946,11 +1027,21 @@ module EoV19DdrReplay #(
             // renderer's row gates then wait for each required source-row
             // window instead of finding the cache already overrun at row 1079.
             state <= ST_IDLE;
-            req_idx <= 7'd0;
-            ret_idx <= 7'd0;
-            shift_k <= 3'd0;
-            beat_x <= 7'd0;
-            shift_count <= 4'd0;
+            f_busy       <= 1'b0;
+            f_half       <= 1'b0;
+            req_idx      <= 7'd0;
+            beat_x       <= 7'd0;
+            f_batch      <= 4'd0;
+            r_half       <= 1'b0;
+            ret_idx      <= 7'd0;
+            s_state      <= SS_WAIT;
+            s_half       <= 1'b0;
+            shift_k      <= 3'd0;
+            shift_count  <= 4'd0;
+            s_batch      <= 4'd0;
+            half_claimed <= 2'b00;
+            half_full    <= 2'b00;
+            rd_req_valid <= 1'b0;
             gap_count <= 16'd0;
             line_timer <= 13'd0;
             row_base_addr <= 29'd0;
@@ -958,44 +1049,74 @@ module EoV19DdrReplay #(
             replay_hsync3 <= 1'b0; replay_hsync4 <= 1'b0; replay_hsync5 <= 1'b0;
             replay_vsync0 <= 1'b1; replay_vsync1 <= 1'b1; replay_vsync2 <= 1'b1;
             replay_vsync3 <= 1'b1; replay_vsync4 <= 1'b1; replay_vsync5 <= 1'b1;
-            rd_req_valid <= 1'b0;
             rd_req_addr <= 29'd0;
             frame_edge <= 1'b0;
             dbg_row <= 11'd0;
             dbg_state <= ST_IDLE;
         end else begin
             frame_edge <= 1'b0;
-            rd_req_valid <= 1'b0;
             replay_hsync0 <= 1'b0; replay_hsync1 <= 1'b0; replay_hsync2 <= 1'b0;
             replay_hsync3 <= 1'b0; replay_hsync4 <= 1'b0; replay_hsync5 <= 1'b0;
-            // Bring-up visibility: while waiting for the six camera DDR
-            // returns, expose the return camera index on the 3-bit port.
-            // Other states keep their normal state encoding.
-            dbg_state <= (state == ST_WAIT) ? ret_idx[5:3] : state;
 
             if (state != ST_IDLE && line_timer != 13'h1fff)
                 line_timer <= line_timer + 13'd1;
 
-            // The native MIG interface returns completions strictly in issue
-            // order, so a single counter demultiplexes them: the high bits
-            // select the camera the batch was fetching, the low bits the beat
-            // within that batch.
+            // Reported in the OLD state encoding so existing captures and
+            // scripts/decode_frameset_probe.py keep reading.  A starved shift
+            // engine reports REQ when the fetch engine is issuing and WAIT
+            // when it is not -- that split is what located this bottleneck.
+            dbg_state <= (state == ST_IDLE)     ? ST_IDLE     :
+                         (state == ST_LINE_END) ? ST_LINE_END :
+                         (state == ST_GAP)      ? ST_GAP      :
+                         (s_state == SS_LOAD)   ? 3'd6        :
+                         (s_state == SS_SHIFT)  ? 3'd3        :
+                         f_busy                 ? 3'd1 : 3'd2;
+
+            //----------------------------------------------------------------
+            // Return demux.  The native MIG interface returns completions
+            // strictly in issue order, so one counter plus the half it belongs
+            // to places every beat: the high bits select the camera the batch
+            // was fetching, the low bits the beat within that batch.
+            //----------------------------------------------------------------
             if (rd_data_valid && (discard == 7'd0)) begin
                 case (ret_idx[5:3])
-                    3'd0: cbuf0[ret_idx[2:0]] <= rd_data[255:0];
-                    3'd1: cbuf1[ret_idx[2:0]] <= rd_data[255:0];
-                    3'd2: cbuf2[ret_idx[2:0]] <= rd_data[255:0];
-                    3'd3: cbuf3[ret_idx[2:0]] <= rd_data[255:0];
-                    3'd4: cbuf4[ret_idx[2:0]] <= rd_data[255:0];
-                    default: cbuf5[ret_idx[2:0]] <= rd_data[255:0];
+                    3'd0: cbuf0[shift_wr_a] <= rd_data[255:0];
+                    3'd1: cbuf1[shift_wr_a] <= rd_data[255:0];
+                    3'd2: cbuf2[shift_wr_a] <= rd_data[255:0];
+                    3'd3: cbuf3[shift_wr_a] <= rd_data[255:0];
+                    3'd4: cbuf4[shift_wr_a] <= rd_data[255:0];
+                    default: cbuf5[shift_wr_a] <= rd_data[255:0];
                 endcase
-                ret_idx <= ret_idx + 7'd1;
+                if (ret_idx == RTOTAL[6:0] - 7'd1) begin
+                    ret_idx          <= 7'd0;
+                    half_full[r_half] <= 1'b1;
+                    r_half           <= ~r_half;
+                end else begin
+                    ret_idx <= ret_idx + 7'd1;
+                end
             end
 
             case (state)
                 ST_IDLE: begin
                     replay_vsync0 <= 1'b1; replay_vsync1 <= 1'b1; replay_vsync2 <= 1'b1;
                     replay_vsync3 <= 1'b1; replay_vsync4 <= 1'b1; replay_vsync5 <= 1'b1;
+                    // Held reset while idle, so entering a pass needs no
+                    // separate reset step and cannot race the demux above.
+                    f_busy       <= 1'b0;
+                    f_half       <= 1'b0;
+                    req_idx      <= 7'd0;
+                    beat_x       <= 7'd0;
+                    f_batch      <= 4'd0;
+                    r_half       <= 1'b0;
+                    ret_idx      <= 7'd0;
+                    s_state      <= SS_WAIT;
+                    s_half       <= 1'b0;
+                    shift_k      <= 3'd0;
+                    shift_count  <= 4'd0;
+                    s_batch      <= 4'd0;
+                    half_claimed <= 2'b00;
+                    half_full    <= 2'b00;
+                    rd_req_valid <= 1'b0;
                     if (run_enable && banks_ready && source_need_valid) begin
                         latched_bank <= {bank5, bank4, bank3, bank2, bank1, bank0};
                         // Skip DDR rows that no RowRun in this pass can
@@ -1003,114 +1124,131 @@ module EoV19DdrReplay #(
                         // row, so their row tags remain exact.
                         dbg_row <= source_start_row;
                         row_base_addr <= row_offset(source_start_row);
-                        beat_x <= 7'd0;
-                        req_idx <= 7'd0;
-                        ret_idx <= 7'd0;
-                        shift_k <= 3'd0;
                         line_timer <= 13'd0;
                         replay_vsync0 <= 1'b0; replay_vsync1 <= 1'b0; replay_vsync2 <= 1'b0;
                         replay_vsync3 <= 1'b0; replay_vsync4 <= 1'b0; replay_vsync5 <= 1'b0;
                         frame_edge <= 1'b1;
-                        state <= ST_REQ;
+                        state <= ST_RUN;
                     end
                 end
 
-                ST_REQ: begin
+                ST_RUN: begin
                     replay_vsync0 <= 1'b0; replay_vsync1 <= 1'b0; replay_vsync2 <= 1'b0;
                     replay_vsync3 <= 1'b0; replay_vsync4 <= 1'b0; replay_vsync5 <= 1'b0;
-                    rd_req_valid <= 1'b1;
-                    // Walk camera-major: all RBATCH beats of one camera before
-                    // the next.  Within a camera the addresses step by
-                    // BEAT_STRIDE_ADDR, so the batch stays inside one DRAM row
-                    // instead of activating a new one on every read.
-                    rd_req_addr <= cam_addr(req_idx[5:3],
-                                            beat_x + {4'd0, req_idx[2:0]});
-                    // rd_req_valid/rd_req_addr are registered outputs.  The
-                    // top-level arbiter accepts the address that was visible
-                    // before this clock edge, so only advance after a cycle in
-                    // which valid was already high and ready returned.  Drop
-                    // valid for one clock after each accept so the next
-                    // address is presented cleanly before it can be accepted.
-                    if (rd_req_valid && rd_req_ready) begin
-                        rd_req_valid <= 1'b0;
+
+                    //------------------------------------------------------------
+                    // Fetch engine.  Issues RTOTAL reads into one half, camera
+                    // major, then hands that half over and takes the other.
+                    // rd_req_valid stays high across an accept and the next
+                    // address is presented on the same edge, so the ask is
+                    // continuous: the old one-clock drop halved the duty cycle
+                    // and the top-level arbiter only grants when asked.
+                    //------------------------------------------------------------
+                    if (!f_busy) begin
+                        if ((f_batch <= BATCH_LAST) && !half_claimed[f_half]) begin
+                            f_busy       <= 1'b1;
+                            half_claimed[f_half] <= 1'b1;
+                            req_idx      <= 7'd0;
+                            rd_req_valid <= 1'b1;
+                            rd_req_addr  <= cam_addr(3'd0, beat_x);
+                        end
+                    end else if (req_accept) begin
                         if (req_idx == RTOTAL[6:0] - 7'd1) begin
-                            req_idx <= 7'd0;
-                            state <= ST_WAIT;
+                            rd_req_valid <= 1'b0;
+                            req_idx      <= 7'd0;
+                            f_busy       <= 1'b0;
+                            f_half       <= ~f_half;
+                            f_batch      <= f_batch + 4'd1;
+                            beat_x       <= beat_x + RBATCH_STEP;
                         end else begin
-                            req_idx <= req_idx + 7'd1;
+                            req_idx     <= req_idx_next;
+                            rd_req_addr <= cam_addr(req_idx_next[5:3],
+                                                    beat_x + {4'd0, req_idx_next[2:0]});
                         end
                     end
-                end
 
-                ST_WAIT: begin
-                    replay_vsync0 <= 1'b0; replay_vsync1 <= 1'b0; replay_vsync2 <= 1'b0;
-                    replay_vsync3 <= 1'b0; replay_vsync4 <= 1'b0; replay_vsync5 <= 1'b0;
-                    if (ret_idx == RTOTAL[6:0]) begin
-                        ret_idx <= 7'd0;
-                        shift_k <= 3'd0;
-                        state <= ST_LOAD;
-                    end
-                end
-
-                // Present one beat of the batch: all six cameras' data for the
-                // same beat index, exactly as the old per-beat path did.
-                ST_LOAD: begin
-                    replay_vsync0 <= 1'b0; replay_vsync1 <= 1'b0; replay_vsync2 <= 1'b0;
-                    replay_vsync3 <= 1'b0; replay_vsync4 <= 1'b0; replay_vsync5 <= 1'b0;
-                    shift0 <= cbuf0[shift_k]; shift1 <= cbuf1[shift_k];
-                    shift2 <= cbuf2[shift_k]; shift3 <= cbuf3[shift_k];
-                    shift4 <= cbuf4[shift_k]; shift5 <= cbuf5[shift_k];
-                    // Present pixel zero with hsync already asserted.
-                    // Asserting hsync for the first time in ST_SHIFT made
-                    // the line caches miss pixel 0, then accept the
-                    // post-shift zero one clock after pixel 15.  The
-                    // resulting source rows had zero at every x=15 mod 16.
-                    replay_hsync0 <= 1'b1; replay_hsync1 <= 1'b1; replay_hsync2 <= 1'b1;
-                    replay_hsync3 <= 1'b1; replay_hsync4 <= 1'b1; replay_hsync5 <= 1'b1;
-                    shift_count <= 4'd0;
-                    state <= ST_SHIFT;
-                end
-
-                ST_SHIFT: begin
-                    replay_vsync0 <= 1'b0; replay_vsync1 <= 1'b0; replay_vsync2 <= 1'b0;
-                    replay_vsync3 <= 1'b0; replay_vsync4 <= 1'b0; replay_vsync5 <= 1'b0;
-                    replay_hsync0 <= 1'b1; replay_hsync1 <= 1'b1; replay_hsync2 <= 1'b1;
-                    replay_hsync3 <= 1'b1; replay_hsync4 <= 1'b1; replay_hsync5 <= 1'b1;
-                    shift0 <= {16'd0, shift0[255:16]};
-                    shift1 <= {16'd0, shift1[255:16]};
-                    shift2 <= {16'd0, shift2[255:16]};
-                    shift3 <= {16'd0, shift3[255:16]};
-                    shift4 <= {16'd0, shift4[255:16]};
-                    shift5 <= {16'd0, shift5[255:16]};
-                    if (shift_count == 4'd15) begin
-                        // Pixel 15 is consumed on this edge.  Drop hsync now
-                        // so the following request/wait cycle cannot append
-                        // the shifted-in zero as a seventeenth pixel.
-                        replay_hsync0 <= 1'b0; replay_hsync1 <= 1'b0; replay_hsync2 <= 1'b0;
-                        replay_hsync3 <= 1'b0; replay_hsync4 <= 1'b0; replay_hsync5 <= 1'b0;
-                        shift_count <= 4'd0;
-                        // RBATCH-1 written out: RBATCH[2:0] is 0 for RBATCH=8
-                        // and only yields 7 by wrapping, which would stay 7
-                        // and be silently wrong if RBATCH ever changed.
-                        if (shift_k == RBATCH_LAST) begin
-                            // Batch drained: fetch the next RBATCH beats, or
-                            // end the row.  120 beats divide into 15 batches
-                            // of 8 exactly, so beat_x lands on 120 precisely.
-                            shift_k <= 3'd0;
-                            if (beat_x + RBATCH_STEP >= 7'd120) begin
-                                beat_x <= 7'd0;
-                                state <= ST_LINE_END;
-                            end else begin
-                                beat_x <= beat_x + RBATCH_STEP;
-                                state <= ST_REQ;
+                    //------------------------------------------------------------
+                    // Shift engine.  Drains a full half into the six line
+                    // caches, one beat at a time, 16 pixels per beat.
+                    //------------------------------------------------------------
+                    case (s_state)
+                        SS_WAIT: begin
+                            if (half_full[s_half]) begin
+                                shift_k <= 3'd0;
+                                s_state <= SS_LOAD;
                             end
-                        end else begin
-                            shift_k <= shift_k + 3'd1;
-                            state <= ST_LOAD;
                         end
-                    end else begin
-                        shift_count <= shift_count + 4'd1;
-                    end
+
+                        // Present one beat of the batch: all six cameras' data
+                        // for the same beat index, exactly as the old per-beat
+                        // path did.
+                        SS_LOAD: begin
+                            shift0 <= cbuf0[shift_rd_a]; shift1 <= cbuf1[shift_rd_a];
+                            shift2 <= cbuf2[shift_rd_a]; shift3 <= cbuf3[shift_rd_a];
+                            shift4 <= cbuf4[shift_rd_a]; shift5 <= cbuf5[shift_rd_a];
+                            // Present pixel zero with hsync already asserted.
+                            // Asserting hsync for the first time in SS_SHIFT
+                            // made the line caches miss pixel 0, then accept
+                            // the post-shift zero one clock after pixel 15.
+                            // The resulting source rows had zero at every
+                            // x=15 mod 16.
+                            replay_hsync0 <= 1'b1; replay_hsync1 <= 1'b1; replay_hsync2 <= 1'b1;
+                            replay_hsync3 <= 1'b1; replay_hsync4 <= 1'b1; replay_hsync5 <= 1'b1;
+                            shift_count <= 4'd0;
+                            s_state <= SS_SHIFT;
+                        end
+
+                        SS_SHIFT: begin
+                            replay_hsync0 <= 1'b1; replay_hsync1 <= 1'b1; replay_hsync2 <= 1'b1;
+                            replay_hsync3 <= 1'b1; replay_hsync4 <= 1'b1; replay_hsync5 <= 1'b1;
+                            shift0 <= {16'd0, shift0[255:16]};
+                            shift1 <= {16'd0, shift1[255:16]};
+                            shift2 <= {16'd0, shift2[255:16]};
+                            shift3 <= {16'd0, shift3[255:16]};
+                            shift4 <= {16'd0, shift4[255:16]};
+                            shift5 <= {16'd0, shift5[255:16]};
+                            if (shift_count == 4'd15) begin
+                                // Pixel 15 is consumed on this edge.  Drop
+                                // hsync now so the following load cycle cannot
+                                // append the shifted-in zero as a seventeenth
+                                // pixel.
+                                replay_hsync0 <= 1'b0; replay_hsync1 <= 1'b0; replay_hsync2 <= 1'b0;
+                                replay_hsync3 <= 1'b0; replay_hsync4 <= 1'b0; replay_hsync5 <= 1'b0;
+                                shift_count <= 4'd0;
+                                // RBATCH-1 written out: RBATCH[2:0] is 0 for
+                                // RBATCH=8 and only yields 7 by wrapping,
+                                // which would stay 7 and be silently wrong if
+                                // RBATCH ever changed.
+                                if (shift_k == RBATCH_LAST) begin
+                                    // Half drained: release it to the fetch
+                                    // engine and move to the other one.
+                                    half_full[s_half]    <= 1'b0;
+                                    half_claimed[s_half] <= 1'b0;
+                                    s_half  <= ~s_half;
+                                    shift_k <= 3'd0;
+                                    if (s_batch == BATCH_LAST) begin
+                                        s_batch <= 4'd0;
+                                        state   <= ST_LINE_END;
+                                        s_state <= SS_WAIT;
+                                    end else begin
+                                        s_batch <= s_batch + 4'd1;
+                                        // Straight into the next beat when the
+                                        // other half is already full, so the
+                                        // gap between batches is the same one
+                                        // clock as the gap between beats.
+                                        s_state <= half_full[~s_half] ? SS_LOAD : SS_WAIT;
+                                    end
+                                end else begin
+                                    shift_k <= shift_k + 3'd1;
+                                    s_state <= SS_LOAD;
+                                end
+                            end else begin
+                                shift_count <= shift_count + 4'd1;
+                            end
+                        end
+
+                        default: s_state <= SS_WAIT;
+                    endcase
                 end
 
                 ST_LINE_END: begin
@@ -1125,7 +1263,14 @@ module EoV19DdrReplay #(
                     end else begin
                         dbg_row <= dbg_row + 11'd1;
                         row_base_addr <= row_base_addr + ROW_STRIDE_ADDR;
-                        state <= ST_REQ;
+                        // Both engines restart at beat 0 of the new row.  The
+                        // fetch engine has already finished all BATCH_LAST+1
+                        // batches of the previous row, so no read can be in
+                        // flight against the old row_base_addr.
+                        beat_x  <= 7'd0;
+                        f_batch <= 4'd0;
+                        s_batch <= 4'd0;
+                        state   <= ST_RUN;
                     end
                 end
 

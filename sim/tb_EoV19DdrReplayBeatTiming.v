@@ -65,24 +65,35 @@ module tb_EoV19DdrReplayBeatTiming;
         run_enable <= 1'b1;
     end
 
+    // Request order is CAMERA-MAJOR: all RBATCH=8 beats of one camera before
+    // the next, so consecutive beats stay inside one DRAM row.  This check
+    // used to expect the pre-RBATCH beat-major order (one beat from each of
+    // the six cameras in turn) and had been failing since that change landed;
+    // it was stale, not a regression.
+    localparam integer RB = 8;
     integer request_count = 0;
     reg [28:0] expected_addr;
+    reg [28:0] bank_off;
+    integer cam_of, beat_of;
     always @(posedge clk) begin
-        if (!ui_rst && rd_req_valid) begin
-            case (request_count)
-                0: expected_addr = 29'd119040;
-                1: expected_addr = 29'd1155840;
-                2: expected_addr = 29'd2192640;
-                3: expected_addr = 29'd3229440;
-                4: expected_addr = 29'd1155840;
-                default: expected_addr = 29'd2192640;
+        if (!ui_rst && rd_req_valid && (request_count < 48)) begin  // ready tied high
+            cam_of  = request_count / RB;
+            beat_of = request_count % RB;
+            case (cam_of)                    // banks {0,1,2,3,1,2} as wired below
+                0: bank_off = 29'd0;
+                1: bank_off = 29'd1036800;
+                2: bank_off = 29'd2073600;
+                3: bank_off = 29'd3110400;
+                4: bank_off = 29'd1036800;
+                default: bank_off = 29'd2073600;
             endcase
+            expected_addr = bank_off + 29'd119040 + beat_of * 29'd8;
             if (rd_req_addr !== expected_addr) begin
-                $display("FAIL: request %0d expected address %0d got %0d",
-                         request_count, expected_addr, rd_req_addr);
+                $display("FAIL: request %0d (cam %0d beat %0d) expected address %0d got %0d",
+                         request_count, cam_of, beat_of, expected_addr, rd_req_addr);
                 $finish;
             end
-            if (request_count < 6)
+            if (request_count < 48)
                 request_count <= request_count + 1;
         end
     end
@@ -109,11 +120,12 @@ module tb_EoV19DdrReplayBeatTiming;
                 $display("FAIL: hsync remained high after pixel 15");
                 $finish;
             end
-            if (request_count < 6) begin
-                $display("FAIL: only %0d camera requests were observed", request_count);
+            if (request_count < 48) begin
+                $display("FAIL: only %0d requests were observed, expected a full 6x8 batch",
+                         request_count);
                 $finish;
             end
-            $display("PASS: replay used leased banks at row 124 and emitted pixels 0..15 exactly once");
+            $display("PASS: replay issued a camera-major 6x8 batch from the leased banks at row 124 and emitted pixels 0..15 exactly once");
             $finish;
         end
         if (replay_hsync0) begin
