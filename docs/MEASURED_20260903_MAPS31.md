@@ -104,3 +104,94 @@ read electrically -- only occupancy, which is consistent with more than one
 loop shape.  Distinguishing "15 copies/s" from "30 copies/s of which half
 repeat their content" needs a counter.  `V19TimingProbe` on the main branch is
 exactly that instrument and is not present in this fork.
+
+---
+
+# Correction and follow-up, same day: the EO shutter
+
+The user changed the EO camera shutter.  Re-measured, same bitstream, nothing
+else touched:
+
+| mode        | 1/15 shutter | after the change |
+|-------------|-------------:|-----------------:|
+| EO single   | 15.00        | **29.37**        |
+| EO panorama | 19.77        | **22.68**        |
+
+Both still black-frame clean (0/580 and 0/594).
+
+**The section above is wrong where it calls EO single an output-path halving
+and a regression against `00e0c57`.**  It is neither.  The descriptor rate is
+unmoved across the change -- 31.30/s before, 31.50/s after -- while the optical
+rate doubled.  So the cameras were always delivering ~31.5 frames/s; with the
+long shutter each readout was emitted **twice**, bit-identical, and the output
+published 30/s of which only 15 were distinct.
+
+`v19_capN_desc_epoch` counts frames *delivered*, not frames *different*.  It
+was used here as if it settled novelty, and it cannot.  Recorded as trap 5 in
+the rate-measurement notes.
+
+EO panorama at 22.68 matches the 22.4 measured on `00e0c57`, so the maps build
+carries no panorama regression either.
+
+# Why EO panorama is at 22.7 and not 30
+
+Not a uniform slowdown.  Of 227 intervals in a 10 s grab, **179 are exactly one
+display frame** -- the output runs at 30 fps most of the time.  The deficit is
+47 stall events, irregular (gaps 94 ms to 864 ms, median 170 ms), each costing
+1-2 extra frames; 71 frames lost in total.
+
+The render pass takes **29.8 ms of the 33.3 ms display frame** (copy_active
+67.5% at 22.68 publishes/s).  `copy_armed` permits one copy start per display
+frame, so a pass that runs even slightly long does not lose the overrun -- it
+loses a **whole** frame.  3.5 ms of margin is what produces 47 stalls.
+
+The pass is DDR-read bound, not compute bound:
+
+    copy_px_valid inside copy_active     31.2%   (EO single: 71.8%)
+    c0_ddr4_app_rdy inside copy_active   61.6%   (MIG refusing 38% of cycles)
+    replay read returns                  one beat every 3 cycles, regularly
+
+`EoV19DdrReplay` (in `src/EoV19DdrDesync.v`) is a strictly serial loop:
+
+    ST_REQ    issue 6 x RBATCH = 48 reads, two cycles each by design
+              ("drop valid for one clock after each accept")
+    ST_WAIT   block until ALL 48 have returned
+    ST_LOAD   \  8 x 17 = 136 cycles shifting the batch into the six line
+    ST_SHIFT  /  caches, with the DDR completely idle
+
+Measured 667 ui_clk cycles per 48-beat batch = 13.9 cycles/beat, of which only
+136 move pixels.  A single 2048-sample window resolves this directly: 89
+`copy_px_valid` bursts of exactly 16 cycles separated by 2-4 cycle gaps, and
+read returns spaced exactly 3 cycles apart.
+
+The reads themselves are **not** wasted.  The replay streams each camera's
+stored 1920x1080 source exactly once per pass -- 16.8 Mbeat/s measured against
+17.6 Mbeat/s for one full pass at 22.68/s.  An earlier reading of this session's
+data as "6.3x read amplification" was wrong; it assumed the stored source was
+655x480, which is the per-camera *output tile* width, not the source raster.
+
+IR panorama is untouched by this because `IR_V19_SRC_ROW_STRIDE` is 20
+beats/row against EO's 120 -- its pass is roughly 14x cheaper, which is why it
+sits comfortably at 29.4.
+
+## Levers, highest leverage first
+
+1. **Overlap fetch with shift-out.**  Double-buffer `cbuf0..5` so the next
+   batch's reads are issued while the current batch shifts.  Recovers the 136
+   idle cycles per batch.
+2. **Raise `RBATCH` from 8** to another divisor of 120 (24 gives 5 batches per
+   row).  The `ST_WAIT` latency is paid once per batch regardless of size, so a
+   bigger batch amortises it.
+3. **Remove the one-cycle request bubble** in `ST_REQ` by presenting the next
+   address combinationally.  48 cycles per batch.
+
+`LINE_PERIOD_UI` looks like a pacing knob and is not: it is declared and
+**never referenced**.  The actual pacing is `hold_for_demand`, the renderer
+pulling source rows.
+
+## The idea this replaces
+
+The plan carried into today was to overlap the next six-camera lease
+acquisition with the running render.  The ILA kills it: a full FIND sweep is
+~51 ui_clk cycles (~220 ns).  The 75% FIND occupancy that suggested it is the
+idle loop, not a stall.
