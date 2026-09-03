@@ -226,6 +226,17 @@ Trustworthy: `-trigger_now` only. `scripts/capture_v19_untriggered.tcl`, and
 `scripts/capture_v19_loop.tcl` which takes N windows in one JTAG session (this
 is what makes occupancy statistics affordable -- opening the target dominates).
 
+**A third trap, found the hard way 2026-09-04:** the optical distinct-frame
+method **under-counts in a dark room**. At 02:50 with the lab lights off (frame
+mean 1.4 against 125 in daylight) EO panorama read 13.36 fps optically while
+the electrical counter on the same build read 21.43, and the black-row count
+drifted 565..576 which the tool flags as a torn publish. Both readings are
+artefacts of a near-black scene: consecutive frames are often bit-identical, and
+most rows fall under the black threshold. This was almost reported as a second
+regression; the control that caught it was reprogramming the known-good build
+and getting the same numbers. **Prefer the electrical counter for rate, and do
+not trust an optical rate or a black-row count taken in the dark.**
+
 **Two more traps:**
 
 * `v19_px_valid` in the renderer is a **held** valid with a `px_ready`
@@ -276,7 +287,28 @@ different from what it looks like.
 
 ---
 
-## 9. The open contradiction
+## 9. The open contradiction -- PARTLY ANSWERED 2026-09-04
+
+**On the serial build the renderer is not being cut short.** First reading of
+the new diagnostics (build `6f09f05`, EO panorama):
+
+```
+frame_done count    701 -> 1111  ->  22.47 completed frames/s
+start_copy-fell     701 -> 1111  ->  22.47 passes ended/s
+highest pano_y reached since reset   479   (last content row is 479)
+pano_y when start_copy last fell     479
+```
+
+`done_count == cut_count` and the cut happens at `pano_y == 479`, so every pass
+completes and `v19_render_active` is cleared by `frame_done` at the proper end
+of the raster. 22.47 completed frames/s matches the 22.5 fps measured optically
+in daylight, so this is also a **scene-independent** measurement of the render
+rate -- see the dark-room trap in §7.
+
+The same read on the *pipelined* build is the measurement that would settle
+what went wrong there, and has not been taken.
+
+### The original contradiction, for reference
 
 On the pipelined build, `v19_render_active` was 5.0% while `copy_active` was
 27.5%. From `src/PanoramaBase_DdrBlackFrame.v` ~line 2200:
@@ -320,16 +352,42 @@ settle the first two.
    pattern for rate-decoupling here that does not need the 62-row window
    widened (BRAM is at 82%, so widening the caches is expensive)?
 
-3. **Reducing DDR read volume rather than speeding it up.** The replay streams
-   each camera's stored **1920x1080** source once per pass -- 777,600 beats,
-   measured at 16.8 Mbeat/s against 17.6 needed for one full pass, so there is
-   no waste to reclaim, only volume. The per-camera *output tile* is 655x480.
-   If the RowRun maps only reference a sub-window of the 1920x1080 source, the
-   replay could skip beats outside it. **Nobody has checked what row/column
-   span the maps actually reference** -- that is computable offline from
-   `assets/maps/eo_*` and would be the single highest-value cheap check
-   available. If the span is much smaller than the full raster, this is a large
-   win with no rate change at all, which sidesteps problem 2 entirely.
+3. **Reducing DDR read volume rather than speeding it up. MEASURED 2026-09-04
+   -- this is now the leading candidate.** The replay fetches all 120 beats of
+   every source row. Decoding `assets/maps/eo_base_{x,y}_q16.bin` (655x480
+   int32 Q16, bilinear so x..x+1 and y..y+1 both count) gives what the maps
+   actually reference:
+
+   ```
+   source rows referenced :   46 .. 1053   (1008 of 1080)
+   source cols referenced :  271 .. 1610   (1340 of 1920)
+     -> beats 16 .. 100 = 85 of 120 per row (70.8%)
+
+   beats per pass, today (rows 46..1079 x 120)      : 124080
+   beats per pass, row range + fixed beat window    :  85680  (69.1%)
+   beats per pass, row range + per-row beat window  :  84652  (68.2%)
+   ```
+
+   So **~31% of the replay's DDR reads are for source columns no map ever
+   references.** A per-row window buys almost nothing over a fixed one (68.2%
+   vs 69.1%; the per-row width is 84-85 for all but the first and last few
+   rows), so the fixed window is the right choice -- same benefit, far simpler.
+
+   The pass is ~62% ST_REQ, so if pass time tracks read volume this takes
+   ~29.8 ms to ~20.6 ms and turns 3.5 ms of margin into ~12.7 ms. That should
+   remove the 47 stalls without changing any rate or flow control, which is
+   what makes it attractive after attempt 1.
+
+   **The catch, and the bonus.** `EoV19LineCache` retires a row after WIDTH
+   accepted pixels, so fetching fewer beats requires either (a) still shifting
+   all 120 beat positions and substituting a constant for the un-fetched ones
+   -- saves only the request time, which is most of it -- or (b) narrowing
+   `EO_V19_INPUT_W` from 1920 to ~1360 with an x offset in the renderer's
+   indexing. Option (b) also **frees BRAM**: the caches are
+   6 cams x 64 lines x 1920 px x 16b = 11.8 Mbit ~ 320 tiles, ~39% of the 808
+   in use. Narrowing to 1360 saves ~93 tiles, taking BRAM from 82.1% to
+   ~72.6%. Given that BRAM placement is what makes every rebuild a coin flip
+   here, that may be worth more than the fps.
 
 4. **Freeing BRAM.** 808/984 tiles. A previously noted idea: move the EO ROM to
    96-bit records to free ~29 tiles (needs `EoV19RunRom` support). Worth doing

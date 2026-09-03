@@ -34,6 +34,7 @@ file mtime and the rate is computed across the whole set.
 
 import csv
 import glob
+import json
 import os
 import sys
 
@@ -51,27 +52,69 @@ def decode(v):
     }
 
 
-def word_from(path):
-    """Return the first signature-bearing sample in this capture, or None.
+def probe24_nets(ltx_path):
+    """probe24's nets in bit order, LSB first.
 
-    Located by signature rather than by column name: probe24 is muxed, so the
-    net Vivado names the column after is not stable across builds.
+    Vivado dissolves the probe24 mux into 64 separately-named one-bit nets, so
+    the CSV has 64 columns rather than one 64-bit column and the word has to be
+    reassembled.  The .ltx lists a probe's nets LSB first -- verified against
+    the 8'hED signature, which only resolves in that order.
+    """
+    with open(ltx_path) as fh:
+        d = json.load(fh)
+    for core in d["ltx_root"]["ltx_data"][0]["debug_cores"]:
+        if core.get("type") != "ILA_V3" or "dbg_ila_0" not in core.get("name", ""):
+            continue
+        nets = []
+        for pin in core.get("pins", []):
+            if pin.get("name") != "probe24":
+                continue
+            for n in (pin.get("nets") or []):
+                nets.append(n if isinstance(n, str) else n.get("name"))
+        if nets:
+            return nets
+    return []
+
+
+def word_from(path, nets):
+    """First signature-bearing sample in this capture, or None.
+
+    Tries the single-column form first (some builds keep probe24 whole), then
+    the reassembled per-bit form.
     """
     with open(path, newline="") as fh:
         rd = csv.reader(fh)
-        next(rd)                       # header
+        hdr = next(rd)
         next(rd)                       # radix line
-        for row in rd:
-            for cell in row:
-                cell = cell.strip()
-                if len(cell) != 16:
-                    continue
+        rows = list(rd)
+    if not rows:
+        return None
+    for row in rows:
+        for cell in row:
+            cell = cell.strip()
+            if len(cell) == 16:
                 try:
                     v = int(cell, 16)
                 except ValueError:
                     continue
                 if (v >> 56) & 0xFF == 0xED:
                     return v
+    if not nets:
+        return None
+    col = {h: i for i, h in enumerate(hdr)}
+    idx = [col.get(n) for n in nets]
+    if sum(1 for i in idx if i is None) > 0:
+        return None
+    for row in rows:
+        v = 0
+        for k, i in enumerate(idx):
+            try:
+                if int(row[i], 16) & 1:
+                    v |= 1 << k
+            except (ValueError, IndexError):
+                return None
+        if (v >> 56) & 0xFF == 0xED:
+            return v
     return None
 
 
@@ -87,9 +130,13 @@ def main():
     if not files:
         sys.exit("no capture CSVs matched")
 
+    ltx = os.environ.get("V19_LTX", "")
+    nets = probe24_nets(ltx) if ltx and os.path.exists(ltx) else []
+    if not nets:
+        print("  (set V19_LTX to the build's .ltx if the word is split per bit)")
     samples = []
     for p in files:
-        v = word_from(p)
+        v = word_from(p, nets)
         if v is not None:
             samples.append((os.path.getmtime(p), decode(v)))
 
