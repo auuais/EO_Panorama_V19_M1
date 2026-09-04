@@ -1529,9 +1529,12 @@ module PanoramaBase_DdrBlackFrame(
     // commits on frame_edge, and copy_bank_available keeps the scanned and
     // pending banks out of reach, so a third copy cannot start until a commit
     // frees a bank.
-    wire v19_panorama_copy = (SRC_SEL == SRC_V19) &&
-                             !ir_single_ui && !eo_single_ui && !ir_stack_ui;
-    wire copy_arm_ok = v19_panorama_copy ? 1'b1 : (copy_armed || frame_edge);
+    // Reuses v19_panorama_consuming rather than rebuilding the same three mode
+    // terms: this sits on the copy-start path, and the first cut of this change
+    // duplicated the expression and came back at WNS -0.385 with 736 failing
+    // endpoints on ui_clk.
+    wire copy_arm_ok = (SRC_SEL == SRC_V19) && v19_panorama_consuming
+                       ? 1'b1 : (copy_armed || frame_edge);
     wire copy_start_accept = copy_start_trig && !copy_active && copy_arm_ok &&
                              copy_bank_available && !backend_transition_block;
 
