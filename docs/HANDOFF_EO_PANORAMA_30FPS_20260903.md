@@ -779,3 +779,82 @@ the pass there is 62% ST_REQ. Expect roughly 29.8 ms -> 25 ms, i.e. margin
 frame_done rate, the ownership invariant, and the optical rate together. The
 frame_done rate is the verdict; see the dark-room trap in section 7 for why the
 optical number cannot be.
+
+---
+
+## 19. SOLVED, 2026-09-04: EO panorama at 29.97 fps
+
+Build `builds/bit_archive/20260904_133759_wrwindow_c83e29d/`, `Explore`,
+WNS 0.000 / WHS +0.010 / WPWS +0.099, zero failing endpoints.
+
+| mode | distinct frames/s | black frames |
+|---|---:|---|
+| **EO panorama** | **29.97** | 0/598 |
+| IR panorama | 29.70 | 0/474 |
+| IR single | 29.95 | 0/477 |
+| EO single | 29.95 | 0/477 |
+
+EO panorama's electrical `frame_done` counter and the optical distinct-frame
+count agree exactly at 29.97, with run lengths `2x297` at a 60 fps grab. The
+ownership invariant holds (`copy_active && !lease` 0.0%, zero unowned windows),
+black rows are a constant 128, and the picture is clean.
+
+### The constraint was descriptor supply, not render speed
+
+The DDR **write** path delivers 22.3 Mbeat/s. Six cameras at 30 fps need
+23.3 Mbeat/s, and 27.2 with the output frame -- about 18% short. Cameras could
+not all publish every frame, so their descriptor rings ran dry and the
+frame-set manager stalled waiting for an epoch common to all six. "At least one
+ring empty" tracked the frame rate inversely across every build measured:
+
+```
+original serial   52.5% empty -> 22.68 fps
+diagnostics       50.0% empty -> 22.47 fps
+lease + fetch win 64.3% empty -> 19.91 fps
++ arm removed     71.4% empty -> 18.47 fps
++ write window     -           -> 29.97 fps
+```
+
+Which camera was empty rotated between captures, matching round-robin
+capture-write ordering rather than a defective camera.
+
+This is why every render-side optimisation made things *worse*: a faster render
+consumes a set sooner, which drains the rings sooner.
+
+### What actually fixed it
+
+The write-side twin of the replay fetch window. The EO maps address source
+columns 271..1610 and rows 46..1053, so beats outside 16..103 and rows outside
+46..1053 were being written and never read. Not writing them takes capture
+writes to 68%, about 15.9 Mbeat/s, which fits.
+
+It needs no addressing change anywhere, because the replay's own fetch window
+already skips exactly those beats. The window is parameterised and defaults to
+storing everything, since `EoV19DdrCamWriter` is shared with the IR path, whose
+rows are 20 beats rather than 120.
+
+### Which of the four changes each earned
+
+* **Fix 1 (lease retired at `consumer_done` + consumer one-shot)** -- required
+  for correctness. `copy_active && !lease` went from 20-25% of samples to 0.0%.
+  On its own it *cost* ~2.5 fps, because the stale-lease reuse had been masking
+  the supply problem.
+* **Fix 2 (replay fetch window)** -- cut the pass from 29.8 ms to 17.9 ms.
+  Necessary but not sufficient; on its own it did not raise the rate.
+* **Fix 4 (drop the display-edge arm)** -- no measurable effect. The
+  phase-quantisation theory behind it was wrong. Kept because it is harmless and
+  the one-shot makes the arm redundant for the panorama, but it earned nothing.
+* **Fix 5 (write window)** -- the fix. Everything else was preparation.
+
+### Corrections to earlier sections
+
+* Section 17's expectation that Fix 2 alone would reach 30 fps was wrong; it is
+  a read-side fix and the constraint was on the write side.
+* My `copy_armed` phase-quantisation diagnosis (50.2 ms = 1.5 display frames)
+  was a real observation with the wrong cause.
+* My release-sweep timeout theory was wrong: `release_timeout_seen` is clear and
+  `free_ready` is `111111` throughout.
+* `dbg_state` clamps every state >= 16 to `0xF` rather than truncating. I first
+  read state 15 as frontier/reclaim activity; decoded properly it is
+  `FIND_CAM0(35)`, and the manager was running a plain FIND sweep that failed
+  over and over.
