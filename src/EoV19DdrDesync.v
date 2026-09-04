@@ -31,7 +31,29 @@ module EoV19DdrCamWriter #(
     // queue.  Stop admitting a new frame at a frame boundary when half the
     // queue is occupied, leaving the other half as burst/stall margin.
     parameter integer FIFO_PROG_FULL_THRESH = FIFO_WRITE_DEPTH / 2,
-    parameter integer EPOCH_W = 16
+    parameter integer EPOCH_W = 16,
+    // Store only the part of the raster the renderer can address.
+    //
+    // Six cameras at 30 fps need 6 x 129600 beats/s = 23.3 Mbeat/s of DDR
+    // writes, and with the output frame 27.2 Mbeat/s in total.  The write path
+    // was measured on hardware 2026-09-04 delivering 22.3 Mbeat/s -- about 18%
+    // short.  Cameras therefore cannot all publish every frame, their
+    // descriptor rings run dry, and the frame-set manager stalls waiting for a
+    // common epoch: "at least one ring empty" measured 52-71% of samples, and
+    // EO panorama's rate tracks that figure across every build.
+    //
+    // The EO maps only address source columns 271..1610 and rows 46..1053, so
+    // beats outside 16..103 and rows outside 46..1053 are written and never
+    // read.  Skipping them cuts capture writes to 68% -- 15.9 Mbeat/s, which
+    // fits.  No addressing changes anywhere: the replay's own fetch window
+    // already skips exactly these beats, so nothing reads what is not written.
+    //
+    // Defaults store everything, which is what the IR path needs -- its rows
+    // are 20 beats, not 120, so the EO window must never be applied to it.
+    parameter [6:0]  WR_BEAT_LO = 7'd0,
+    parameter [6:0]  WR_BEAT_HI = 7'd127,
+    parameter [10:0] WR_ROW_LO  = 11'd0,
+    parameter [10:0] WR_ROW_HI  = 11'd2047
 ) (
     input  wire        rst_n,
     input  wire        capture_enable,
@@ -109,6 +131,12 @@ module EoV19DdrCamWriter #(
     reg [10:0] pix_x;
     localparam integer PIX_PER_BEAT = 256 / PIX_W;      // 16 (EO) or 32 (IR)
     localparam integer PACK_CW = (PIX_PER_BEAT == 32) ? 5 : 4;
+    // Beat index within the row is pix_x/PIX_PER_BEAT, evaluated on the cycle
+    // the beat completes.
+    wire [6:0] wr_beat_idx = (PIX_PER_BEAT == 32) ? pix_x[10:5] : pix_x[10:4];
+    wire beat_in_write_window = (wr_beat_idx >= WR_BEAT_LO) &&
+                                (wr_beat_idx <= WR_BEAT_HI) &&
+                                (row_y >= WR_ROW_LO) && (row_y <= WR_ROW_HI);
     reg [PACK_CW-1:0] pack_count;
     reg [28:0] row_base_addr;
     reg [28:0] beat_addr;
@@ -485,7 +513,13 @@ module EoV19DdrCamWriter #(
                     // runaway the line_end guard above stops: never emit a
                     // payload beat whose address is outside the bank this
                     // writer actually owns, whatever the raster does.
-                    if (!fifo_full && beat_in_bank) begin
+                    if (!beat_in_write_window) begin
+                        // Outside the window the renderer can address: the
+                        // beat is simply not stored.  Not a drop -- the frame
+                        // is complete as far as anything that reads it is
+                        // concerned, and beat_addr still advances below so
+                        // every stored beat keeps its usual address.
+                    end else if (!fifo_full && beat_in_bank) begin
                         fifo_wr_en <= 1'b1;
                         fifo_din <= {beat_addr, 1'b0, 2'd0,
                                      {EPOCH_W{1'b0}}, pack_buf_next};

@@ -1755,7 +1755,9 @@ module PanoramaBase_DdrBlackFrame(
         wire [10:0] irv19_source_need_row;
         wire [10:0] irv19_source_start_row;
 
-        EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 0))) u_v19_cap0 (
+        EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 0)),
+                                  .WR_BEAT_LO(7'd16), .WR_BEAT_HI(7'd103),
+                                  .WR_ROW_LO(11'd46), .WR_ROW_HI(11'd1053)) u_v19_cap0 (
             .rst_n(rst_n), .capture_enable(running && !ir_stack_ui),
             .join_enable(v19_join_enable[0]),
             .cap_fifo_rst_req(v19_cap_fifo_rst[0]),
@@ -1773,7 +1775,9 @@ module PanoramaBase_DdrBlackFrame(
             .desc_epoch_ui(v19_cap0_desc_epoch), .fifo_overflow_seen_ui(v19_cap0_overflow),
             .fifo_level_ui(v19_cap0_level), .dbg_row_ui(v19_cap0_row),
             .dbg_writer_ui(v19_dbg_writer0));
-        EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 1))) u_v19_cap1 (
+        EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 1)),
+                                  .WR_BEAT_LO(7'd16), .WR_BEAT_HI(7'd103),
+                                  .WR_ROW_LO(11'd46), .WR_ROW_HI(11'd1053)) u_v19_cap1 (
             .rst_n(rst_n), .capture_enable(running && !ir_stack_ui),
             .join_enable(v19_join_enable[1]),
             .cap_fifo_rst_req(v19_cap_fifo_rst[1]),
@@ -1791,7 +1795,9 @@ module PanoramaBase_DdrBlackFrame(
             .desc_epoch_ui(v19_cap1_desc_epoch), .fifo_overflow_seen_ui(v19_cap1_overflow),
             .fifo_level_ui(v19_cap1_level), .dbg_row_ui(v19_cap1_row),
             .dbg_writer_ui(v19_dbg_writer1));
-        EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 2))) u_v19_cap2 (
+        EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 2)),
+                                  .WR_BEAT_LO(7'd16), .WR_BEAT_HI(7'd103),
+                                  .WR_ROW_LO(11'd46), .WR_ROW_HI(11'd1053)) u_v19_cap2 (
             .rst_n(rst_n), .capture_enable(running && !ir_stack_ui),
             .join_enable(v19_join_enable[2]),
             .cap_fifo_rst_req(v19_cap_fifo_rst[2]),
@@ -1809,7 +1815,9 @@ module PanoramaBase_DdrBlackFrame(
             .desc_epoch_ui(v19_cap2_desc_epoch), .fifo_overflow_seen_ui(v19_cap2_overflow),
             .fifo_level_ui(v19_cap2_level), .dbg_row_ui(v19_cap2_row),
             .dbg_writer_ui(v19_dbg_writer2));
-        EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 3))) u_v19_cap3 (
+        EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 3)),
+                                  .WR_BEAT_LO(7'd16), .WR_BEAT_HI(7'd103),
+                                  .WR_ROW_LO(11'd46), .WR_ROW_HI(11'd1053)) u_v19_cap3 (
             .rst_n(rst_n), .capture_enable(running && !ir_stack_ui),
             .join_enable(v19_join_enable[3]),
             .cap_fifo_rst_req(v19_cap_fifo_rst[3]),
@@ -1827,7 +1835,9 @@ module PanoramaBase_DdrBlackFrame(
             .desc_epoch_ui(v19_cap3_desc_epoch), .fifo_overflow_seen_ui(v19_cap3_overflow),
             .fifo_level_ui(v19_cap3_level), .dbg_row_ui(v19_cap3_row),
             .dbg_writer_ui(v19_dbg_writer3));
-        EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 4))) u_v19_cap4 (
+        EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 4)),
+                                  .WR_BEAT_LO(7'd16), .WR_BEAT_HI(7'd103),
+                                  .WR_ROW_LO(11'd46), .WR_ROW_HI(11'd1053)) u_v19_cap4 (
             .rst_n(rst_n), .capture_enable(running && !ir_stack_ui),
             .join_enable(v19_join_enable[4]),
             .cap_fifo_rst_req(v19_cap_fifo_rst[4]),
@@ -1845,7 +1855,9 @@ module PanoramaBase_DdrBlackFrame(
             .desc_epoch_ui(v19_cap4_desc_epoch), .fifo_overflow_seen_ui(v19_cap4_overflow),
             .fifo_level_ui(v19_cap4_level), .dbg_row_ui(v19_cap4_row),
             .dbg_writer_ui(v19_dbg_writer4));
-        EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 5))) u_v19_cap5 (
+        EoV19DdrCamWriter #(.CAM_BASE_ADDR(V19_SRC_BASE_ADDR + (V19_SRC_CAM_STRIDE * 5)),
+                                  .WR_BEAT_LO(7'd16), .WR_BEAT_HI(7'd103),
+                                  .WR_ROW_LO(11'd46), .WR_ROW_HI(11'd1053)) u_v19_cap5 (
             .rst_n(rst_n), .capture_enable(running && !ir_stack_ui),
             .join_enable(v19_join_enable[5]),
             .cap_fifo_rst_req(v19_cap_fifo_rst[5]),
